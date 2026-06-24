@@ -1,0 +1,13 @@
+_base_: xattn_clean_coco_stuff.yml
+
+method_name: Talk2DINO_XAttnBridge_Clean
+
+evaluate:
+  pamr: false
+  template: sub_imagenet_template
+  task:
+    - coco_stuff
+  coco_stuff: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/stuff.py
+
+postprocess:
+  mode: none

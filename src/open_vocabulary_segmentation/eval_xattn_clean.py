@@ -1,0 +1,299 @@
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+import torch
+import torch.nn as nn
+import torch.distributed as dist
+import torch.nn.functional as F
+from omegaconf import OmegaConf
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "models"))
+sys.path.insert(0, os.path.dirname(__file__))
+from xattn_bridge_clean import (
+    METHOD_NAME,
+    build_eval_loader,
+    build_coco_stuff_eval_dataset,
+    build_frozen_talk2dino,
+    load_bridge_from_checkpoint,
+    load_clean_config,
+)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(METHOD_NAME + " evaluation")
+    parser.add_argument("--config", required=True)
+    parser.add_argument(
+        "--features",
+        default=None,
+        help="Cached eval feature directory. Required only with --cached_fast_eval.",
+    )
+    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--opts", nargs="+", default=None)
+    parser.add_argument(
+        "--cached_fast_eval",
+        action="store_true",
+        help=(
+            "Use the fast cached evaluator instead of official slide-inference parity. "
+            "Fast cached numbers are useful for development but are not directly comparable "
+            "to official Talk2DINO E0."
+        ),
+    )
+    return parser.parse_args()
+
+
+def load_all_eval_samples(feature_dir):
+    feature_dir = Path(feature_dir)
+    with open(feature_dir / "manifest.json", "r") as f:
+        manifest = json.load(f)
+    samples = []
+    cache = {}
+    for item in manifest["index"]:
+        shard_name = item["shard"]
+        if shard_name not in cache:
+            cache[shard_name] = torch.load(
+                feature_dir / shard_name,
+                map_location="cpu",
+                weights_only=False,
+            )
+        samples.append(cache[shard_name]["samples"][item["offset"]])
+    return manifest, samples
+
+
+@torch.no_grad()
+def build_class_embeddings(model, cfg, classnames, device):
+    text_tokens = model.build_dataset_class_tokens(cfg.evaluate.template, classnames)
+    text_tokens = text_tokens.to(device)
+    num_classes, num_templates = text_tokens.shape[:2]
+    text = text_tokens.reshape(num_classes * num_templates, -1)
+    chunks = []
+    for i in range(0, text.shape[0], 32):
+        chunks.append(model.encode_text(text[i:i + 32]).float())
+    clip_emb = torch.cat(chunks, dim=0).reshape(num_classes, num_templates, -1).mean(dim=1)
+    base_emb = model._frozen_base_text_to_dino(clip_emb)
+    return clip_emb.float(), base_emb.float()
+
+
+def intersect_and_union(pred, gt, num_classes, ignore_index):
+    mask = gt != ignore_index
+    pred = pred[mask]
+    gt = gt[mask]
+    intersect = pred[pred == gt]
+    area_intersect = torch.histc(intersect.float(), bins=num_classes, min=0, max=num_classes - 1)
+    area_pred = torch.histc(pred.float(), bins=num_classes, min=0, max=num_classes - 1)
+    area_gt = torch.histc(gt.float(), bins=num_classes, min=0, max=num_classes - 1)
+    area_union = area_pred + area_gt - area_intersect
+    return area_intersect, area_union
+
+
+class CleanOfficialEvalModel(nn.Module):
+    def __init__(self, frozen, bridge, class_clip, class_base):
+        super().__init__()
+        self.frozen = frozen
+        self.bridge = bridge
+        self.register_buffer("class_clip", class_clip.float())
+        self.register_buffer("class_base", class_base.float())
+
+    def __getattr__(self, name):
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return getattr(self.frozen, name)
+
+    @torch.no_grad()
+    def generate_masks(
+        self,
+        image,
+        img_metas,
+        text_emb,
+        classnames,
+        text_is_token=False,
+        apply_pamr=False,
+        background_func="weighted_average_sigmoid",
+        lambda_bg=0.2,
+        return_sg_inputs=False,
+    ):
+        H, W = image.shape[2:]
+        pH, pW = image.shape[2:]
+        image = image[:, [2, 1, 0], :, :]
+        ori_image = image.clone()
+        img_preprocessed = self.frozen.image_transforms(image).to(next(self.frozen.parameters()).device)
+        if "dinov2" in self.frozen.model_name:
+            image_feat = self.frozen.model.forward_features(img_preprocessed)["x_norm_patchtokens"]
+        elif "dinov3" in self.frozen.model_name:
+            image_feat = self.frozen.model.forward_features(img_preprocessed)[:, 5:, :]
+        else:
+            image_feat = self.frozen.model.forward_features(img_preprocessed)[:, 1:, :]
+
+        batch_size, num_tokens, embed_dim = image_feat.shape
+        mapped_text = self.bridge(
+            self.class_clip.to(image_feat.device),
+            image_feat,
+            self.class_base.to(image_feat.device),
+        )
+        if mapped_text.dim() == 3:
+            mapped_text = mapped_text[0]
+
+        b, npatches, channels = image_feat.shape
+        grid = int(npatches ** 0.5)
+        image_feat = image_feat.reshape(b, grid, grid, channels).permute(0, 3, 1, 2)
+        self_attn, self_attn_maps = self.frozen.process_self_attention(
+            self.frozen.feats["self_attn"],
+            batch_size,
+            num_tokens + self.frozen.num_global_tokens,
+            self.frozen.num_attn_heads,
+            embed_dim,
+            self.frozen.scale,
+            self.frozen.num_global_tokens,
+            ret_self_attn_maps=True,
+        )
+        mask, simmap = self.frozen.masker.forward_seg(image_feat, mapped_text, hard=False)
+        if getattr(self.frozen, "with_bg_clean", False):
+            mask = self.frozen.similarity_assignment_weighted(
+                mask,
+                image_feat,
+                self_attn_maps,
+                mapped_text,
+                lambda_bg,
+            )
+        mask = F.interpolate(mask, (pH, pW), mode="bilinear", align_corners=True)
+        if apply_pamr:
+            for c in range(0, mask.shape[1], 30):
+                mask[:, c:c + 30] = self.frozen.apply_pamr(ori_image, mask[:, c:c + 30])
+        assert mask.shape[2] == H and mask.shape[3] == W
+        if return_sg_inputs:
+            return mask, simmap, image_feat
+        return mask, simmap
+
+
+@torch.no_grad()
+def official_parity_eval(args, cfg, device):
+    from segmentation.evaluation.dinotext_seg import DINOTextSegInference
+    import mmcv
+    import us
+
+    frozen = build_frozen_talk2dino(cfg, device)
+    dataset = build_coco_stuff_eval_dataset(cfg)
+    loader = build_eval_loader(dataset, cfg)
+    classnames = dataset.CLASSES
+    with_bg = classnames[0] == "background"
+    eval_classnames = classnames[1:] if with_bg else classnames
+    class_clip, class_base = build_class_embeddings(frozen, cfg, eval_classnames, device)
+    bridge, payload = load_bridge_from_checkpoint(args.checkpoint, cfg, device)
+    wrapped = CleanOfficialEvalModel(frozen, bridge, class_clip, class_base).to(device)
+    dset_cfg = mmcv.Config.fromfile(cfg.evaluate.coco_stuff)
+    seg_model = DINOTextSegInference(
+        wrapped,
+        class_base,
+        eval_classnames,
+        with_bg=with_bg,
+        test_cfg=dset_cfg.test_cfg,
+        pamr=bool(cfg.evaluate.pamr),
+        bg_thresh=float(cfg.evaluate.get("bg_thresh", 0.4)),
+        sg_gate={"enabled": False},
+    ).to(device)
+    seg_model.eval()
+    results, _, _, _ = us.multi_gpu_test(
+        model=seg_model,
+        data_loader=loader,
+        tmpdir=None,
+        gpu_collect=device == "cuda",
+        efficient_test=False,
+        pre_eval=True,
+        format_only=False,
+        show_progress=bool(cfg.evaluate.get("show_progress", True)),
+        progress_log_interval=int(cfg.evaluate.get("progress_log_interval", 0)),
+        diagnostic_ignore_eval=True,
+    )
+    metric = dataset.evaluate(results, logger=None)
+    miou = float(metric["mIoU"] * 100)
+    return miou, payload
+
+
+def main():
+    args = parse_args()
+    cfg = load_clean_config(args.config, args.opts)
+    if args.cached_fast_eval and not args.features:
+        raise ValueError("--features is required when --cached_fast_eval is used")
+    if dist.is_available() and not dist.is_initialized():
+        dist.init_process_group("nccl" if torch.cuda.is_available() else "gloo")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    out = Path(args.output)
+    out.mkdir(parents=True, exist_ok=True)
+
+    if not args.cached_fast_eval:
+        print("Eval mode: official Talk2DINO slide-inference parity", flush=True)
+        print("Cached eval features are not used for prediction in this mode.", flush=True)
+        miou, payload = official_parity_eval(args, cfg, device)
+        print("=" * 64, flush=True)
+        print("EVALUATION RESULTS", flush=True)
+        print("=" * 64, flush=True)
+        print(f"Mode                 : {METHOD_NAME} official parity", flush=True)
+        print(f"coco_stuff mIoU      : {miou:.2f}%", flush=True)
+        with open(out / "summary.json", "w") as f:
+            json.dump({
+                "method_name": METHOD_NAME,
+                "eval_mode": "official_talk2dino_slide_parity",
+                "official_comparable_to_talk2dino_e0": True,
+                "cached_features_used_for_prediction": False,
+                "pamr": bool(cfg.evaluate.pamr),
+                "checkpoint": args.checkpoint,
+                "checkpoint_epoch": payload.get("epoch"),
+                "coco_stuff_miou": miou,
+            }, f, indent=2)
+        return
+
+    frozen = build_frozen_talk2dino(cfg, device)
+    dataset = build_coco_stuff_eval_dataset(cfg)
+    print("Eval mode: cached fast eval, not official parity", flush=True)
+    classnames = dataset.CLASSES
+    clip_cls, base_cls = build_class_embeddings(frozen, cfg, classnames, device)
+    bridge, payload = load_bridge_from_checkpoint(args.checkpoint, cfg, device)
+    manifest, samples = load_all_eval_samples(args.features)
+
+    num_classes = len(classnames)
+    total_inter = torch.zeros(num_classes)
+    total_union = torch.zeros(num_classes)
+    for idx, sample in enumerate(samples):
+        patches = sample["patch_tokens"].unsqueeze(0).to(device).float()
+        mapped = bridge(clip_cls, patches, base_cls).float()
+        mapped = F.normalize(mapped, dim=-1)
+        patch_norm = F.normalize(patches, dim=-1)
+        logits = torch.einsum("bnd,cd->bcn", patch_norm, mapped)
+        n = logits.shape[-1]
+        h = w = int(n ** 0.5)
+        logits = logits[:, :, : h * w].reshape(1, num_classes, h, w)
+        gt = sample["gt"].long()
+        logits = F.interpolate(logits, size=tuple(gt.shape), mode="bilinear", align_corners=False)
+        pred = logits.argmax(dim=1)[0].cpu()
+        inter, union = intersect_and_union(pred, gt, num_classes, int(dataset.ignore_index))
+        total_inter += inter
+        total_union += union
+        if idx % 50 == 0:
+            print(f"Eval {idx}/{len(samples)}", flush=True)
+
+    iou = total_inter / total_union.clamp_min(1)
+    miou = float(torch.nanmean(iou) * 100.0)
+    print("=" * 64, flush=True)
+    print("EVALUATION RESULTS", flush=True)
+    print("=" * 64, flush=True)
+    print(f"Mode                 : {METHOD_NAME}", flush=True)
+    print(f"coco_stuff mIoU      : {miou:.2f}%", flush=True)
+    with open(out / "summary.json", "w") as f:
+        json.dump({
+            "method_name": METHOD_NAME,
+            "eval_mode": "cached_fast_eval_not_official_parity",
+            "official_comparable_to_talk2dino_e0": False,
+            "cached_features_used_for_prediction": True,
+            "pamr": bool(cfg.evaluate.pamr),
+            "checkpoint": args.checkpoint,
+            "checkpoint_epoch": payload.get("epoch"),
+            "coco_stuff_miou": miou,
+        }, f, indent=2)
+
+
+if __name__ == "__main__":
+    main()

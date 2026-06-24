@@ -1,0 +1,81 @@
+method_name: Talk2DINO_XAttnBridge_Clean
+
+data:
+  batch_size: 64
+  num_workers: 16
+  pin_memory: true
+  prefetch_factor: 1
+  shard_cache_size: 2
+  preload_cache: false
+  persistent_workers: false
+  features_name: disentangled_self_attn
+  text_features: ann_feats
+  mmap_features: false
+  train_ann_path: /scratch/haree/talk2dino_features/coco_stuff2017_vitb/train.pth
+  train_image_dir: /scratch/haree/coco_stuff164k/images/train2017
+
+model:
+  type: DINOText
+  model_name: dinov2_vitb14_reg
+  resize_dim: 448
+  backbone_weights: /scratch/haree/weights/dinov2_vitb14_reg4_pretrain.pth
+  clip_model_name: ViT-B/16
+  clip_model_path: /scratch/haree/weights/ViT-B-16.pt
+  proj_class: vitb_mlp_infonce
+  proj_model: ProjectionLayer
+  proj_name: vitb_mlp_infonce
+  pre_trained: true
+  use_avg_text_token: false
+  keep_cls: false
+  keep_end_seq: false
+
+bridge:
+  clip_dim: 512
+  dino_dim: 768
+  d_model: 256
+  num_heads: 4
+  num_layers: 1
+  dropout: 0.0
+  residual_gamma_init: 0.01
+  residual_gamma_max: 0.05
+  clamp_delta_base_ratio: 0.10
+
+xattn_safety:
+  enabled: true
+  max_delta_base_ratio: 0.05
+  delta_l2_weight: 0.001
+  ratio_penalty_weight: 0.01
+  min_base_mapped_cosine: 0.95
+  cosine_penalty_weight: 0.01
+  stop_if_ratio_above: 0.30
+  warn_if_ratio_above: 0.20
+
+extract:
+  batch_size: 64
+  shard_size: 500
+  max_items: null
+
+train:
+  epochs: 100
+  batch_size: 64
+  max_batches: null
+  auto_resume: true
+  resume: null
+  progress_interval: 10
+  shuffle: true
+  lr: 1.0e-4
+  min_lr: 1.0e-6
+  weight_decay: 0.01
+  fp16: true
+  save_every: 10
+  max_train_hours: 8
+
+evaluate:
+  pamr: false
+  template: sub_imagenet_template
+  task:
+    - coco_stuff
+  coco_stuff: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/stuff.py
+
+postprocess:
+  mode: none

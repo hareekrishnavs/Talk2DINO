@@ -1,0 +1,13 @@
+git+https://github.com/openai/CLIP.git
+matplotlib
+pyyaml
+requests
+scikit-image
+tqdm
+omegaconf
+einops
+timm
+transformers
+webdataset
+numpy
+opencv-python-headless

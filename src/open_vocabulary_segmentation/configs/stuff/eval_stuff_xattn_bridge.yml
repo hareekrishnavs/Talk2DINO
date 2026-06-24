@@ -1,0 +1,89 @@
+evaluate:
+  pamr: false
+  bg_thresh: 0.4
+  kp_w: 0.3
+  eval_only: true
+  show_progress: true
+  progress_log_interval: 50
+  log_startup_details: false
+  template: sub_imagenet_template
+  task:
+    - coco_stuff
+  coco_stuff: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/stuff.py
+
+postprocess:
+  mode: none
+
+sg_gate:
+  enabled: false
+  ablation_mode: full_e1_e2_e3
+  debug_force_raw_output: false
+  debug_force_raw_apply_pamr: false
+  sg_path_raw_baseline_miou: 27.95
+  cluster_method: connected_components
+  compute_dense_affinity: false
+  use_spectral_clustering: false
+  e0_no_pamr_miou: 28.13
+  e0_pamr_miou: 30.20
+  sg_no_pamr_best_miou: 28.35
+  sg_full_soft_pamr_best_miou: 30.47
+  sg_path_raw_pamr_miou: 30.12
+  e1_seed_only_pamr_miou: 30.44
+  full_sg_soft_pamr_miou: 30.47
+  shuffle_prior:
+    enabled: false
+    mode: class_permutation
+    seed: 42
+  random_prior:
+    enabled: false
+    mode: matched_seed_density
+    seed: 42
+    match_density_source: seed_only
+  seed_overlap_clusters:
+    min_seed_overlap: 0.01
+  raw_fallback:
+    enabled: true
+    min_area_ratio: 0.60
+    max_area_ratio: 1.60
+    min_agreement_iou: 0.35
+    min_raw_area_pixels: 16
+    allow_sg_when_raw_empty: false
+    fallback_if_sg_empty: true
+    fallback_if_raw_empty_and_no_anchor: true
+  dense_raw_fallback:
+    enabled: true
+  soft_reweight:
+    enabled: false
+    disable_hard_overwrite: true
+    lambda_boost: 0.10
+    topk_guard: 5
+    margin_guard: 0.05
+    normalize_prior: true
+    score_scale: std
+    candidate_source: trusted_clusters
+    min_soft_gate_score: 0.35
+    require_semantic_anchor: true
+    raw_support_topk: 5
+    min_cluster_raw_topk_support: 0.10
+    guard_mode: current_or
+    uncertainty_margin: 0.03
+    apply_pamr_after_soft: false
+    only_trusted_clusters: false
+  alignment_audit:
+    enabled: true
+    max_logged_examples: 0
+    save_debug_images: false
+    save_debug_tensors: false
+  top_percent: 3.0
+  tau_edge: 0.55
+  max_clusters: 16
+  min_cluster_area: 8
+  score_anchor_threshold: 0.30
+  tau_pos_thing: 0.45
+  tau_ignore_thing: 0.30
+  tau_pos_stuff: 0.35
+  tau_ignore_stuff: 0.22
+  use_scratch_cache: false
+  scratch_cache_dir: null
+  strict_eval: true
+  diagnostic_ignore_eval: false

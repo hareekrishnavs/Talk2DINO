@@ -1,0 +1,139 @@
+_base_: default.yml
+
+model_name: talk2dino_xattn_bridge
+
+data:
+  batch_size: 64
+  num_workers: 8
+  pin_memory: true
+  train_ann_path: coco/train.json
+  train_image_dir: coco/train2014
+
+xattn_bridge:
+  enabled: true
+  type: text_queries_dino
+  d_model: 256
+  num_heads: 4
+  num_layers: 1
+  dropout: 0.0
+  use_residual_mlp: true
+  gamma_init: 1.0
+  freeze_clip: true
+  freeze_dino: true
+  train_bridge_only: true
+  normalize_text: true
+  normalize_patches: true
+  debug_base_only: false
+  force_gamma_zero: false
+  disable_correction: false
+  debug_compare_base_projection: false
+  debug_tensor_parity: false
+  hard_return_base: false
+  safe_init: true
+  zero_init_out_proj: true
+  normalize_correction: true
+  correction_ratio_clamp: true
+  max_correction_base_ratio: 0.05
+  base_source: original_talk2dino_proj
+  gamma_max: null
+  correction_ratio_warn: 0.20
+  correction_ratio_stop: null
+
+model:
+  type: DINOText
+  model_name: dinov2_vitb14_reg
+  resize_dim: 448
+  backbone_weights: /scratch/haree/weights/dinov2_vitb14_reg4_pretrain.pth
+  clip_model_name: ViT-B/16
+  clip_model_path: /scratch/haree/weights/ViT-B-16.pt
+  proj_class: vitb_mlp_infonce
+  proj_model: ProjectionLayer
+  proj_name: vitb_mlp_infonce
+  pre_trained: true
+  use_avg_text_token: false
+  keep_cls: false
+  keep_end_seq: false
+  xattn_bridge:
+    enabled: true
+    type: text_queries_dino
+    d_model: 256
+    num_heads: 4
+    num_layers: 1
+    dropout: 0.0
+    use_residual_mlp: true
+    gamma_init: 1.0
+    freeze_clip: true
+    freeze_dino: true
+    train_bridge_only: true
+    normalize_text: true
+    normalize_patches: true
+    debug_base_only: false
+    force_gamma_zero: false
+    disable_correction: false
+    debug_compare_base_projection: false
+    debug_tensor_parity: false
+    hard_return_base: false
+    safe_init: true
+    zero_init_out_proj: true
+    normalize_correction: true
+    correction_ratio_clamp: true
+    max_correction_base_ratio: 0.05
+    base_source: original_talk2dino_proj
+    gamma_max: null
+    correction_ratio_warn: 0.20
+    correction_ratio_stop: null
+
+train:
+  total_steps: 50000
+  warmup_steps: 1000
+  base_lr: 1.0e-4
+  weight_decay: 0.01
+  min_lr: 1.0e-6
+  clip_grad: 1.0
+  accum_freq: 1
+  fp16: true
+  fp16_comm: true
+  seed: 42
+  auto_resume: true
+  save_every_steps: 1000
+  debug_one_step: false
+  max_steps: null
+  max_train_hours: 8
+  hard_stop_hours: 10
+  lr_scheduler:
+    name: cosine
+  optimizer:
+    name: adamw
+    eps: 1.0e-8
+    betas: [0.9, 0.999]
+
+evaluate:
+  pamr: false
+  bg_thresh: 0.4
+  kp_w: 0.3
+  eval_only: false
+  eval_during_training: false
+  show_progress: true
+  progress_log_interval: 50
+  log_startup_details: false
+  template: sub_imagenet_template
+  task:
+    - coco_stuff
+  coco_stuff: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/stuff.py
+
+postprocess:
+  mode: none
+
+sg_gate:
+  enabled: false
+  soft_reweight:
+    enabled: false
+    disable_hard_overwrite: true
+    candidate_source: trusted_clusters
+    lambda_boost: 0.10
+    topk_guard: 5
+    margin_guard: 0.05
+    guard_mode: current_or
+    normalize_prior: true
+    score_scale: std
+    apply_pamr_after_soft: false

@@ -1,0 +1,31 @@
+.agents
+.codex
+assets/
+data/
+features/
+outputs/
+output/
+segmentation_results/
+weights/
+codex_session_019ecc3f-0514-7270-aad9-c48329bf9f93_full_chat.txt
+# Virtual environments
+venv/
+ENV/
+.env
+
+# Compute Canada / Slurm specific
+*.out
+*.err
+slurm-*.out
+
+# Data and Checkpoints (CRITICAL: Do not commit large files)
+data/
+*.csv
+*.h5
+*.hdf5
+*.pt
+*.pth
+checkpoints/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
