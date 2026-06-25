@@ -47,11 +47,15 @@ bridge:
 
 xattn_safety:
   enabled: true
-  max_delta_base_ratio: 0.05
   delta_l2_weight: 0.001
-  ratio_penalty_weight: 0.01
-  min_base_mapped_cosine: 0.95
+  ratio_target: 0.07
+  ratio_penalty_weight: 0.02
+  min_base_mapped_cosine: 0.98
   cosine_penalty_weight: 0.01
+  attn_prior_weight: 0.01
+  attn_prior_temperature: 0.07
+  patch_preserve_weight: 0.005
+  patch_preserve_temperature: 0.5
   stop_if_ratio_above: 0.30
   warn_if_ratio_above: 0.20
 
@@ -69,6 +73,7 @@ train:
   progress_interval: 10
   shuffle: true
   lr: 1.0e-4
+  contrastive_temperature: 0.07
   min_lr: 1.0e-6
   weight_decay: 0.01
   fp16: true

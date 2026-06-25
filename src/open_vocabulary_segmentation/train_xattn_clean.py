@@ -75,15 +75,27 @@ def file_size_mb(path):
 def get_safety_cfg(cfg):
     defaults = OmegaConf.create({
         "enabled": True,
-        "max_delta_base_ratio": 0.05,
         "delta_l2_weight": 0.001,
-        "ratio_penalty_weight": 0.01,
-        "min_base_mapped_cosine": 0.95,
+        "ratio_target": 0.07,
+        "ratio_penalty_weight": 0.02,
+        "min_base_mapped_cosine": 0.98,
         "cosine_penalty_weight": 0.01,
+        "attn_prior_weight": 0.01,
+        "attn_prior_temperature": 0.07,
+        "patch_preserve_weight": 0.005,
+        "patch_preserve_temperature": 0.5,
         "stop_if_ratio_above": 0.30,
         "warn_if_ratio_above": 0.20,
     })
     return OmegaConf.merge(defaults, cfg.get("xattn_safety", {}))
+
+
+def kl_rows(logits_log_probs, target_probs):
+    return F.kl_div(
+        logits_log_probs.reshape(-1, logits_log_probs.shape[-1]),
+        target_probs.reshape(-1, target_probs.shape[-1]),
+        reduction="batchmean",
+    )
 
 
 def bridge_safety_losses(stats, safety_cfg):
@@ -91,23 +103,46 @@ def bridge_safety_losses(stats, safety_cfg):
     ratio = stats["delta_base_ratio"].float()
     cosine = stats["cosine_base_mapped"].float()
     zero = delta.new_tensor(0.0)
-    loss_delta_l2 = delta.norm(dim=-1).pow(2).mean()
-    loss_ratio_penalty = F.relu(
-        ratio - float(safety_cfg.max_delta_base_ratio)
-    ).pow(2).mean()
-    loss_cosine_penalty = F.relu(
-        float(safety_cfg.min_base_mapped_cosine) - cosine
-    ).pow(2).mean()
     if not bool(safety_cfg.enabled):
         return {
             "loss_delta_l2": zero,
-            "loss_ratio_penalty": zero,
-            "loss_cosine_penalty": zero,
+            "loss_ratio": zero,
+            "loss_cos": zero,
+            "loss_attn_prior": zero,
+            "loss_patch_preserve": zero,
+            "attn_prior_kl": zero,
+            "patch_preserve_kl": zero,
         }
+    loss_delta_l2 = delta.norm(dim=-1).pow(2).mean()
+    loss_ratio = F.relu(
+        ratio - float(safety_cfg.ratio_target)
+    ).pow(2).mean()
+    loss_cos = F.relu(
+        float(safety_cfg.min_base_mapped_cosine) - cosine
+    ).pow(2).mean()
+    loss_attn_prior = zero
+    if "attention_probs" in stats and "base_sim" in stats:
+        temp = max(float(safety_cfg.attn_prior_temperature), 1e-6)
+        base_prior = F.softmax(stats["base_sim"].detach().float() / temp, dim=-1)
+        xattn_attn = stats["attention_probs"].float().mean(dim=1).clamp_min(1e-8)
+        loss_attn_prior = kl_rows(torch.log(xattn_attn), base_prior)
+    loss_patch_preserve = zero
+    if "xattn_patch_logits" in stats and "base_patch_logits" in stats:
+        temp = max(float(safety_cfg.patch_preserve_temperature), 1e-6)
+        p_base = F.softmax(stats["base_patch_logits"].detach().float() / temp, dim=-1)
+        log_p_xattn = F.log_softmax(
+            stats["xattn_patch_logits"].float() / temp,
+            dim=-1,
+        )
+        loss_patch_preserve = kl_rows(log_p_xattn, p_base)
     return {
         "loss_delta_l2": loss_delta_l2,
-        "loss_ratio_penalty": loss_ratio_penalty,
-        "loss_cosine_penalty": loss_cosine_penalty,
+        "loss_ratio": loss_ratio,
+        "loss_cos": loss_cos,
+        "loss_attn_prior": loss_attn_prior,
+        "loss_patch_preserve": loss_patch_preserve,
+        "attn_prior_kl": loss_attn_prior.detach(),
+        "patch_preserve_kl": loss_patch_preserve.detach(),
     }
 
 
@@ -116,8 +151,12 @@ def init_epoch_accumulators():
         "loss_total": 0.0,
         "loss_infonce": 0.0,
         "loss_delta_l2": 0.0,
-        "loss_ratio_penalty": 0.0,
-        "loss_cosine_penalty": 0.0,
+        "loss_ratio": 0.0,
+        "loss_cos": 0.0,
+        "loss_attn_prior": 0.0,
+        "loss_patch_preserve": 0.0,
+        "attn_prior_kl": 0.0,
+        "patch_preserve_kl": 0.0,
         "base_norm_mean": 0.0,
         "delta_norm_mean": 0.0,
         "delta_base_ratio_mean": 0.0,
@@ -135,8 +174,12 @@ def update_epoch_accumulators(acc, loss_total, loss_infonce, losses, stats):
     acc["loss_total"] += float(loss_total.detach().cpu())
     acc["loss_infonce"] += float(loss_infonce.detach().cpu())
     acc["loss_delta_l2"] += float(losses["loss_delta_l2"].detach().cpu())
-    acc["loss_ratio_penalty"] += float(losses["loss_ratio_penalty"].detach().cpu())
-    acc["loss_cosine_penalty"] += float(losses["loss_cosine_penalty"].detach().cpu())
+    acc["loss_ratio"] += float(losses["loss_ratio"].detach().cpu())
+    acc["loss_cos"] += float(losses["loss_cos"].detach().cpu())
+    acc["loss_attn_prior"] += float(losses["loss_attn_prior"].detach().cpu())
+    acc["loss_patch_preserve"] += float(losses["loss_patch_preserve"].detach().cpu())
+    acc["attn_prior_kl"] += float(losses["attn_prior_kl"].detach().cpu())
+    acc["patch_preserve_kl"] += float(losses["patch_preserve_kl"].detach().cpu())
     acc["base_norm_mean"] += float(stats["base_norm"].detach().float().mean().cpu())
     acc["delta_norm_mean"] += float(stats["delta_norm"].detach().float().mean().cpu())
     ratio = stats["delta_base_ratio"].detach().float()
@@ -159,8 +202,12 @@ def finalize_epoch_accumulators(acc, count):
         "loss_total",
         "loss_infonce",
         "loss_delta_l2",
-        "loss_ratio_penalty",
-        "loss_cosine_penalty",
+        "loss_ratio",
+        "loss_cos",
+        "loss_attn_prior",
+        "loss_patch_preserve",
+        "attn_prior_kl",
+        "patch_preserve_kl",
         "base_norm_mean",
         "delta_norm_mean",
         "delta_base_ratio_mean",
@@ -192,6 +239,8 @@ def print_epoch_progress(epoch, epochs, step, total_steps, acc, start_time, lr):
         f"[{bar}] {step}/{total_steps} {percent:4.0f}% "
         f"L={metrics['loss_total']:.4f} "
         f"inf={metrics['loss_infonce']:.4f} "
+        f"attn={metrics['attn_prior_kl']:.4f} "
+        f"patch={metrics['patch_preserve_kl']:.4f} "
         f"d/b={metrics['delta_base_ratio_mean']:.3f} "
         f"dmax={metrics['delta_base_ratio_max']:.4f} "
         f"cos={metrics['cosine_base_mapped_mean']:.4f} "
@@ -447,6 +496,7 @@ def main():
     print(f"Train samples             : {len(train_set)}", flush=True)
     print(f"Train batches/epoch       : {len(train_loader)}", flush=True)
     print(f"Train epochs              : {cfg.train.epochs}", flush=True)
+    print(f"contrastive_temperature   : {float(cfg.train.get('contrastive_temperature', 0.07)):.4f}", flush=True)
     print(f"Debug max_batches cap     : {cfg.train.get('max_batches', None)}", flush=True)
     print(f"Checkpoint policy         : last every epoch, epoch snapshot every {cfg.train.save_every}, best on eval improvement", flush=True)
     print("-" * 78, flush=True)
@@ -517,11 +567,15 @@ def main():
     print(
         "XAttn safety: "
         f"enabled={bool(safety_cfg.enabled)} "
-        f"max_delta_base_ratio={float(safety_cfg.max_delta_base_ratio):.3f} "
         f"delta_l2_weight={float(safety_cfg.delta_l2_weight):.4g} "
+        f"ratio_target={float(safety_cfg.ratio_target):.3f} "
         f"ratio_penalty_weight={float(safety_cfg.ratio_penalty_weight):.4g} "
         f"min_base_mapped_cosine={float(safety_cfg.min_base_mapped_cosine):.3f} "
-        f"cosine_penalty_weight={float(safety_cfg.cosine_penalty_weight):.4g}",
+        f"cosine_penalty_weight={float(safety_cfg.cosine_penalty_weight):.4g} "
+        f"attn_prior_weight={float(safety_cfg.attn_prior_weight):.4g} "
+        f"attn_prior_temperature={float(safety_cfg.attn_prior_temperature):.4g} "
+        f"patch_preserve_weight={float(safety_cfg.patch_preserve_weight):.4g} "
+        f"patch_preserve_temperature={float(safety_cfg.patch_preserve_temperature):.4g}",
         flush=True,
     )
 
@@ -580,14 +634,22 @@ def main():
                     visual,
                     return_stats=True,
                 )
-                loss_infonce = contrastive_loss(scores)
-                safety_losses = bridge_safety_losses(safety_stats, safety_cfg)
-                loss = (
-                    loss_infonce
-                    + float(safety_cfg.delta_l2_weight) * safety_losses["loss_delta_l2"]
-                    + float(safety_cfg.ratio_penalty_weight) * safety_losses["loss_ratio_penalty"]
-                    + float(safety_cfg.cosine_penalty_weight) * safety_losses["loss_cosine_penalty"]
+                contrastive_temperature = max(
+                    float(cfg.train.get("contrastive_temperature", 0.07)),
+                    1e-6,
                 )
+                loss_infonce = contrastive_loss(scores / contrastive_temperature)
+                safety_losses = bridge_safety_losses(safety_stats, safety_cfg)
+                loss = loss_infonce
+                if bool(safety_cfg.enabled):
+                    loss = (
+                        loss
+                        + float(safety_cfg.delta_l2_weight) * safety_losses["loss_delta_l2"]
+                        + float(safety_cfg.ratio_penalty_weight) * safety_losses["loss_ratio"]
+                        + float(safety_cfg.cosine_penalty_weight) * safety_losses["loss_cos"]
+                        + float(safety_cfg.attn_prior_weight) * safety_losses["loss_attn_prior"]
+                        + float(safety_cfg.patch_preserve_weight) * safety_losses["loss_patch_preserve"]
+                    )
             if not torch.isfinite(loss):
                 print("WARNING: loss became NaN/Inf; saving checkpoint_last.pth and stopping cleanly.", flush=True)
                 stop_training = True
@@ -627,8 +689,12 @@ def main():
             f"loss_total={epoch_metrics['loss_total']:.6f} "
             f"loss_infonce={epoch_metrics['loss_infonce']:.6f} "
             f"loss_delta_l2={epoch_metrics['loss_delta_l2']:.6f} "
-            f"loss_ratio_penalty={epoch_metrics['loss_ratio_penalty']:.6f} "
-            f"loss_cosine_penalty={epoch_metrics['loss_cosine_penalty']:.6f} "
+            f"loss_ratio={epoch_metrics['loss_ratio']:.6f} "
+            f"loss_cos={epoch_metrics['loss_cos']:.6f} "
+            f"loss_attn_prior={epoch_metrics['loss_attn_prior']:.6f} "
+            f"loss_patch_preserve={epoch_metrics['loss_patch_preserve']:.6f} "
+            f"attn_prior_kl={epoch_metrics['attn_prior_kl']:.6f} "
+            f"patch_preserve_kl={epoch_metrics['patch_preserve_kl']:.6f} "
             f"base_norm={epoch_metrics['base_norm_mean']:.4f} "
             f"delta_norm={epoch_metrics['delta_norm_mean']:.4f} "
             f"delta/base_mean={epoch_metrics['delta_base_ratio_mean']:.4f} "
@@ -721,12 +787,25 @@ def main():
             "loss_total": epoch_metrics["loss_total"],
             "loss_infonce": epoch_metrics["loss_infonce"],
             "loss_delta_l2": epoch_metrics["loss_delta_l2"],
-            "loss_ratio_penalty": epoch_metrics["loss_ratio_penalty"],
-            "loss_cosine_penalty": epoch_metrics["loss_cosine_penalty"],
+            "loss_ratio": epoch_metrics["loss_ratio"],
+            "loss_cos": epoch_metrics["loss_cos"],
+            "loss_attn_prior": epoch_metrics["loss_attn_prior"],
+            "loss_patch_preserve": epoch_metrics["loss_patch_preserve"],
+            "attn_prior_kl": epoch_metrics["attn_prior_kl"],
+            "patch_preserve_kl": epoch_metrics["patch_preserve_kl"],
             "miou": miou,
             "val_loss": val_loss,
             "eval_mode": eval_mode,
             "lr": lr,
+            "contrastive_temperature": float(cfg.train.get("contrastive_temperature", 0.07)),
+            "xattn_safety": OmegaConf.to_container(safety_cfg, resolve=True),
+            "bridge_base_guidance": {
+                "base_guided_attention": bool(cfg.bridge.get("base_guided_attention", True)),
+                "base_guidance_beta": float(cfg.bridge.get("base_guidance_beta", 1.0)),
+                "base_guidance_stopgrad": bool(cfg.bridge.get("base_guidance_stopgrad", True)),
+                "base_guidance_normalize": bool(cfg.bridge.get("base_guidance_normalize", True)),
+                "base_guidance_temperature": float(cfg.bridge.get("base_guidance_temperature", 1.0)),
+            },
             "delta_base_ratio_mean": epoch_metrics["delta_base_ratio_mean"],
             "delta_base_ratio_max": epoch_metrics["delta_base_ratio_max"],
             "cosine_base_mapped_mean": epoch_metrics["cosine_base_mapped_mean"],
@@ -739,6 +818,15 @@ def main():
             "compute_time": epoch_metrics["compute_time"],
             "avg_dataload_time_sec": epoch_metrics["data_time"],
             "avg_xattn_step_time_sec": epoch_metrics["compute_time"],
+            "contrastive_temperature": float(cfg.train.get("contrastive_temperature", 0.07)),
+            "xattn_safety": OmegaConf.to_container(safety_cfg, resolve=True),
+            "bridge_base_guidance": {
+                "base_guided_attention": bool(cfg.bridge.get("base_guided_attention", True)),
+                "base_guidance_beta": float(cfg.bridge.get("base_guidance_beta", 1.0)),
+                "base_guidance_stopgrad": bool(cfg.bridge.get("base_guidance_stopgrad", True)),
+                "base_guidance_normalize": bool(cfg.bridge.get("base_guidance_normalize", True)),
+                "base_guidance_temperature": float(cfg.bridge.get("base_guidance_temperature", 1.0)),
+            },
         }
         save_checkpoint_clean(
             out / "checkpoint_last.pth",
@@ -769,8 +857,12 @@ def main():
             "loss_total": epoch_metrics["loss_total"],
             "loss_infonce": epoch_metrics["loss_infonce"],
             "loss_delta_l2": epoch_metrics["loss_delta_l2"],
-            "loss_ratio_penalty": epoch_metrics["loss_ratio_penalty"],
-            "loss_cosine_penalty": epoch_metrics["loss_cosine_penalty"],
+            "loss_ratio": epoch_metrics["loss_ratio"],
+            "loss_cos": epoch_metrics["loss_cos"],
+            "loss_attn_prior": epoch_metrics["loss_attn_prior"],
+            "loss_patch_preserve": epoch_metrics["loss_patch_preserve"],
+            "attn_prior_kl": epoch_metrics["attn_prior_kl"],
+            "patch_preserve_kl": epoch_metrics["patch_preserve_kl"],
             "base_norm_mean": epoch_metrics["base_norm_mean"],
             "delta_norm_mean": epoch_metrics["delta_norm_mean"],
             "delta_base_ratio_mean": epoch_metrics["delta_base_ratio_mean"],

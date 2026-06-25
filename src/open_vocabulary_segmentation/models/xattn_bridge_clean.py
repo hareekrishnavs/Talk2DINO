@@ -285,7 +285,22 @@ class CleanXAttnBridge(nn.Module):
                 "gamma": gamma.detach().reshape(1),
                 "base_guidance_beta": delta.new_tensor(float(self.base_guidance_beta)),
             }
+            if base_sim is not None:
+                stats["base_sim"] = base_sim
+                patch_norm = F.normalize(dino_patches.float(), dim=-1)
+                base_norm_for_patch = F.normalize(base_text.float(), dim=-1)
+                stats["base_patch_logits"] = torch.einsum(
+                    "btd,bnd->btn",
+                    base_norm_for_patch,
+                    patch_norm,
+                )
+                stats["xattn_patch_logits"] = torch.einsum(
+                    "btd,bnd->btn",
+                    mapped.float(),
+                    patch_norm,
+                )
             if last_attn is not None:
+                stats["attention_probs"] = last_attn
                 stats["xattn_attn_head_mean"] = last_attn.detach().mean(dim=1)
             if squeeze_text:
                 mapped = mapped.squeeze(1) if aligned_text_batch else mapped.squeeze(0)
