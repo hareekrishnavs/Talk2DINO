@@ -39,6 +39,11 @@ bridge:
   residual_gamma_init: 0.01
   residual_gamma_max: 0.05
   clamp_delta_base_ratio: 0.10
+  base_guided_attention: true
+  base_guidance_beta: 1.0
+  base_guidance_stopgrad: true
+  base_guidance_normalize: true
+  base_guidance_temperature: 1.0
 
 xattn_safety:
   enabled: true

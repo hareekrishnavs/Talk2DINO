@@ -1,6 +1,7 @@
 import argparse
 import csv
 import json
+import math
 import os
 import sys
 import time
@@ -142,10 +143,20 @@ class CleanXAttnBridge(nn.Module):
         residual_gamma_init=0.01,
         residual_gamma_max=0.05,
         clamp_delta_base_ratio=0.10,
+        base_guided_attention=True,
+        base_guidance_beta=1.0,
+        base_guidance_stopgrad=True,
+        base_guidance_normalize=True,
+        base_guidance_temperature=1.0,
     ):
         super().__init__()
         self.residual_gamma_max = float(residual_gamma_max)
         self.clamp_delta_base_ratio = float(clamp_delta_base_ratio)
+        self.base_guided_attention = bool(base_guided_attention)
+        self.base_guidance_beta = float(base_guidance_beta)
+        self.base_guidance_stopgrad = bool(base_guidance_stopgrad)
+        self.base_guidance_normalize = bool(base_guidance_normalize)
+        self.base_guidance_temperature = float(base_guidance_temperature)
         self.text_proj = nn.Linear(clip_dim, d_model)
         self.patch_k_proj = nn.Linear(dino_dim, d_model)
         self.patch_v_proj = nn.Linear(dino_dim, d_model)
@@ -161,12 +172,66 @@ class CleanXAttnBridge(nn.Module):
         self._parity_checked = False
         self._skip_zero_init_parity_check = False
 
+    def _base_attention_prior(self, base_text, dino_patches):
+        if not self.base_guided_attention or self.base_guidance_beta == 0.0:
+            return None
+        if self.base_guidance_normalize:
+            base_for_sim = F.normalize(base_text, dim=-1)
+            patch_for_sim = F.normalize(dino_patches, dim=-1)
+        else:
+            base_for_sim = base_text
+            patch_for_sim = dino_patches
+        base_sim = torch.einsum("btd,bnd->btn", base_for_sim, patch_for_sim)
+        temp = max(float(self.base_guidance_temperature), 1e-6)
+        base_sim = base_sim / temp
+        if self.base_guidance_stopgrad:
+            base_sim = base_sim.detach()
+        return base_sim
+
+    def _manual_attn(self, attn, q, k, v, base_sim):
+        embed_dim = q.shape[-1]
+        num_heads = attn.num_heads
+        head_dim = embed_dim // num_heads
+        if head_dim * num_heads != embed_dim:
+            raise ValueError(
+                f"embed_dim={embed_dim} must be divisible by num_heads={num_heads}"
+            )
+
+        q_weight, k_weight, v_weight = attn.in_proj_weight.chunk(3, dim=0)
+        if attn.in_proj_bias is None:
+            q_bias = k_bias = v_bias = None
+        else:
+            q_bias, k_bias, v_bias = attn.in_proj_bias.chunk(3, dim=0)
+        q_proj = F.linear(q, q_weight, q_bias)
+        k_proj = F.linear(k, k_weight, k_bias)
+        v_proj = F.linear(v, v_weight, v_bias)
+
+        bsz, num_text, _ = q_proj.shape
+        num_patches = k_proj.shape[1]
+        q_heads = q_proj.reshape(bsz, num_text, num_heads, head_dim).transpose(1, 2)
+        k_heads = k_proj.reshape(bsz, num_patches, num_heads, head_dim).transpose(1, 2)
+        v_heads = v_proj.reshape(bsz, num_patches, num_heads, head_dim).transpose(1, 2)
+
+        logits = torch.matmul(q_heads, k_heads.transpose(-2, -1)) / math.sqrt(head_dim)
+        if base_sim is not None:
+            logits = logits + float(self.base_guidance_beta) * base_sim.unsqueeze(1)
+        weights = torch.softmax(logits, dim=-1)
+        weights = F.dropout(weights, p=attn.dropout, training=self.training)
+        context = torch.matmul(weights, v_heads)
+        context = context.transpose(1, 2).reshape(bsz, num_text, embed_dim)
+        return attn.out_proj(context), weights
+
     def forward(self, text_feat, dino_patches, base_text, return_stats=False):
         squeeze_text = text_feat.dim() == 2
+        aligned_text_batch = (
+            squeeze_text
+            and dino_patches.dim() == 3
+            and text_feat.shape[0] == dino_patches.shape[0]
+        )
         if squeeze_text:
-            text_feat = text_feat.unsqueeze(0)
+            text_feat = text_feat.unsqueeze(1) if aligned_text_batch else text_feat.unsqueeze(0)
         if base_text.dim() == 2:
-            base_text = base_text.unsqueeze(0)
+            base_text = base_text.unsqueeze(1) if aligned_text_batch else base_text.unsqueeze(0)
         if text_feat.shape[0] == 1 and dino_patches.shape[0] > 1:
             text_feat = text_feat.expand(dino_patches.shape[0], -1, -1)
             base_text = base_text.expand(dino_patches.shape[0], -1, -1)
@@ -178,8 +243,10 @@ class CleanXAttnBridge(nn.Module):
         q = self.text_proj(F.normalize(text_feat, dim=-1))
         k = self.patch_k_proj(F.normalize(dino_patches, dim=-1))
         v = self.patch_v_proj(F.normalize(dino_patches, dim=-1))
+        base_sim = self._base_attention_prior(base_text, dino_patches)
+        last_attn = None
         for attn, norm in zip(self.attn_layers, self.norm_layers):
-            attn_out, _ = attn(q, k, v, need_weights=False)
+            attn_out, last_attn = self._manual_attn(attn, q, k, v, base_sim)
             q = norm(q + attn_out)
         gamma = self.residual_gamma.clamp(0.0, self.residual_gamma_max)
         delta = gamma * self.out_proj(q)
@@ -216,15 +283,28 @@ class CleanXAttnBridge(nn.Module):
                 "cosine_base_mapped": cosine,
                 "delta": delta,
                 "gamma": gamma.detach().reshape(1),
+                "base_guidance_beta": delta.new_tensor(float(self.base_guidance_beta)),
             }
+            if last_attn is not None:
+                stats["xattn_attn_head_mean"] = last_attn.detach().mean(dim=1)
             if squeeze_text:
-                mapped = mapped.squeeze(0)
+                mapped = mapped.squeeze(1) if aligned_text_batch else mapped.squeeze(0)
                 stats = {
-                    key: value.squeeze(0) if torch.is_tensor(value) and value.dim() > 0 else value
+                    key: (
+                        value.squeeze(1)
+                        if aligned_text_batch and torch.is_tensor(value) and value.dim() > 1
+                        else (
+                            value.squeeze(0)
+                            if torch.is_tensor(value) and value.dim() > 0
+                            else value
+                        )
+                    )
                     for key, value in stats.items()
                 }
             return mapped, stats
-        return mapped.squeeze(0) if squeeze_text else mapped
+        if squeeze_text:
+            return mapped.squeeze(1) if aligned_text_batch else mapped.squeeze(0)
+        return mapped
 
 
 def pairwise_scores(bridge, text_clip, text_base, patch_tokens, visual_embed, return_stats=False):

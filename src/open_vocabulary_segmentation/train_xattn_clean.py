@@ -125,6 +125,7 @@ def init_epoch_accumulators():
         "cosine_base_mapped_mean": 0.0,
         "cosine_base_mapped_min": 1.0,
         "gamma": 0.0,
+        "base_guidance_beta": 0.0,
         "data_time": 0.0,
         "compute_time": 0.0,
     }
@@ -146,6 +147,10 @@ def update_epoch_accumulators(acc, loss_total, loss_infonce, losses, stats):
     acc["cosine_base_mapped_min"] = min(acc["cosine_base_mapped_min"], float(cosine.min().cpu()))
     if "gamma" in stats:
         acc["gamma"] += float(stats["gamma"].detach().float().mean().cpu())
+    if "base_guidance_beta" in stats:
+        acc["base_guidance_beta"] += float(
+            stats["base_guidance_beta"].detach().float().mean().cpu()
+        )
 
 
 def finalize_epoch_accumulators(acc, count):
@@ -161,6 +166,7 @@ def finalize_epoch_accumulators(acc, count):
         "delta_base_ratio_mean",
         "cosine_base_mapped_mean",
         "gamma",
+        "base_guidance_beta",
         "data_time",
         "compute_time",
     ]
@@ -190,6 +196,7 @@ def print_epoch_progress(epoch, epochs, step, total_steps, acc, start_time, lr):
         f"dmax={metrics['delta_base_ratio_max']:.4f} "
         f"cos={metrics['cosine_base_mapped_mean']:.4f} "
         f"g={metrics['gamma']:.3f} "
+        f"bg={metrics['base_guidance_beta']:.2f} "
         f"dt={metrics['data_time']:.3f}s "
         f"xa={metrics['compute_time']:.3f}s "
         f"lr={lr:.2e} "
@@ -461,6 +468,15 @@ def main():
         flush=True,
     )
     print(
+        "  Base-guided attention   : "
+        f"enabled={bool(cfg.bridge.get('base_guided_attention', True))}, "
+        f"beta={float(cfg.bridge.get('base_guidance_beta', 1.0)):.3f}, "
+        f"stopgrad={bool(cfg.bridge.get('base_guidance_stopgrad', True))}, "
+        f"normalize={bool(cfg.bridge.get('base_guidance_normalize', True))}, "
+        f"temperature={float(cfg.bridge.get('base_guidance_temperature', 1.0)):.3f}",
+        flush=True,
+    )
+    print(
         "  Q/K/V                   : "
         "Q=Linear(CLIP text -> d_model), "
         "K=Linear(DINO tokens -> d_model), "
@@ -620,6 +636,7 @@ def main():
         f"cos_base_mapped_mean={epoch_metrics['cosine_base_mapped_mean']:.4f} "
         f"cos_min={epoch_metrics['cosine_base_mapped_min']:.4f} "
         f"gamma={epoch_metrics['gamma']:.4f} "
+        f"base_guidance_beta={epoch_metrics['base_guidance_beta']:.4f} "
         f"data/batch={epoch_metrics['data_time']:.3f}s "
             f"xattn-step={epoch_metrics['compute_time']:.3f}s "
             f"lr={lr:.3e} epoch_time={format_seconds(epoch_time)} "
@@ -715,6 +732,7 @@ def main():
             "cosine_base_mapped_mean": epoch_metrics["cosine_base_mapped_mean"],
             "cosine_base_mapped_min": epoch_metrics["cosine_base_mapped_min"],
             "gamma": epoch_metrics["gamma"],
+            "base_guidance_beta": epoch_metrics["base_guidance_beta"],
             "base_norm_mean": epoch_metrics["base_norm_mean"],
             "delta_norm_mean": epoch_metrics["delta_norm_mean"],
             "data_time": epoch_metrics["data_time"],
@@ -760,6 +778,7 @@ def main():
             "cosine_base_mapped_mean": epoch_metrics["cosine_base_mapped_mean"],
             "cosine_base_mapped_min": epoch_metrics["cosine_base_mapped_min"],
             "gamma": epoch_metrics["gamma"],
+            "base_guidance_beta": epoch_metrics["base_guidance_beta"],
             "miou": miou,
             "val_loss": val_loss,
             "eval_mode": eval_mode,
