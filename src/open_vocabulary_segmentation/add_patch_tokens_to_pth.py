@@ -4,6 +4,7 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
 import torch
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
@@ -16,7 +17,8 @@ def parse_args():
     parser = argparse.ArgumentParser("Add raw DINO patch tokens to baseline-style .pth features")
     parser.add_argument("--config", required=True)
     parser.add_argument("--input", required=True)
-    parser.add_argument("--output", required=True)
+    parser.add_argument("--output", default=None)
+    parser.add_argument("--patch_output_dir", default=None)
     parser.add_argument("--split", required=True, choices=["train", "val"])
     parser.add_argument("--opts", nargs="+", default=None)
     parser.add_argument("--overwrite", action="store_true")
@@ -161,16 +163,61 @@ def validate_output(input_data, output_path, patch_key, expected_dtype):
     )
 
 
+def validate_patch_store(root, expected_count, patch_key, expected_dtype):
+    root = Path(root)
+    print(f"[{timestamp()}] Validating patch-token store: {root}", flush=True)
+    import json
+
+    with open(root / "manifest.json", "r") as f:
+        manifest = json.load(f)
+    if len(manifest["index"]) != expected_count:
+        raise AssertionError(
+            f"Patch store index count {len(manifest['index'])} != expected {expected_count}"
+        )
+    first = manifest["index"][0]
+    if manifest.get("format") == "patch_tokens_memmap_v1":
+        dtype = np.float16 if manifest.get("dtype") in {"float16", "fp16"} else np.float32
+        mmap = np.memmap(
+            root / manifest["data_file"],
+            mode="r",
+            dtype=dtype,
+            shape=tuple(manifest["shape"]),
+        )
+        sample = torch.from_numpy(np.array(mmap[int(first["offset"])]))
+    else:
+        shard = torch.load(root / first["shard"], map_location="cpu", weights_only=False)
+        sample = shard[patch_key][int(first["offset"])]
+    if sample.dtype != expected_dtype:
+        raise AssertionError(f"Expected dtype {expected_dtype}, got {sample.dtype}")
+    if sample.shape[-1] != 768:
+        raise AssertionError(f"Expected last dim 768, got {tuple(sample.shape)}")
+    if torch.isnan(sample.float()).any():
+        raise AssertionError("Sample patch tokens contain NaN")
+    print(
+        f"[{timestamp()}] Patch store validation passed: "
+        f"sample shape={tuple(sample.shape)} dtype={sample.dtype}",
+        flush=True,
+    )
+
+
 def main():
     args = parse_args()
     cfg = load_clean_config(args.config, args.opts)
     input_path = Path(args.input)
-    output_path = Path(args.output)
-    tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
+    output_path = Path(args.output) if args.output else None
+    tmp_path = output_path.with_suffix(output_path.suffix + ".tmp") if output_path else None
     patch_key = patch_key_from_cfg(cfg)
     patch_dtype = patch_dtype_from_cfg(cfg)
 
-    if output_path.exists() and not args.overwrite:
+    if args.patch_output_dir:
+        patch_output_dir = Path(args.patch_output_dir)
+    else:
+        patch_output_dir = None
+
+    if patch_output_dir is None and output_path is None:
+        raise ValueError("--output is required unless --patch_output_dir is set")
+
+    if patch_output_dir is None and output_path.exists() and not args.overwrite:
         print(
             f"[{timestamp()}] Output already exists; validating and exiting: {output_path}",
             flush=True,
@@ -181,6 +228,8 @@ def main():
 
     print(f"[{timestamp()}] Input file : {input_path}", flush=True)
     print(f"[{timestamp()}] Output file: {output_path}", flush=True)
+    if patch_output_dir is not None:
+        print(f"[{timestamp()}] Patch store: {patch_output_dir}", flush=True)
     print(f"[{timestamp()}] Split      : {args.split}", flush=True)
     print(f"[{timestamp()}] Patch key  : {patch_key}", flush=True)
     print(f"[{timestamp()}] Patch dtype: {patch_dtype}", flush=True)
@@ -229,7 +278,30 @@ def main():
         **loader_kwargs,
     )
 
-    updated_images = [dict(item) for item in image_records]
+    if patch_output_dir is not None:
+        patch_output_dir.mkdir(parents=True, exist_ok=True)
+        shard_tmp_dir = patch_output_dir / "_tmp"
+        shard_tmp_dir.mkdir(parents=True, exist_ok=True)
+        for child in shard_tmp_dir.iterdir():
+            if child.is_file():
+                child.unlink()
+        store_format = str(cfg.get("patch_tokens", {}).get("store_format", "sharded")).lower()
+        shard_size = int(cfg.get("patch_tokens", {}).get("shard_size", 128))
+        manifest = {
+            "format": "patch_tokens_memmap_v1" if store_format == "memmap" else "patch_tokens_sharded_v1",
+            "source_pth": str(input_path),
+            "split": args.split,
+            "patch_key": patch_key,
+            "dtype": str(patch_dtype).replace("torch.", ""),
+            "index": [],
+        }
+        shard_tokens = []
+        shard_image_ids = []
+        shard_id = 0
+        mmap = None
+        mmap_path = shard_tmp_dir / "patch_tokens.dat"
+    else:
+        updated_images = [dict(item) for item in image_records]
     start = time.time()
     processed = 0
     first_shape = None
@@ -237,8 +309,54 @@ def main():
     for batch in loader:
         images = batch["image"].to(device, non_blocking=True)
         tokens = extract_patch_tokens(frozen, images).detach().cpu().to(dtype=patch_dtype)
+        if patch_output_dir is not None and store_format == "memmap" and mmap is None:
+            first_shape = tuple(tokens[0].shape)
+            first_dtype = tokens.dtype
+            np_dtype = np.float16 if patch_dtype == torch.float16 else np.float32
+            manifest["data_file"] = "patch_tokens.dat"
+            manifest["shape"] = [len(image_records), *first_shape]
+            mmap = np.memmap(
+                mmap_path,
+                mode="w+",
+                dtype=np_dtype,
+                shape=tuple(manifest["shape"]),
+            )
         for row, image_idx in enumerate(batch["idx"]):
-            updated_images[int(image_idx)][patch_key] = tokens[row].contiguous()
+            if patch_output_dir is not None:
+                if store_format == "memmap":
+                    mmap[int(image_idx)] = tokens[row].numpy()
+                    manifest["index"].append({
+                        "image_id": int(batch["image_id"][row]),
+                        "offset": int(image_idx),
+                    })
+                else:
+                    shard_tokens.append(tokens[row].contiguous())
+                    shard_image_ids.append(int(batch["image_id"][row]))
+                if store_format != "memmap" and len(shard_tokens) >= shard_size:
+                    shard_name = f"patch_tokens_{shard_id:06d}.pth"
+                    torch.save(
+                        {
+                            "image_ids": list(shard_image_ids),
+                            patch_key: list(shard_tokens),
+                        },
+                        shard_tmp_dir / shard_name,
+                    )
+                    for offset, image_id in enumerate(shard_image_ids):
+                        manifest["index"].append({
+                            "image_id": int(image_id),
+                            "shard": shard_name,
+                            "offset": int(offset),
+                        })
+                    print(
+                        f"[{timestamp()}] Wrote shard {shard_name} "
+                        f"({len(shard_tokens)} images)",
+                        flush=True,
+                    )
+                    shard_tokens = []
+                    shard_image_ids = []
+                    shard_id += 1
+            else:
+                updated_images[int(image_idx)][patch_key] = tokens[row].contiguous()
         processed += len(batch["idx"])
         if first_shape is None:
             first_shape = tuple(tokens[0].shape)
@@ -254,6 +372,41 @@ def main():
                 f"elapsed={format_seconds(elapsed)} eta={format_seconds(eta)}",
                 flush=True,
             )
+
+    if patch_output_dir is not None:
+        if store_format == "memmap":
+            if mmap is not None:
+                mmap.flush()
+                del mmap
+        elif shard_tokens:
+            shard_name = f"patch_tokens_{shard_id:06d}.pth"
+            torch.save(
+                {
+                    "image_ids": list(shard_image_ids),
+                    patch_key: list(shard_tokens),
+                },
+                shard_tmp_dir / shard_name,
+            )
+            for offset, image_id in enumerate(shard_image_ids):
+                manifest["index"].append({
+                    "image_id": int(image_id),
+                    "shard": shard_name,
+                    "offset": int(offset),
+                })
+            print(
+                f"[{timestamp()}] Wrote shard {shard_name} ({len(shard_tokens)} images)",
+                flush=True,
+            )
+        import json
+
+        with open(shard_tmp_dir / "manifest.json", "w") as f:
+            json.dump(manifest, f, indent=2)
+        for child in shard_tmp_dir.iterdir():
+            os.replace(child, patch_output_dir / child.name)
+        shard_tmp_dir.rmdir()
+        validate_patch_store(patch_output_dir, len(image_records), patch_key, patch_dtype)
+        print(f"[{timestamp()}] Patch-token sidecar complete: {patch_output_dir}", flush=True)
+        return
 
     output_data = dict(data)
     output_data["images"] = updated_images
