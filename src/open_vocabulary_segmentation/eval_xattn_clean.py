@@ -96,6 +96,7 @@ class CleanOfficialEvalModel(nn.Module):
         self.bridge = bridge
         self.register_buffer("class_clip", class_clip.float())
         self.register_buffer("class_base", class_base.float())
+        self._logged_xattn_eval_path = False
 
     def __getattr__(self, name):
         try:
@@ -134,6 +135,17 @@ class CleanOfficialEvalModel(nn.Module):
             image_feat,
             self.class_base.to(image_feat.device),
         )
+        if not self._logged_xattn_eval_path:
+            from utils import get_logger
+
+            get_logger().info(
+                "Official eval XAttn path active: "
+                f"class_clip={tuple(self.class_clip.shape)}, "
+                f"crop_patch_tokens={tuple(image_feat.shape)}, "
+                f"class_base={tuple(self.class_base.shape)}, "
+                f"mapped_text={tuple(mapped_text.shape)}"
+            )
+            self._logged_xattn_eval_path = True
         if mapped_text.dim() == 3:
             mapped_text = mapped_text[0]
 
@@ -213,6 +225,16 @@ def official_parity_eval(args, cfg, device):
     return miou, payload
 
 
+def init_eval_logger(cfg, out):
+    from utils import get_logger
+
+    logger_cfg = OmegaConf.create({
+        "model_name": str(cfg.get("method_name", METHOD_NAME)),
+        "output": str(out),
+    })
+    return get_logger(logger_cfg)
+
+
 def main():
     args = parse_args()
     cfg = load_clean_config(args.config, args.opts)
@@ -223,6 +245,7 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
+    init_eval_logger(cfg, out)
 
     if not args.cached_fast_eval:
         print("Eval mode: official Talk2DINO slide-inference parity", flush=True)

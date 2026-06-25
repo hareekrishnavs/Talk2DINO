@@ -309,6 +309,15 @@ def multi_gpu_test(model,
     model.eval()
     results = []
     dataset = data_loader.dataset
+    eval_dataset = getattr(dataset, "dataset", dataset)
+
+    def absolute_dataset_index(index):
+        if hasattr(dataset, "indices"):
+            indices = dataset.indices
+            if hasattr(indices, "start"):
+                return index + indices.start
+            return indices[index]
+        return index
     # The pipeline about how the data_loader retrieval samples from dataset:
     # sampler -> batch_sampler -> indices
     # The indices are passed to dataset_fetcher to get data from dataset.
@@ -362,7 +371,9 @@ def multi_gpu_test(model,
                 else pred_qualitative
             )
             pred_qualitatives.append(displayed_prediction + 1)
-            seg_map_gt = dataset.dataset.get_gt_seg_map_by_idx(index + dataset.indices.start)
+            seg_map_gt = eval_dataset.get_gt_seg_map_by_idx(
+                absolute_dataset_index(index)
+            )
             # seg_map_gt[seg_map_gt == 255] = 0
             gt_qualitatives.append(seg_map_gt)
 
@@ -370,34 +381,34 @@ def multi_gpu_test(model,
             result = [np2tmp(_, tmpdir='.efficient_test') for _ in result]
 
         if format_only:
-            result = dataset.dataset.format_results(
+            result = eval_dataset.format_results(
                 result, indices=batch_indices, **format_args)
         if pre_eval:
             # TODO: adapt samples_per_gpu > 1.
             # only samples_per_gpu=1 valid now
-            absolute_indices = [i + dataset.indices.start for i in batch_indices]
+            absolute_indices = [absolute_dataset_index(i) for i in batch_indices]
             if result and isinstance(result[0], dict):
                 sg_results = []
                 eval_start = time.perf_counter()
                 for prediction, absolute_index in zip(result, absolute_indices):
-                    strict_pre_eval = dataset.dataset.pre_eval(
+                    strict_pre_eval = eval_dataset.pre_eval(
                         [prediction["strict"]],
                         indices=[absolute_index],
                     )[0]
                     diagnostic_pre_eval = None
                     if diagnostic_ignore_eval:
-                        diagnostic_gt = dataset.dataset.get_gt_seg_map_by_idx(
+                        diagnostic_gt = eval_dataset.get_gt_seg_map_by_idx(
                             absolute_index
                         ).copy()
                         diagnostic_gt[prediction["diagnostic"] == 255] = \
-                            dataset.dataset.ignore_index
+                            eval_dataset.ignore_index
                         diagnostic_pre_eval = intersect_and_union(
                             prediction["diagnostic"],
                             diagnostic_gt,
-                            len(dataset.dataset.CLASSES),
-                            dataset.dataset.ignore_index,
+                            len(eval_dataset.CLASSES),
+                            eval_dataset.ignore_index,
                             label_map=dict(),
-                            reduce_zero_label=dataset.dataset.reduce_zero_label,
+                            reduce_zero_label=eval_dataset.reduce_zero_label,
                         )
                     sg_results.append({
                         "strict": strict_pre_eval,
@@ -418,7 +429,7 @@ def multi_gpu_test(model,
                     sg_result["timing"]["evaluator_time"] = per_item_evaluator_time
                 result = sg_results
             else:
-                result = dataset.dataset.pre_eval(
+                result = eval_dataset.pre_eval(
                     result,
                     indices=absolute_indices,
                 )
@@ -466,4 +477,4 @@ def multi_gpu_test(model,
             results = collect_results_gpu(results, len(dataset))
         else:
             results = collect_results_cpu(results, len(dataset), tmpdir)
-    return results, pred_qualitatives, gt_qualitatives, len(dataset.dataset.CLASSES)
+    return results, pred_qualitatives, gt_qualitatives, len(eval_dataset.CLASSES)

@@ -439,6 +439,8 @@ def load_bridge_from_checkpoint(checkpoint, cfg, device):
     payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
     state = payload.get("bridge", payload.get("model"))
     bridge.load_state_dict(state)
+    bridge._skip_zero_init_parity_check = True
+    bridge._parity_checked = True
     bridge.eval()
     return bridge, payload
 
