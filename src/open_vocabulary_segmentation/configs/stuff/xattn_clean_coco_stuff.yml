@@ -73,6 +73,11 @@ train:
 evaluate:
   pamr: false
   template: sub_imagenet_template
+  xattn_delta_scale: 0.5
+  xattn_logit_alpha: 0.5
+  xattn_uncertainty_gate_enabled: true
+  xattn_margin_gate_enabled: false
+  xattn_margin_threshold: 0.05
   task:
     - coco_stuff
   coco_stuff: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/stuff.py

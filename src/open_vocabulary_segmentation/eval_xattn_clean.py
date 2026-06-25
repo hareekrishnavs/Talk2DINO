@@ -64,7 +64,7 @@ def load_all_eval_samples(feature_dir):
 
 
 @torch.no_grad()
-def build_class_embeddings(model, cfg, classnames, device):
+def build_class_embeddings(model, cfg, classnames, device, keep_templates=False):
     text_tokens = model.build_dataset_class_tokens(cfg.evaluate.template, classnames)
     text_tokens = text_tokens.to(device)
     num_classes, num_templates = text_tokens.shape[:2]
@@ -72,9 +72,76 @@ def build_class_embeddings(model, cfg, classnames, device):
     chunks = []
     for i in range(0, text.shape[0], 32):
         chunks.append(model.encode_text(text[i:i + 32]).float())
-    clip_emb = torch.cat(chunks, dim=0).reshape(num_classes, num_templates, -1).mean(dim=1)
+    clip_templates = torch.cat(chunks, dim=0).reshape(num_classes, num_templates, -1)
+    if keep_templates:
+        base_templates = model._frozen_base_text_to_dino(
+            clip_templates.reshape(num_classes * num_templates, -1)
+        ).reshape(num_classes, num_templates, -1)
+        return clip_templates.float(), base_templates.float()
+    clip_emb = clip_templates.mean(dim=1)
     base_emb = model._frozen_base_text_to_dino(clip_emb)
     return clip_emb.float(), base_emb.float()
+
+
+def bridge_class_embeddings(bridge, class_clip, patch_tokens, class_base, delta_scale=0.5):
+    delta_scale = float(delta_scale)
+    if class_clip.dim() == 3:
+        num_classes, num_templates, clip_dim = class_clip.shape
+        flat_clip = class_clip.reshape(num_classes * num_templates, clip_dim)
+        flat_base = class_base.reshape(num_classes * num_templates, class_base.shape[-1])
+        mapped, stats = bridge(flat_clip, patch_tokens, flat_base, return_stats=True)
+        mapped = F.normalize(flat_base + delta_scale * stats["delta"].float(), dim=-1)
+        if mapped.dim() == 3:
+            if mapped.shape[0] != 1:
+                raise ValueError(
+                    "Template-aware eval expects one image/crop at a time; "
+                    f"got mapped shape {tuple(mapped.shape)}"
+                )
+            mapped = mapped[0]
+        mapped = mapped.reshape(num_classes, num_templates, -1).mean(dim=1)
+        return F.normalize(mapped, dim=-1)
+    mapped, stats = bridge(class_clip, patch_tokens, class_base, return_stats=True)
+    if class_base.dim() == 3:
+        mapped = F.normalize(class_base + delta_scale * stats["delta"].float(), dim=-1)
+    else:
+        mapped = F.normalize(class_base + delta_scale * stats["delta"].float(), dim=-1)
+    if mapped.dim() == 3 and mapped.shape[0] == 1:
+        mapped = mapped[0]
+    return F.normalize(mapped, dim=-1)
+
+
+def mean_template_embeddings(class_base):
+    if class_base.dim() == 3:
+        return F.normalize(class_base.mean(dim=1), dim=-1)
+    return F.normalize(class_base, dim=-1)
+
+
+def fuse_xattn_logits(
+    base_logits,
+    xattn_logits,
+    alpha=0.5,
+    uncertainty_gate=False,
+    margin_threshold=None,
+):
+    alpha = float(alpha)
+    if uncertainty_gate:
+        probs = F.softmax(base_logits, dim=1)
+        top2 = probs.topk(k=min(2, probs.shape[1]), dim=1).values
+        if top2.shape[1] < 2:
+            gate = torch.ones_like(base_logits[:, :1])
+        else:
+            softmax_margin = top2[:, :1] - top2[:, 1:2]
+            gate = (1.0 - softmax_margin).clamp(0.0, 1.0)
+    elif margin_threshold is None:
+        gate = 1.0
+    else:
+        top2 = base_logits.topk(k=min(2, base_logits.shape[1]), dim=1).values
+        if top2.shape[1] < 2:
+            margin = torch.zeros_like(base_logits[:, :1])
+        else:
+            margin = top2[:, :1] - top2[:, 1:2]
+        gate = (margin <= float(margin_threshold)).to(base_logits.dtype)
+    return base_logits + gate * alpha * (xattn_logits - base_logits)
 
 
 def intersect_and_union(pred, gt, num_classes, ignore_index):
@@ -90,12 +157,28 @@ def intersect_and_union(pred, gt, num_classes, ignore_index):
 
 
 class CleanOfficialEvalModel(nn.Module):
-    def __init__(self, frozen, bridge, class_clip, class_base):
+    def __init__(
+        self,
+        frozen,
+        bridge,
+        class_clip,
+        class_base,
+        xattn_delta_scale=0.5,
+        xattn_logit_alpha=0.5,
+        xattn_uncertainty_gate_enabled=True,
+        xattn_margin_gate_enabled=False,
+        xattn_margin_threshold=0.05,
+    ):
         super().__init__()
         self.frozen = frozen
         self.bridge = bridge
         self.register_buffer("class_clip", class_clip.float())
         self.register_buffer("class_base", class_base.float())
+        self.xattn_delta_scale = float(xattn_delta_scale)
+        self.xattn_logit_alpha = float(xattn_logit_alpha)
+        self.xattn_uncertainty_gate_enabled = bool(xattn_uncertainty_gate_enabled)
+        self.xattn_margin_gate_enabled = bool(xattn_margin_gate_enabled)
+        self.xattn_margin_threshold = float(xattn_margin_threshold)
         self._logged_xattn_eval_path = False
 
     def __getattr__(self, name):
@@ -130,10 +213,12 @@ class CleanOfficialEvalModel(nn.Module):
             image_feat = self.frozen.model.forward_features(img_preprocessed)[:, 1:, :]
 
         batch_size, num_tokens, embed_dim = image_feat.shape
-        mapped_text = self.bridge(
+        mapped_text = bridge_class_embeddings(
+            self.bridge,
             self.class_clip.to(image_feat.device),
             image_feat,
             self.class_base.to(image_feat.device),
+            delta_scale=self.xattn_delta_scale,
         )
         if not self._logged_xattn_eval_path:
             from utils import get_logger
@@ -143,12 +228,14 @@ class CleanOfficialEvalModel(nn.Module):
                 f"class_clip={tuple(self.class_clip.shape)}, "
                 f"crop_patch_tokens={tuple(image_feat.shape)}, "
                 f"class_base={tuple(self.class_base.shape)}, "
-                f"mapped_text={tuple(mapped_text.shape)}"
+                f"mapped_text={tuple(mapped_text.shape)}, "
+                f"delta_scale={self.xattn_delta_scale:.3f}, "
+                f"logit_alpha={self.xattn_logit_alpha:.3f}, "
+                f"uncertainty_gate={self.xattn_uncertainty_gate_enabled}, "
+                f"margin_gate={self.xattn_margin_gate_enabled}, "
+                f"margin_threshold={self.xattn_margin_threshold:.3f}"
             )
             self._logged_xattn_eval_path = True
-        if mapped_text.dim() == 3:
-            mapped_text = mapped_text[0]
-
         b, npatches, channels = image_feat.shape
         grid = int(npatches ** 0.5)
         image_feat = image_feat.reshape(b, grid, grid, channels).permute(0, 3, 1, 2)
@@ -162,7 +249,22 @@ class CleanOfficialEvalModel(nn.Module):
             self.frozen.num_global_tokens,
             ret_self_attn_maps=True,
         )
-        mask, simmap = self.frozen.masker.forward_seg(image_feat, mapped_text, hard=False)
+        base_text = mean_template_embeddings(self.class_base.to(image_feat.device))
+        _, base_simmap = self.frozen.masker.forward_seg(image_feat, base_text, hard=False)
+        _, xattn_simmap = self.frozen.masker.forward_seg(image_feat, mapped_text, hard=False)
+        margin_threshold = (
+            self.xattn_margin_threshold
+            if self.xattn_margin_gate_enabled
+            else None
+        )
+        simmap = fuse_xattn_logits(
+            base_simmap,
+            xattn_simmap,
+            alpha=self.xattn_logit_alpha,
+            uncertainty_gate=self.xattn_uncertainty_gate_enabled,
+            margin_threshold=margin_threshold,
+        )
+        mask = torch.sigmoid(simmap)
         if getattr(self.frozen, "with_bg_clean", False):
             mask = self.frozen.similarity_assignment_weighted(
                 mask,
@@ -193,13 +295,36 @@ def official_parity_eval(args, cfg, device):
     classnames = dataset.CLASSES
     with_bg = classnames[0] == "background"
     eval_classnames = classnames[1:] if with_bg else classnames
-    class_clip, class_base = build_class_embeddings(frozen, cfg, eval_classnames, device)
+    class_clip, class_base = build_class_embeddings(
+        frozen,
+        cfg,
+        eval_classnames,
+        device,
+        keep_templates=True,
+    )
     bridge, payload = load_bridge_from_checkpoint(args.checkpoint, cfg, device)
-    wrapped = CleanOfficialEvalModel(frozen, bridge, class_clip, class_base).to(device)
+    wrapped = CleanOfficialEvalModel(
+        frozen,
+        bridge,
+        class_clip,
+        class_base,
+        xattn_delta_scale=float(cfg.evaluate.get("xattn_delta_scale", 0.5)),
+        xattn_logit_alpha=float(cfg.evaluate.get("xattn_logit_alpha", 0.5)),
+        xattn_uncertainty_gate_enabled=bool(
+            cfg.evaluate.get("xattn_uncertainty_gate_enabled", True)
+        ),
+        xattn_margin_gate_enabled=bool(
+            cfg.evaluate.get("xattn_margin_gate_enabled", False)
+        ),
+        xattn_margin_threshold=float(
+            cfg.evaluate.get("xattn_margin_threshold", 0.05)
+        ),
+    ).to(device)
+    seg_text_embedding = class_base.mean(dim=1) if class_base.dim() == 3 else class_base
     dset_cfg = mmcv.Config.fromfile(cfg.evaluate.coco_stuff)
     seg_model = DINOTextSegInference(
         wrapped,
-        class_base,
+        seg_text_embedding,
         eval_classnames,
         with_bg=with_bg,
         test_cfg=dset_cfg.test_cfg,
@@ -273,19 +398,49 @@ def main():
     dataset = build_coco_stuff_eval_dataset(cfg)
     print("Eval mode: cached fast eval, not official parity", flush=True)
     classnames = dataset.CLASSES
-    clip_cls, base_cls = build_class_embeddings(frozen, cfg, classnames, device)
+    clip_cls, base_cls = build_class_embeddings(
+        frozen,
+        cfg,
+        classnames,
+        device,
+        keep_templates=True,
+    )
     bridge, payload = load_bridge_from_checkpoint(args.checkpoint, cfg, device)
     manifest, samples = load_all_eval_samples(args.features)
+    base_text = mean_template_embeddings(base_cls.to(device))
 
     num_classes = len(classnames)
     total_inter = torch.zeros(num_classes)
     total_union = torch.zeros(num_classes)
+    xattn_logit_alpha = float(cfg.evaluate.get("xattn_logit_alpha", 0.5))
+    xattn_delta_scale = float(cfg.evaluate.get("xattn_delta_scale", 0.5))
+    xattn_uncertainty_gate_enabled = bool(
+        cfg.evaluate.get("xattn_uncertainty_gate_enabled", True)
+    )
+    xattn_margin_threshold = (
+        float(cfg.evaluate.get("xattn_margin_threshold", 0.05))
+        if bool(cfg.evaluate.get("xattn_margin_gate_enabled", False))
+        else None
+    )
     for idx, sample in enumerate(samples):
         patches = sample["patch_tokens"].unsqueeze(0).to(device).float()
-        mapped = bridge(clip_cls, patches, base_cls).float()
-        mapped = F.normalize(mapped, dim=-1)
+        mapped = bridge_class_embeddings(
+            bridge,
+            clip_cls,
+            patches,
+            base_cls,
+            delta_scale=xattn_delta_scale,
+        )
         patch_norm = F.normalize(patches, dim=-1)
-        logits = torch.einsum("bnd,cd->bcn", patch_norm, mapped)
+        xattn_logits = torch.einsum("bnd,cd->bcn", patch_norm, mapped)
+        base_logits = torch.einsum("bnd,cd->bcn", patch_norm, base_text)
+        logits = fuse_xattn_logits(
+            base_logits,
+            xattn_logits,
+            alpha=xattn_logit_alpha,
+            uncertainty_gate=xattn_uncertainty_gate_enabled,
+            margin_threshold=xattn_margin_threshold,
+        )
         n = logits.shape[-1]
         h = w = int(n ** 0.5)
         logits = logits[:, :, : h * w].reshape(1, num_classes, h, w)

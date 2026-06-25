@@ -27,7 +27,14 @@ from xattn_bridge_clean import (
     pairwise_scores,
     save_checkpoint_clean,
 )
-from eval_xattn_clean import build_class_embeddings, intersect_and_union, load_all_eval_samples
+from eval_xattn_clean import (
+    bridge_class_embeddings,
+    build_class_embeddings,
+    fuse_xattn_logits,
+    intersect_and_union,
+    load_all_eval_samples,
+    mean_template_embeddings,
+)
 
 
 def parse_args():
@@ -266,18 +273,45 @@ def evaluate_baseline_val_loss(bridge, val_loader, frozen, device):
 
 
 @torch.no_grad()
-def evaluate_cached_miou(bridge, eval_samples, class_clip, class_base, num_classes, ignore_index, device):
+def evaluate_cached_miou(
+    bridge,
+    eval_samples,
+    class_clip,
+    class_base,
+    num_classes,
+    ignore_index,
+    device,
+    xattn_delta_scale=0.5,
+    xattn_logit_alpha=0.5,
+    xattn_uncertainty_gate_enabled=True,
+    xattn_margin_threshold=None,
+):
     bridge.eval()
     total_inter = torch.zeros(num_classes)
     total_union = torch.zeros(num_classes)
+    base_text = mean_template_embeddings(class_base.to(device))
     for sample in eval_samples:
         patches = sample["patch_tokens"].unsqueeze(0).to(device).float()
-        mapped = bridge(class_clip, patches, class_base).float()
-        mapped = torch.nn.functional.normalize(mapped, dim=-1)
-        logits = torch.einsum(
+        mapped = bridge_class_embeddings(
+            bridge,
+            class_clip,
+            patches,
+            class_base,
+            delta_scale=xattn_delta_scale,
+        )
+        patch_norm = torch.nn.functional.normalize(patches, dim=-1)
+        xattn_logits = torch.einsum(
             "bnd,cd->bcn",
-            torch.nn.functional.normalize(patches, dim=-1),
+            patch_norm,
             mapped,
+        )
+        base_logits = torch.einsum("bnd,cd->bcn", patch_norm, base_text)
+        logits = fuse_xattn_logits(
+            base_logits,
+            xattn_logits,
+            alpha=xattn_logit_alpha,
+            uncertainty_gate=xattn_uncertainty_gate_enabled,
+            margin_threshold=xattn_margin_threshold,
         )
         n = logits.shape[-1]
         h = w = int(n ** 0.5)
@@ -370,7 +404,13 @@ def main():
             eval_dataset = build_coco_stuff_eval_dataset(cfg)
             eval_classes = list(eval_dataset.CLASSES)
             ignore_index = int(eval_dataset.ignore_index)
-        class_clip, class_base = build_class_embeddings(frozen, cfg, eval_classes, device)
+        class_clip, class_base = build_class_embeddings(
+            frozen,
+            cfg,
+            eval_classes,
+            device,
+            keep_templates=True,
+        )
         num_classes = len(eval_classes)
         val_loader = None
         eval_mode = "cached_seg_miou"
@@ -631,6 +671,20 @@ def main():
                     num_classes,
                     ignore_index,
                     device,
+                    xattn_delta_scale=float(
+                        cfg.evaluate.get("xattn_delta_scale", 0.5)
+                    ),
+                    xattn_logit_alpha=float(
+                        cfg.evaluate.get("xattn_logit_alpha", 0.5)
+                    ),
+                    xattn_uncertainty_gate_enabled=bool(
+                        cfg.evaluate.get("xattn_uncertainty_gate_enabled", True)
+                    ),
+                    xattn_margin_threshold=(
+                        float(cfg.evaluate.get("xattn_margin_threshold", 0.05))
+                        if bool(cfg.evaluate.get("xattn_margin_gate_enabled", False))
+                        else None
+                    ),
                 )
                 print(f"[{timestamp()}] Epoch {epoch:03d}/{epochs:03d} cached eval coco_stuff mIoU={miou:.2f}%", flush=True)
         if eval_mode == "baseline_pth_val_loss":
