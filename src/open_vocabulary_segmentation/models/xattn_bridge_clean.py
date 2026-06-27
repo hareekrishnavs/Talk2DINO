@@ -479,6 +479,16 @@ class CleanBaselinePthFeatureDataset(Dataset):
             if patch_tokens_dir
             else None
         )
+        self.patch_token_source = "external_memmap" if (
+            self.patch_store is not None
+            and self.patch_store.format == "patch_tokens_memmap_v1"
+        ) else ("external_sharded" if self.patch_store is not None else ".pth")
+        if self.patch_store is not None and self.patch_token_source != "external_memmap":
+            raise ValueError(
+                "data.patch_tokens_dir/train_patch_tokens_dir/val_patch_tokens_dir was provided, "
+                f"but patch token source is `{self.patch_token_source}` from {self.patch_store.root}. "
+                "Expected external_memmap format `patch_tokens_memmap_v1` for this training path."
+            )
         file_size_gb = self.features_file.stat().st_size / (1024 ** 3)
         load_start = time.time()
         print(
@@ -518,38 +528,37 @@ class CleanBaselinePthFeatureDataset(Dataset):
             if image is None or self.visual_features_name not in image or text_features not in ann:
                 missing += 1
                 continue
-            if self.patch_features_name not in image:
-                if self.patch_store is not None:
-                    patch_tokens = {"__patch_store_image_id__": image_id}
-                    self.patch_store.assert_has(image_id)
+            if self.patch_store is not None:
+                patch_tokens = {"__patch_store_image_id__": image_id}
+                self.patch_store.assert_has(image_id)
+                if len(self.data) == 0:
+                    print(
+                        f"Using external patch token memmap store: {self.patch_store.root}",
+                        flush=True,
+                    )
+            elif self.patch_features_name not in image:
+                fallback_name = self.visual_features_name
+                if (
+                    self.allow_patch_visual_same_fallback
+                    and fallback_name in image
+                ):
                     if len(self.data) == 0:
                         print(
-                            f"Using external patch token store: {self.patch_store.root}",
+                            "WARNING: requested patch_features_name "
+                            f"`{self.patch_features_name}` is missing; falling back to "
+                            f"`{fallback_name}` because allow_patch_visual_same_fallback=true.",
                             flush=True,
                         )
+                    patch_tokens = image[fallback_name]
                 else:
-                    fallback_name = self.visual_features_name
-                    if (
-                        self.allow_patch_visual_same_fallback
-                        and fallback_name in image
-                    ):
-                        if len(self.data) == 0:
-                            print(
-                                "WARNING: requested patch_features_name "
-                                f"`{self.patch_features_name}` is missing; falling back to "
-                                f"`{fallback_name}` because allow_patch_visual_same_fallback=true.",
-                                flush=True,
-                            )
-                        patch_tokens = image[fallback_name]
-                    else:
-                        raise KeyError(
-                            "Requested patch_features_name "
-                            f"`{self.patch_features_name}` is missing from {self.features_file}. "
-                            f"Available image keys: {available_image_keys}. "
-                            "Feature extraction must store raw DINO patch tokens, set "
-                            "data.patch_tokens_dir to a sharded patch-token store, or set "
-                            "data.allow_patch_visual_same_fallback=true explicitly."
-                        )
+                    raise KeyError(
+                        "Requested patch_features_name "
+                        f"`{self.patch_features_name}` is missing from {self.features_file}. "
+                        f"Available image keys: {available_image_keys}. "
+                        "Feature extraction must store raw DINO patch tokens, set "
+                        "data.patch_tokens_dir to a sharded patch-token store, or set "
+                        "data.allow_patch_visual_same_fallback=true explicitly."
+                    )
             else:
                 patch_tokens = image[self.patch_features_name]
             self.data.append({
@@ -562,7 +571,7 @@ class CleanBaselinePthFeatureDataset(Dataset):
         if missing:
             print(f"WARNING: skipped {missing} annotations with missing features.", flush=True)
         print(
-            f"Baseline-style train samples: {len(self.data)} "
+            f"Baseline-style samples: {len(self.data)} "
             f"(visual_features_name={self.visual_features_name}, "
             f"patch_features_name={self.patch_features_name}, "
             f"text_features={text_features}, "
@@ -584,6 +593,7 @@ class CleanBaselinePthFeatureDataset(Dataset):
     def __getitem__(self, idx):
         item = dict(self.data[idx])
         item["patch_tokens"] = self._resolve_patch_tokens(item["patch_tokens"])
+        item["patch_token_source"] = self.patch_token_source
         return item
 
     def _resolve_patch_tokens(self, value):
