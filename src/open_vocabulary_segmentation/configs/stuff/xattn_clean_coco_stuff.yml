@@ -12,10 +12,6 @@ data:
   visual_features_name: disentangled_self_attn
   patch_features_name: patch_tokens
   allow_patch_visual_same_fallback: false
-  patch_tokens_dir: null
-  train_patch_tokens_dir: null
-  val_patch_tokens_dir: null
-  patch_shard_cache_size: 2
   text_features: ann_feats
   mmap_features: false
   train_ann_path: /scratch/haree/talk2dino_features/coco_stuff2017_vitb/train.pth

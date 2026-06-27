@@ -139,23 +139,6 @@ def dense_topk_editor_losses(stats, dense_cfg, eval_cfg):
 
     base_logits = stats["base_patch_logits"].float()
     xattn_logits = stats["xattn_patch_logits"].float()
-    top2 = base_logits.topk(min(2, base_logits.shape[1]), dim=1).values
-    if top2.shape[1] < 2:
-        margin = torch.zeros_like(base_logits[:, :1])
-    else:
-        margin = top2[:, :1] - top2[:, 1:2]
-    confident_mask = (margin > float(dense_cfg.confident_margin)).squeeze(1)
-    uncertain_mask = (margin < float(dense_cfg.uncertain_margin)).squeeze(1)
-    if not confident_mask.any() and not uncertain_mask.any():
-        return {
-            "loss_dense_confident_kl": zero,
-            "loss_dense_uncertain_entropy": zero,
-            "dense_confident_patch_frac": zero,
-            "dense_uncertain_patch_frac": zero,
-            "dense_edited_fraction": zero,
-            "dense_gate_mean": zero,
-            "dense_gate_max": zero,
-        }
     edited_logits, editor_stats = topk_xattn_logit_editor(
         base_logits,
         xattn_logits,
@@ -167,6 +150,13 @@ def dense_topk_editor_losses(stats, dense_cfg, eval_cfg):
         margin_temperature=float(eval_cfg.get("xattn_margin_temperature", 0.05)),
         use_uncertainty_gate=bool(eval_cfg.get("xattn_editor_use_uncertainty_gate", True)),
     )
+    top2 = base_logits.topk(min(2, base_logits.shape[1]), dim=1).values
+    if top2.shape[1] < 2:
+        margin = torch.zeros_like(base_logits[:, :1])
+    else:
+        margin = top2[:, :1] - top2[:, 1:2]
+    confident_mask = (margin > float(dense_cfg.confident_margin)).squeeze(1)
+    uncertain_mask = (margin < float(dense_cfg.uncertain_margin)).squeeze(1)
     temp = max(float(dense_cfg.dense_temperature), 1e-6)
 
     loss_conf = zero
@@ -222,21 +212,13 @@ def bridge_safety_losses(stats, safety_cfg):
         float(safety_cfg.min_base_mapped_cosine) - cosine
     ).pow(2).mean()
     loss_attn_prior = zero
-    if (
-        float(safety_cfg.attn_prior_weight) != 0.0
-        and "attention_probs" in stats
-        and "base_sim" in stats
-    ):
+    if "attention_probs" in stats and "base_sim" in stats:
         temp = max(float(safety_cfg.attn_prior_temperature), 1e-6)
         base_prior = F.softmax(stats["base_sim"].detach().float() / temp, dim=-1)
         xattn_attn = stats["attention_probs"].float().mean(dim=1).clamp_min(1e-8)
         loss_attn_prior = kl_rows(torch.log(xattn_attn), base_prior)
     loss_patch_preserve = zero
-    if (
-        float(safety_cfg.patch_preserve_weight) != 0.0
-        and "xattn_patch_logits" in stats
-        and "base_patch_logits" in stats
-    ):
+    if "xattn_patch_logits" in stats and "base_patch_logits" in stats:
         temp = max(float(safety_cfg.patch_preserve_temperature), 1e-6)
         p_base = F.softmax(stats["base_patch_logits"].detach().float() / temp, dim=-1)
         log_p_xattn = F.log_softmax(
@@ -349,28 +331,6 @@ def finalize_epoch_accumulators(acc, count):
     return {
         key: (value / count if key in mean_keys else value)
         for key, value in acc.items()
-    }
-
-
-def build_bridge_stats_config(safety_cfg, dense_cfg):
-    need_attn_prior = (
-        bool(safety_cfg.enabled)
-        and float(safety_cfg.attn_prior_weight) != 0.0
-    )
-    need_patch_preserve = (
-        bool(safety_cfg.enabled)
-        and float(safety_cfg.patch_preserve_weight) != 0.0
-    )
-    need_dense_patch = (
-        bool(dense_cfg.enabled)
-        and (
-            float(dense_cfg.confident_kl_weight) != 0.0
-            or float(dense_cfg.uncertain_entropy_weight) != 0.0
-        )
-    )
-    return {
-        "attention_probs": need_attn_prior,
-        "patch_logits": need_patch_preserve or need_dense_patch,
     }
 
 
@@ -567,11 +527,6 @@ def main():
             allow_patch_visual_same_fallback=bool(
                 cfg.data.get("allow_patch_visual_same_fallback", False)
             ),
-            patch_tokens_dir=cfg.data.get(
-                "train_patch_tokens_dir",
-                cfg.data.get("patch_tokens_dir", None),
-            ),
-            patch_shard_cache_size=int(cfg.data.get("patch_shard_cache_size", 2)),
         )
         train_feature_source = "baseline_pth_in_memory"
     else:
@@ -619,11 +574,6 @@ def main():
             allow_patch_visual_same_fallback=bool(
                 cfg.data.get("allow_patch_visual_same_fallback", False)
             ),
-            patch_tokens_dir=cfg.data.get(
-                "val_patch_tokens_dir",
-                cfg.data.get("eval_patch_tokens_dir", cfg.data.get("patch_tokens_dir", None)),
-            ),
-            patch_shard_cache_size=int(cfg.data.get("patch_shard_cache_size", 2)),
         )
         val_loader = DataLoader(
             val_set,
@@ -670,7 +620,6 @@ def main():
     scaler = torch.amp.GradScaler("cuda", enabled=bool(cfg.train.fp16))
     safety_cfg = get_safety_cfg(cfg)
     dense_cfg = get_dense_cfg(cfg)
-    bridge_stats_config = build_bridge_stats_config(safety_cfg, dense_cfg)
     train_log_path = out / "train_log.jsonl"
 
     print("=" * 78, flush=True)
@@ -746,10 +695,6 @@ def main():
         print(f"data.visual_features_name : {cfg.data.get('visual_features_name', cfg.data.get('features_name', 'disentangled_self_attn'))}", flush=True)
         print(f"data.patch_features_name  : {cfg.data.get('patch_features_name', cfg.data.get('features_name', 'disentangled_self_attn'))}", flush=True)
         print(f"data.allow_patch_visual_same_fallback: {cfg.data.get('allow_patch_visual_same_fallback', False)}", flush=True)
-        print(f"data.patch_tokens_dir    : {cfg.data.get('patch_tokens_dir', None)}", flush=True)
-        print(f"data.train_patch_tokens_dir: {cfg.data.get('train_patch_tokens_dir', None)}", flush=True)
-        print(f"data.val_patch_tokens_dir: {cfg.data.get('val_patch_tokens_dir', cfg.data.get('eval_patch_tokens_dir', None))}", flush=True)
-        print(f"data.patch_shard_cache_size: {cfg.data.get('patch_shard_cache_size', 2)}", flush=True)
         print(f"data.text_features        : {cfg.data.get('text_features', 'ann_feats')}", flush=True)
         print(f"data.mmap_features        : {cfg.data.get('mmap_features', True)}", flush=True)
     print(f"data.num_workers          : {cfg.data.num_workers}", flush=True)
@@ -782,12 +727,6 @@ def main():
         f"uncertain_margin={float(dense_cfg.uncertain_margin):.3f} "
         f"confident_kl_weight={float(dense_cfg.confident_kl_weight):.4g} "
         f"uncertain_entropy_weight={float(dense_cfg.uncertain_entropy_weight):.4g}",
-        flush=True,
-    )
-    print(
-        "Bridge train stats       : "
-        f"attention_probs={bridge_stats_config['attention_probs']} "
-        f"patch_logits={bridge_stats_config['patch_logits']}",
         flush=True,
     )
 
@@ -845,7 +784,6 @@ def main():
                     patches,
                     visual,
                     return_stats=True,
-                    stats_config=bridge_stats_config,
                 )
                 contrastive_temperature = max(
                     float(cfg.train.get("contrastive_temperature", 0.07)),

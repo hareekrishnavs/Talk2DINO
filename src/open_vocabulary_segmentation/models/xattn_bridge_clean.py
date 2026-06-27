@@ -8,7 +8,6 @@ import time
 from collections import OrderedDict
 from pathlib import Path
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -222,10 +221,7 @@ class CleanXAttnBridge(nn.Module):
         context = context.transpose(1, 2).reshape(bsz, num_text, embed_dim)
         return attn.out_proj(context), weights
 
-    def forward(self, text_feat, dino_patches, base_text, return_stats=False, stats_config=None):
-        stats_config = stats_config or {}
-        need_attention_probs = bool(stats_config.get("attention_probs", True))
-        need_patch_logits = bool(stats_config.get("patch_logits", True))
+    def forward(self, text_feat, dino_patches, base_text, return_stats=False):
         squeeze_text = text_feat.dim() == 2
         aligned_text_batch = (
             squeeze_text
@@ -289,7 +285,7 @@ class CleanXAttnBridge(nn.Module):
                 "gamma": gamma.detach().reshape(1),
                 "base_guidance_beta": delta.new_tensor(float(self.base_guidance_beta)),
             }
-            if base_sim is not None and need_patch_logits:
+            if base_sim is not None:
                 stats["base_sim"] = base_sim
                 patch_norm = F.normalize(dino_patches.float(), dim=-1)
                 base_norm_for_patch = F.normalize(base_text.float(), dim=-1)
@@ -303,9 +299,7 @@ class CleanXAttnBridge(nn.Module):
                     mapped.float(),
                     patch_norm,
                 )
-            elif base_sim is not None and need_attention_probs:
-                stats["base_sim"] = base_sim
-            if last_attn is not None and need_attention_probs:
+            if last_attn is not None:
                 stats["attention_probs"] = last_attn
                 stats["xattn_attn_head_mean"] = last_attn.detach().mean(dim=1)
             if squeeze_text:
@@ -328,26 +322,12 @@ class CleanXAttnBridge(nn.Module):
         return mapped
 
 
-def pairwise_scores(
-    bridge,
-    text_clip,
-    text_base,
-    patch_tokens,
-    visual_embed,
-    return_stats=False,
-    stats_config=None,
-):
+def pairwise_scores(bridge, text_clip, text_base, patch_tokens, visual_embed, return_stats=False):
     bsz = text_clip.shape[0]
     text_for_images = text_clip.unsqueeze(0).expand(bsz, -1, -1)
     base_for_images = text_base.unsqueeze(0).expand(bsz, -1, -1)
     if return_stats:
-        mapped, stats = bridge(
-            text_for_images,
-            patch_tokens,
-            base_for_images,
-            return_stats=True,
-            stats_config=stats_config,
-        )
+        mapped, stats = bridge(text_for_images, patch_tokens, base_for_images, return_stats=True)
     else:
         mapped = bridge(text_for_images, patch_tokens, base_for_images)
         stats = None
@@ -466,19 +446,12 @@ class CleanBaselinePthFeatureDataset(Dataset):
         text_features="ann_feats",
         mmap=False,
         allow_patch_visual_same_fallback=False,
-        patch_tokens_dir=None,
-        patch_shard_cache_size=2,
     ):
         self.features_file = Path(features_file)
         self.visual_features_name = visual_features_name or features_name
         self.patch_features_name = patch_features_name or features_name
         self.text_features = text_features
         self.allow_patch_visual_same_fallback = bool(allow_patch_visual_same_fallback)
-        self.patch_store = (
-            PatchTokenShardStore(patch_tokens_dir, cache_size=patch_shard_cache_size)
-            if patch_tokens_dir
-            else None
-        )
         file_size_gb = self.features_file.stat().st_size / (1024 ** 3)
         load_start = time.time()
         print(
@@ -519,37 +492,27 @@ class CleanBaselinePthFeatureDataset(Dataset):
                 missing += 1
                 continue
             if self.patch_features_name not in image:
-                if self.patch_store is not None:
-                    patch_tokens = {"__patch_store_image_id__": image_id}
-                    self.patch_store.assert_has(image_id)
+                fallback_name = self.visual_features_name
+                if (
+                    self.allow_patch_visual_same_fallback
+                    and fallback_name in image
+                ):
                     if len(self.data) == 0:
                         print(
-                            f"Using external patch token store: {self.patch_store.root}",
+                            "WARNING: requested patch_features_name "
+                            f"`{self.patch_features_name}` is missing; falling back to "
+                            f"`{fallback_name}` because allow_patch_visual_same_fallback=true.",
                             flush=True,
                         )
+                    patch_tokens = image[fallback_name]
                 else:
-                    fallback_name = self.visual_features_name
-                    if (
-                        self.allow_patch_visual_same_fallback
-                        and fallback_name in image
-                    ):
-                        if len(self.data) == 0:
-                            print(
-                                "WARNING: requested patch_features_name "
-                                f"`{self.patch_features_name}` is missing; falling back to "
-                                f"`{fallback_name}` because allow_patch_visual_same_fallback=true.",
-                                flush=True,
-                            )
-                        patch_tokens = image[fallback_name]
-                    else:
-                        raise KeyError(
-                            "Requested patch_features_name "
-                            f"`{self.patch_features_name}` is missing from {self.features_file}. "
-                            f"Available image keys: {available_image_keys}. "
-                            "Feature extraction must store raw DINO patch tokens, set "
-                            "data.patch_tokens_dir to a sharded patch-token store, or set "
-                            "data.allow_patch_visual_same_fallback=true explicitly."
-                        )
+                    raise KeyError(
+                        "Requested patch_features_name "
+                        f"`{self.patch_features_name}` is missing from {self.features_file}. "
+                        f"Available image keys: {available_image_keys}. "
+                        "Feature extraction must store raw DINO patch tokens, or set "
+                        "data.allow_patch_visual_same_fallback=true explicitly."
+                    )
             else:
                 patch_tokens = image[self.patch_features_name]
             self.data.append({
@@ -570,11 +533,10 @@ class CleanBaselinePthFeatureDataset(Dataset):
             flush=True,
         )
         if self.data:
-            sample_patch = self._resolve_patch_tokens(self.data[0]["patch_tokens"])
             print(
                 "Baseline-style feature shapes: "
                 f"visual_embed={tuple(self.data[0]['visual_embed'].shape)}, "
-                f"patch_tokens={tuple(sample_patch.shape)}",
+                f"patch_tokens={tuple(self.data[0]['patch_tokens'].shape)}",
                 flush=True,
             )
 
@@ -582,61 +544,7 @@ class CleanBaselinePthFeatureDataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, idx):
-        item = dict(self.data[idx])
-        item["patch_tokens"] = self._resolve_patch_tokens(item["patch_tokens"])
-        return item
-
-    def _resolve_patch_tokens(self, value):
-        if isinstance(value, dict) and "__patch_store_image_id__" in value:
-            return self.patch_store.get(int(value["__patch_store_image_id__"]))
-        return value
-
-
-class PatchTokenShardStore:
-    def __init__(self, root, cache_size=2):
-        self.root = Path(root)
-        with open(self.root / "manifest.json", "r") as f:
-            self.manifest = json.load(f)
-        self.patch_key = self.manifest.get("patch_key", "patch_tokens")
-        self.format = self.manifest.get("format", "patch_tokens_sharded_v1")
-        self.index = {
-            int(item["image_id"]): item
-            for item in self.manifest["index"]
-        }
-        if self.format == "patch_tokens_memmap_v1":
-            dtype_name = self.manifest.get("dtype", "float16")
-            dtype = np.float16 if dtype_name in {"float16", "fp16"} else np.float32
-            self.memmap = np.memmap(
-                self.root / self.manifest["data_file"],
-                mode="r",
-                dtype=dtype,
-                shape=tuple(self.manifest["shape"]),
-            )
-        else:
-            self.memmap = None
-        self.cache_size = max(1, int(cache_size))
-        self.cache = OrderedDict()
-
-    def assert_has(self, image_id):
-        if int(image_id) not in self.index:
-            raise KeyError(f"External patch token store missing image_id={image_id}: {self.root}")
-
-    def _load_shard(self, shard_name):
-        if shard_name not in self.cache:
-            shard = torch.load(self.root / shard_name, map_location="cpu", weights_only=False)
-            self.cache[shard_name] = shard
-            while len(self.cache) > self.cache_size:
-                self.cache.popitem(last=False)
-        else:
-            self.cache.move_to_end(shard_name)
-        return self.cache[shard_name]
-
-    def get(self, image_id):
-        ref = self.index[int(image_id)]
-        if self.format == "patch_tokens_memmap_v1":
-            return torch.as_tensor(self.memmap[int(ref["offset"])])
-        shard = self._load_shard(ref["shard"])
-        return shard[self.patch_key][int(ref["offset"])]
+        return self.data[idx]
 
 
 def save_checkpoint_clean(
