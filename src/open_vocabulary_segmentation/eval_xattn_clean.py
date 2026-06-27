@@ -20,7 +20,6 @@ from xattn_bridge_clean import (
     load_bridge_from_checkpoint,
     load_clean_config,
 )
-from xattn_logit_editor import topk_xattn_logit_editor
 
 
 def parse_args():
@@ -169,11 +168,6 @@ class CleanOfficialEvalModel(nn.Module):
         xattn_uncertainty_gate_enabled=True,
         xattn_margin_gate_enabled=False,
         xattn_margin_threshold=0.05,
-        xattn_margin_temperature=0.05,
-        xattn_topk_editor_enabled=True,
-        xattn_topk=5,
-        xattn_min_base_prob=0.02,
-        xattn_editor_use_uncertainty_gate=True,
     ):
         super().__init__()
         self.frozen = frozen
@@ -185,13 +179,7 @@ class CleanOfficialEvalModel(nn.Module):
         self.xattn_uncertainty_gate_enabled = bool(xattn_uncertainty_gate_enabled)
         self.xattn_margin_gate_enabled = bool(xattn_margin_gate_enabled)
         self.xattn_margin_threshold = float(xattn_margin_threshold)
-        self.xattn_margin_temperature = float(xattn_margin_temperature)
-        self.xattn_topk_editor_enabled = bool(xattn_topk_editor_enabled)
-        self.xattn_topk = int(xattn_topk)
-        self.xattn_min_base_prob = float(xattn_min_base_prob)
-        self.xattn_editor_use_uncertainty_gate = bool(xattn_editor_use_uncertainty_gate)
         self._logged_xattn_eval_path = False
-        self._logged_topk_editor_stats = False
 
     def __getattr__(self, name):
         try:
@@ -248,11 +236,7 @@ class CleanOfficialEvalModel(nn.Module):
                 f"logit_alpha={self.xattn_logit_alpha:.3f}, "
                 f"uncertainty_gate={self.xattn_uncertainty_gate_enabled}, "
                 f"margin_gate={self.xattn_margin_gate_enabled}, "
-                f"margin_threshold={self.xattn_margin_threshold:.3f}, "
-                f"margin_temperature={self.xattn_margin_temperature:.3f}, "
-                f"topk_editor={self.xattn_topk_editor_enabled}, "
-                f"topk={self.xattn_topk}, "
-                f"min_base_prob={self.xattn_min_base_prob:.3f}"
+                f"margin_threshold={self.xattn_margin_threshold:.3f}"
             )
             self._logged_xattn_eval_path = True
         b, npatches, channels = image_feat.shape
@@ -276,43 +260,13 @@ class CleanOfficialEvalModel(nn.Module):
             if self.xattn_margin_gate_enabled
             else None
         )
-        if self.xattn_topk_editor_enabled:
-            simmap, editor_stats = topk_xattn_logit_editor(
-                base_simmap,
-                xattn_simmap,
-                topk=self.xattn_topk,
-                min_base_prob=self.xattn_min_base_prob,
-                alpha=self.xattn_logit_alpha,
-                delta_scale=self.xattn_delta_scale,
-                margin_threshold=self.xattn_margin_threshold,
-                margin_temperature=self.xattn_margin_temperature,
-                use_uncertainty_gate=self.xattn_editor_use_uncertainty_gate,
-            )
-            if not self._logged_topk_editor_stats:
-                from utils import get_logger
-
-                get_logger().info(
-                    "Top-K XAttn Logit Editor enabled: "
-                    f"topK={self.xattn_topk}, "
-                    f"min_base_prob={self.xattn_min_base_prob:.3f}, "
-                    f"delta_scale={self.xattn_delta_scale:.3f}, "
-                    f"logit_alpha={self.xattn_logit_alpha:.3f}, "
-                    f"margin_threshold={self.xattn_margin_threshold:.3f}, "
-                    f"margin_temperature={self.xattn_margin_temperature:.3f}, "
-                    f"uncertainty_gate={self.xattn_editor_use_uncertainty_gate}, "
-                    f"edited_fraction={float(editor_stats['edited_fraction'].cpu()):.4f}, "
-                    f"gate_mean={float(editor_stats['gate_mean'].cpu()):.4f}, "
-                    f"gate_max={float(editor_stats['gate_max'].cpu()):.4f}"
-                )
-                self._logged_topk_editor_stats = True
-        else:
-            simmap = fuse_xattn_logits(
-                base_simmap,
-                xattn_simmap,
-                alpha=self.xattn_logit_alpha,
-                uncertainty_gate=self.xattn_uncertainty_gate_enabled,
-                margin_threshold=margin_threshold,
-            )
+        simmap = fuse_xattn_logits(
+            base_simmap,
+            xattn_simmap,
+            alpha=self.xattn_logit_alpha,
+            uncertainty_gate=self.xattn_uncertainty_gate_enabled,
+            margin_threshold=margin_threshold,
+        )
         mask = torch.sigmoid(simmap)
         if getattr(self.frozen, "with_bg_clean", False):
             mask = self.frozen.similarity_assignment_weighted(
@@ -367,17 +321,6 @@ def official_parity_eval(args, cfg, device):
         ),
         xattn_margin_threshold=float(
             cfg.evaluate.get("xattn_margin_threshold", 0.05)
-        ),
-        xattn_margin_temperature=float(
-            cfg.evaluate.get("xattn_margin_temperature", 0.05)
-        ),
-        xattn_topk_editor_enabled=bool(
-            cfg.evaluate.get("xattn_topk_editor_enabled", True)
-        ),
-        xattn_topk=int(cfg.evaluate.get("xattn_topk", 5)),
-        xattn_min_base_prob=float(cfg.evaluate.get("xattn_min_base_prob", 0.02)),
-        xattn_editor_use_uncertainty_gate=bool(
-            cfg.evaluate.get("xattn_editor_use_uncertainty_gate", True)
         ),
     ).to(device)
     seg_text_embedding = class_base.mean(dim=1) if class_base.dim() == 3 else class_base
@@ -494,28 +437,13 @@ def main():
         patch_norm = F.normalize(patches, dim=-1)
         xattn_logits = torch.einsum("bnd,cd->bcn", patch_norm, mapped)
         base_logits = torch.einsum("bnd,cd->bcn", patch_norm, base_text)
-        if bool(cfg.evaluate.get("xattn_topk_editor_enabled", True)):
-            logits, _ = topk_xattn_logit_editor(
-                base_logits,
-                xattn_logits,
-                topk=int(cfg.evaluate.get("xattn_topk", 5)),
-                min_base_prob=float(cfg.evaluate.get("xattn_min_base_prob", 0.02)),
-                alpha=xattn_logit_alpha,
-                delta_scale=xattn_delta_scale,
-                margin_threshold=float(cfg.evaluate.get("xattn_margin_threshold", 0.10)),
-                margin_temperature=float(cfg.evaluate.get("xattn_margin_temperature", 0.05)),
-                use_uncertainty_gate=bool(
-                    cfg.evaluate.get("xattn_editor_use_uncertainty_gate", True)
-                ),
-            )
-        else:
-            logits = fuse_xattn_logits(
-                base_logits,
-                xattn_logits,
-                alpha=xattn_logit_alpha,
-                uncertainty_gate=xattn_uncertainty_gate_enabled,
-                margin_threshold=xattn_margin_threshold,
-            )
+        logits = fuse_xattn_logits(
+            base_logits,
+            xattn_logits,
+            alpha=xattn_logit_alpha,
+            uncertainty_gate=xattn_uncertainty_gate_enabled,
+            margin_threshold=xattn_margin_threshold,
+        )
         n = logits.shape[-1]
         h = w = int(n ** 0.5)
         logits = logits[:, :, : h * w].reshape(1, num_classes, h, w)

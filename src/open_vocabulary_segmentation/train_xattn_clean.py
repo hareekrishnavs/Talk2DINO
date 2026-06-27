@@ -35,7 +35,6 @@ from eval_xattn_clean import (
     load_all_eval_samples,
     mean_template_embeddings,
 )
-from xattn_logit_editor import topk_xattn_logit_editor
 
 
 def parse_args():
@@ -91,102 +90,12 @@ def get_safety_cfg(cfg):
     return OmegaConf.merge(defaults, cfg.get("xattn_safety", {}))
 
 
-def get_dense_cfg(cfg):
-    defaults = OmegaConf.create({
-        "enabled": True,
-        "topk": 5,
-        "min_base_prob": 0.02,
-        "dense_temperature": 2.0,
-        "confident_margin": 0.20,
-        "uncertain_margin": 0.08,
-        "confident_kl_weight": 0.01,
-        "uncertain_entropy_weight": 0.005,
-    })
-    return OmegaConf.merge(defaults, cfg.get("xattn_dense", {}))
-
-
 def kl_rows(logits_log_probs, target_probs):
     return F.kl_div(
         logits_log_probs.reshape(-1, logits_log_probs.shape[-1]),
         target_probs.reshape(-1, target_probs.shape[-1]),
         reduction="batchmean",
     )
-
-
-def dense_topk_editor_losses(stats, dense_cfg, eval_cfg):
-    delta = stats.get("delta", None)
-    zero = delta.float().new_tensor(0.0) if delta is not None else torch.tensor(0.0)
-    if not bool(dense_cfg.enabled):
-        return {
-            "loss_dense_confident_kl": zero,
-            "loss_dense_uncertain_entropy": zero,
-            "dense_confident_patch_frac": zero,
-            "dense_uncertain_patch_frac": zero,
-            "dense_edited_fraction": zero,
-            "dense_gate_mean": zero,
-            "dense_gate_max": zero,
-        }
-    if "base_patch_logits" not in stats or "xattn_patch_logits" not in stats:
-        return {
-            "loss_dense_confident_kl": zero,
-            "loss_dense_uncertain_entropy": zero,
-            "dense_confident_patch_frac": zero,
-            "dense_uncertain_patch_frac": zero,
-            "dense_edited_fraction": zero,
-            "dense_gate_mean": zero,
-            "dense_gate_max": zero,
-        }
-
-    base_logits = stats["base_patch_logits"].float()
-    xattn_logits = stats["xattn_patch_logits"].float()
-    edited_logits, editor_stats = topk_xattn_logit_editor(
-        base_logits,
-        xattn_logits,
-        topk=int(dense_cfg.topk),
-        min_base_prob=float(dense_cfg.min_base_prob),
-        alpha=float(eval_cfg.get("xattn_logit_alpha", 0.5)),
-        delta_scale=float(eval_cfg.get("xattn_delta_scale", 0.5)),
-        margin_threshold=float(eval_cfg.get("xattn_margin_threshold", 0.10)),
-        margin_temperature=float(eval_cfg.get("xattn_margin_temperature", 0.05)),
-        use_uncertainty_gate=bool(eval_cfg.get("xattn_editor_use_uncertainty_gate", True)),
-    )
-    top2 = base_logits.topk(min(2, base_logits.shape[1]), dim=1).values
-    if top2.shape[1] < 2:
-        margin = torch.zeros_like(base_logits[:, :1])
-    else:
-        margin = top2[:, :1] - top2[:, 1:2]
-    confident_mask = (margin > float(dense_cfg.confident_margin)).squeeze(1)
-    uncertain_mask = (margin < float(dense_cfg.uncertain_margin)).squeeze(1)
-    temp = max(float(dense_cfg.dense_temperature), 1e-6)
-
-    loss_conf = zero
-    if confident_mask.any():
-        p_base = F.softmax((base_logits / temp).detach(), dim=1)
-        log_p_edited = F.log_softmax(edited_logits / temp, dim=1)
-        loss_conf = F.kl_div(
-            log_p_edited.permute(0, 2, 1)[confident_mask],
-            p_base.permute(0, 2, 1)[confident_mask],
-            reduction="batchmean",
-        )
-
-    loss_entropy = zero
-    if uncertain_mask.any():
-        topk = max(1, min(int(dense_cfg.topk), base_logits.shape[1]))
-        topk_idx = base_logits.topk(topk, dim=1).indices
-        edited_topk = edited_logits.gather(1, topk_idx)
-        p_topk = F.softmax(edited_topk / temp, dim=1).clamp_min(1e-8)
-        entropy = -(p_topk * torch.log(p_topk)).sum(dim=1)
-        loss_entropy = entropy[uncertain_mask].mean()
-
-    return {
-        "loss_dense_confident_kl": loss_conf,
-        "loss_dense_uncertain_entropy": loss_entropy,
-        "dense_confident_patch_frac": confident_mask.float().mean().detach(),
-        "dense_uncertain_patch_frac": uncertain_mask.float().mean().detach(),
-        "dense_edited_fraction": editor_stats["edited_fraction"],
-        "dense_gate_mean": editor_stats["gate_mean"],
-        "dense_gate_max": editor_stats["gate_max"],
-    }
 
 
 def bridge_safety_losses(stats, safety_cfg):
@@ -246,15 +155,8 @@ def init_epoch_accumulators():
         "loss_cos": 0.0,
         "loss_attn_prior": 0.0,
         "loss_patch_preserve": 0.0,
-        "loss_dense_confident_kl": 0.0,
-        "loss_dense_uncertain_entropy": 0.0,
         "attn_prior_kl": 0.0,
         "patch_preserve_kl": 0.0,
-        "dense_confident_patch_frac": 0.0,
-        "dense_uncertain_patch_frac": 0.0,
-        "dense_edited_fraction": 0.0,
-        "dense_gate_mean": 0.0,
-        "dense_gate_max": 0.0,
         "base_norm_mean": 0.0,
         "delta_norm_mean": 0.0,
         "delta_base_ratio_mean": 0.0,
@@ -268,7 +170,7 @@ def init_epoch_accumulators():
     }
 
 
-def update_epoch_accumulators(acc, loss_total, loss_infonce, losses, dense_losses, stats):
+def update_epoch_accumulators(acc, loss_total, loss_infonce, losses, stats):
     acc["loss_total"] += float(loss_total.detach().cpu())
     acc["loss_infonce"] += float(loss_infonce.detach().cpu())
     acc["loss_delta_l2"] += float(losses["loss_delta_l2"].detach().cpu())
@@ -276,15 +178,8 @@ def update_epoch_accumulators(acc, loss_total, loss_infonce, losses, dense_losse
     acc["loss_cos"] += float(losses["loss_cos"].detach().cpu())
     acc["loss_attn_prior"] += float(losses["loss_attn_prior"].detach().cpu())
     acc["loss_patch_preserve"] += float(losses["loss_patch_preserve"].detach().cpu())
-    acc["loss_dense_confident_kl"] += float(dense_losses["loss_dense_confident_kl"].detach().cpu())
-    acc["loss_dense_uncertain_entropy"] += float(dense_losses["loss_dense_uncertain_entropy"].detach().cpu())
     acc["attn_prior_kl"] += float(losses["attn_prior_kl"].detach().cpu())
     acc["patch_preserve_kl"] += float(losses["patch_preserve_kl"].detach().cpu())
-    acc["dense_confident_patch_frac"] += float(dense_losses["dense_confident_patch_frac"].detach().cpu())
-    acc["dense_uncertain_patch_frac"] += float(dense_losses["dense_uncertain_patch_frac"].detach().cpu())
-    acc["dense_edited_fraction"] += float(dense_losses["dense_edited_fraction"].detach().cpu())
-    acc["dense_gate_mean"] += float(dense_losses["dense_gate_mean"].detach().cpu())
-    acc["dense_gate_max"] = max(acc["dense_gate_max"], float(dense_losses["dense_gate_max"].detach().cpu()))
     acc["base_norm_mean"] += float(stats["base_norm"].detach().float().mean().cpu())
     acc["delta_norm_mean"] += float(stats["delta_norm"].detach().float().mean().cpu())
     ratio = stats["delta_base_ratio"].detach().float()
@@ -311,14 +206,8 @@ def finalize_epoch_accumulators(acc, count):
         "loss_cos",
         "loss_attn_prior",
         "loss_patch_preserve",
-        "loss_dense_confident_kl",
-        "loss_dense_uncertain_entropy",
         "attn_prior_kl",
         "patch_preserve_kl",
-        "dense_confident_patch_frac",
-        "dense_uncertain_patch_frac",
-        "dense_edited_fraction",
-        "dense_gate_mean",
         "base_norm_mean",
         "delta_norm_mean",
         "delta_base_ratio_mean",
@@ -352,8 +241,6 @@ def print_epoch_progress(epoch, epochs, step, total_steps, acc, start_time, lr):
         f"inf={metrics['loss_infonce']:.4f} "
         f"attn={metrics['attn_prior_kl']:.4f} "
         f"patch={metrics['patch_preserve_kl']:.4f} "
-        f"dkl={metrics['loss_dense_confident_kl']:.4f} "
-        f"dent={metrics['loss_dense_uncertain_entropy']:.4f} "
         f"d/b={metrics['delta_base_ratio_mean']:.3f} "
         f"dmax={metrics['delta_base_ratio_max']:.4f} "
         f"cos={metrics['cosine_base_mapped_mean']:.4f} "
@@ -514,19 +401,8 @@ def main():
         train_set = CleanBaselinePthFeatureDataset(
             train_feature_path,
             features_name=str(cfg.data.get("features_name", "disentangled_self_attn")),
-            visual_features_name=str(cfg.data.get(
-                "visual_features_name",
-                cfg.data.get("features_name", "disentangled_self_attn"),
-            )),
-            patch_features_name=str(cfg.data.get(
-                "patch_features_name",
-                cfg.data.get("features_name", "disentangled_self_attn"),
-            )),
             text_features=str(cfg.data.get("text_features", "ann_feats")),
             mmap=bool(cfg.data.get("mmap_features", True)),
-            allow_patch_visual_same_fallback=bool(
-                cfg.data.get("allow_patch_visual_same_fallback", False)
-            ),
         )
         train_feature_source = "baseline_pth_in_memory"
     else:
@@ -561,19 +437,8 @@ def main():
         val_set = CleanBaselinePthFeatureDataset(
             eval_feature_path,
             features_name=str(cfg.data.get("features_name", "disentangled_self_attn")),
-            visual_features_name=str(cfg.data.get(
-                "visual_features_name",
-                cfg.data.get("features_name", "disentangled_self_attn"),
-            )),
-            patch_features_name=str(cfg.data.get(
-                "patch_features_name",
-                cfg.data.get("features_name", "disentangled_self_attn"),
-            )),
             text_features=str(cfg.data.get("text_features", "ann_feats")),
             mmap=bool(cfg.data.get("mmap_features", True)),
-            allow_patch_visual_same_fallback=bool(
-                cfg.data.get("allow_patch_visual_same_fallback", False)
-            ),
         )
         val_loader = DataLoader(
             val_set,
@@ -619,7 +484,6 @@ def main():
     )
     scaler = torch.amp.GradScaler("cuda", enabled=bool(cfg.train.fp16))
     safety_cfg = get_safety_cfg(cfg)
-    dense_cfg = get_dense_cfg(cfg)
     train_log_path = out / "train_log.jsonl"
 
     print("=" * 78, flush=True)
@@ -692,9 +556,6 @@ def main():
     print(f"train_eval_mode           : {eval_mode}", flush=True)
     if train_feature_source == "baseline_pth_in_memory":
         print(f"data.features_name        : {cfg.data.get('features_name', 'disentangled_self_attn')}", flush=True)
-        print(f"data.visual_features_name : {cfg.data.get('visual_features_name', cfg.data.get('features_name', 'disentangled_self_attn'))}", flush=True)
-        print(f"data.patch_features_name  : {cfg.data.get('patch_features_name', cfg.data.get('features_name', 'disentangled_self_attn'))}", flush=True)
-        print(f"data.allow_patch_visual_same_fallback: {cfg.data.get('allow_patch_visual_same_fallback', False)}", flush=True)
         print(f"data.text_features        : {cfg.data.get('text_features', 'ann_feats')}", flush=True)
         print(f"data.mmap_features        : {cfg.data.get('mmap_features', True)}", flush=True)
     print(f"data.num_workers          : {cfg.data.num_workers}", flush=True)
@@ -715,18 +576,6 @@ def main():
         f"attn_prior_temperature={float(safety_cfg.attn_prior_temperature):.4g} "
         f"patch_preserve_weight={float(safety_cfg.patch_preserve_weight):.4g} "
         f"patch_preserve_temperature={float(safety_cfg.patch_preserve_temperature):.4g}",
-        flush=True,
-    )
-    print(
-        "XAttn dense editor: "
-        f"enabled={bool(dense_cfg.enabled)} "
-        f"topk={int(dense_cfg.topk)} "
-        f"min_base_prob={float(dense_cfg.min_base_prob):.3f} "
-        f"dense_temperature={float(dense_cfg.dense_temperature):.3f} "
-        f"confident_margin={float(dense_cfg.confident_margin):.3f} "
-        f"uncertain_margin={float(dense_cfg.uncertain_margin):.3f} "
-        f"confident_kl_weight={float(dense_cfg.confident_kl_weight):.4g} "
-        f"uncertain_entropy_weight={float(dense_cfg.uncertain_entropy_weight):.4g}",
         flush=True,
     )
 
@@ -791,11 +640,6 @@ def main():
                 )
                 loss_infonce = contrastive_loss(scores / contrastive_temperature)
                 safety_losses = bridge_safety_losses(safety_stats, safety_cfg)
-                dense_losses = dense_topk_editor_losses(
-                    safety_stats,
-                    dense_cfg,
-                    cfg.evaluate,
-                )
                 loss = loss_infonce
                 if bool(safety_cfg.enabled):
                     loss = (
@@ -806,12 +650,6 @@ def main():
                         + float(safety_cfg.attn_prior_weight) * safety_losses["loss_attn_prior"]
                         + float(safety_cfg.patch_preserve_weight) * safety_losses["loss_patch_preserve"]
                     )
-                if bool(dense_cfg.enabled):
-                    loss = (
-                        loss
-                        + float(dense_cfg.confident_kl_weight) * dense_losses["loss_dense_confident_kl"]
-                        + float(dense_cfg.uncertain_entropy_weight) * dense_losses["loss_dense_uncertain_entropy"]
-                    )
             if not torch.isfinite(loss):
                 print("WARNING: loss became NaN/Inf; saving checkpoint_last.pth and stopping cleanly.", flush=True)
                 stop_training = True
@@ -820,7 +658,7 @@ def main():
             scaler.step(optimizer)
             scaler.update()
             scheduler.step()
-            update_epoch_accumulators(acc, loss, loss_infonce, safety_losses, dense_losses, safety_stats)
+            update_epoch_accumulators(acc, loss, loss_infonce, safety_losses, safety_stats)
             acc["data_time"] += data_time
             acc["compute_time"] += time.time() - compute_start
             count += 1
@@ -855,14 +693,8 @@ def main():
             f"loss_cos={epoch_metrics['loss_cos']:.6f} "
             f"loss_attn_prior={epoch_metrics['loss_attn_prior']:.6f} "
             f"loss_patch_preserve={epoch_metrics['loss_patch_preserve']:.6f} "
-            f"loss_dense_confident_kl={epoch_metrics['loss_dense_confident_kl']:.6f} "
-            f"loss_dense_uncertain_entropy={epoch_metrics['loss_dense_uncertain_entropy']:.6f} "
             f"attn_prior_kl={epoch_metrics['attn_prior_kl']:.6f} "
             f"patch_preserve_kl={epoch_metrics['patch_preserve_kl']:.6f} "
-            f"dense_confident_patch_frac={epoch_metrics['dense_confident_patch_frac']:.4f} "
-            f"dense_uncertain_patch_frac={epoch_metrics['dense_uncertain_patch_frac']:.4f} "
-            f"dense_topk={int(dense_cfg.topk)} "
-            f"dense_min_base_prob={float(dense_cfg.min_base_prob):.3f} "
             f"base_norm={epoch_metrics['base_norm_mean']:.4f} "
             f"delta_norm={epoch_metrics['delta_norm_mean']:.4f} "
             f"delta/base_mean={epoch_metrics['delta_base_ratio_mean']:.4f} "
@@ -959,17 +791,8 @@ def main():
             "loss_cos": epoch_metrics["loss_cos"],
             "loss_attn_prior": epoch_metrics["loss_attn_prior"],
             "loss_patch_preserve": epoch_metrics["loss_patch_preserve"],
-            "loss_dense_confident_kl": epoch_metrics["loss_dense_confident_kl"],
-            "loss_dense_uncertain_entropy": epoch_metrics["loss_dense_uncertain_entropy"],
             "attn_prior_kl": epoch_metrics["attn_prior_kl"],
             "patch_preserve_kl": epoch_metrics["patch_preserve_kl"],
-            "dense_confident_patch_frac": epoch_metrics["dense_confident_patch_frac"],
-            "dense_uncertain_patch_frac": epoch_metrics["dense_uncertain_patch_frac"],
-            "dense_edited_fraction": epoch_metrics["dense_edited_fraction"],
-            "dense_gate_mean": epoch_metrics["dense_gate_mean"],
-            "dense_gate_max": epoch_metrics["dense_gate_max"],
-            "dense_topk": int(dense_cfg.topk),
-            "dense_min_base_prob": float(dense_cfg.min_base_prob),
             "miou": miou,
             "val_loss": val_loss,
             "eval_mode": eval_mode,
@@ -983,7 +806,6 @@ def main():
                 "base_guidance_normalize": bool(cfg.bridge.get("base_guidance_normalize", True)),
                 "base_guidance_temperature": float(cfg.bridge.get("base_guidance_temperature", 1.0)),
             },
-            "xattn_dense": OmegaConf.to_container(dense_cfg, resolve=True),
             "delta_base_ratio_mean": epoch_metrics["delta_base_ratio_mean"],
             "delta_base_ratio_max": epoch_metrics["delta_base_ratio_max"],
             "cosine_base_mapped_mean": epoch_metrics["cosine_base_mapped_mean"],
@@ -1005,7 +827,6 @@ def main():
                 "base_guidance_normalize": bool(cfg.bridge.get("base_guidance_normalize", True)),
                 "base_guidance_temperature": float(cfg.bridge.get("base_guidance_temperature", 1.0)),
             },
-            "xattn_dense": OmegaConf.to_container(dense_cfg, resolve=True),
         }
         save_checkpoint_clean(
             out / "checkpoint_last.pth",
@@ -1040,17 +861,8 @@ def main():
             "loss_cos": epoch_metrics["loss_cos"],
             "loss_attn_prior": epoch_metrics["loss_attn_prior"],
             "loss_patch_preserve": epoch_metrics["loss_patch_preserve"],
-            "loss_dense_confident_kl": epoch_metrics["loss_dense_confident_kl"],
-            "loss_dense_uncertain_entropy": epoch_metrics["loss_dense_uncertain_entropy"],
             "attn_prior_kl": epoch_metrics["attn_prior_kl"],
             "patch_preserve_kl": epoch_metrics["patch_preserve_kl"],
-            "dense_confident_patch_frac": epoch_metrics["dense_confident_patch_frac"],
-            "dense_uncertain_patch_frac": epoch_metrics["dense_uncertain_patch_frac"],
-            "dense_edited_fraction": epoch_metrics["dense_edited_fraction"],
-            "dense_gate_mean": epoch_metrics["dense_gate_mean"],
-            "dense_gate_max": epoch_metrics["dense_gate_max"],
-            "dense_topk": int(dense_cfg.topk),
-            "dense_min_base_prob": float(dense_cfg.min_base_prob),
             "base_norm_mean": epoch_metrics["base_norm_mean"],
             "delta_norm_mean": epoch_metrics["delta_norm_mean"],
             "delta_base_ratio_mean": epoch_metrics["delta_base_ratio_mean"],

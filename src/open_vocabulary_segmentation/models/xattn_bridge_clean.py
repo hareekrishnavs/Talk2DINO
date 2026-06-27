@@ -441,17 +441,12 @@ class CleanBaselinePthFeatureDataset(Dataset):
         self,
         features_file,
         features_name="disentangled_self_attn",
-        visual_features_name=None,
-        patch_features_name=None,
         text_features="ann_feats",
         mmap=False,
-        allow_patch_visual_same_fallback=False,
     ):
         self.features_file = Path(features_file)
-        self.visual_features_name = visual_features_name or features_name
-        self.patch_features_name = patch_features_name or features_name
+        self.features_name = features_name
         self.text_features = text_features
-        self.allow_patch_visual_same_fallback = bool(allow_patch_visual_same_fallback)
         file_size_gb = self.features_file.stat().st_size / (1024 ** 3)
         load_start = time.time()
         print(
@@ -474,51 +469,16 @@ class CleanBaselinePthFeatureDataset(Dataset):
         images = {int(img["id"]): img for img in data["images"]}
         self.data = []
         missing = 0
-        available_image_keys = sorted({
-            key
-            for image in images.values()
-            for key in image.keys()
-        })
-        if self.patch_features_name == self.visual_features_name:
-            print(
-                "WARNING: patch_features_name == visual_features_name; "
-                "XAttn K/V may not match official eval DINO patch tokens.",
-                flush=True,
-            )
         for ann in data["annotations"]:
             image_id = int(ann["image_id"])
             image = images.get(image_id)
-            if image is None or self.visual_features_name not in image or text_features not in ann:
+            if image is None or features_name not in image or text_features not in ann:
                 missing += 1
                 continue
-            if self.patch_features_name not in image:
-                fallback_name = self.visual_features_name
-                if (
-                    self.allow_patch_visual_same_fallback
-                    and fallback_name in image
-                ):
-                    if len(self.data) == 0:
-                        print(
-                            "WARNING: requested patch_features_name "
-                            f"`{self.patch_features_name}` is missing; falling back to "
-                            f"`{fallback_name}` because allow_patch_visual_same_fallback=true.",
-                            flush=True,
-                        )
-                    patch_tokens = image[fallback_name]
-                else:
-                    raise KeyError(
-                        "Requested patch_features_name "
-                        f"`{self.patch_features_name}` is missing from {self.features_file}. "
-                        f"Available image keys: {available_image_keys}. "
-                        "Feature extraction must store raw DINO patch tokens, or set "
-                        "data.allow_patch_visual_same_fallback=true explicitly."
-                    )
-            else:
-                patch_tokens = image[self.patch_features_name]
             self.data.append({
                 "text_clip": ann[text_features],
-                "visual_embed": image[self.visual_features_name],
-                "patch_tokens": patch_tokens,
+                "visual_embed": image[features_name],
+                "patch_tokens": image[features_name],
                 "image_id": image_id,
                 "annotation_id": int(ann.get("id", len(self.data))),
             })
@@ -526,19 +486,10 @@ class CleanBaselinePthFeatureDataset(Dataset):
             print(f"WARNING: skipped {missing} annotations with missing features.", flush=True)
         print(
             f"Baseline-style train samples: {len(self.data)} "
-            f"(visual_features_name={self.visual_features_name}, "
-            f"patch_features_name={self.patch_features_name}, "
-            f"text_features={text_features}, "
+            f"(features_name={features_name}, text_features={text_features}, "
             f"index_build={format_seconds(time.time() - build_start)})",
             flush=True,
         )
-        if self.data:
-            print(
-                "Baseline-style feature shapes: "
-                f"visual_embed={tuple(self.data[0]['visual_embed'].shape)}, "
-                f"patch_tokens={tuple(self.data[0]['patch_tokens'].shape)}",
-                flush=True,
-            )
 
     def __len__(self):
         return len(self.data)
