@@ -66,12 +66,6 @@ def tensor_shape(value):
     return type(value).__name__
 
 
-def tensor_dtype(value):
-    if torch.is_tensor(value):
-        return str(value.dtype)
-    return type(value).__name__
-
-
 def file_size_mb(path):
     path = Path(path)
     if not path.exists():
@@ -380,34 +374,6 @@ def build_bridge_stats_config(safety_cfg, dense_cfg):
     }
 
 
-def bridge_stats_reasons(safety_cfg, dense_cfg):
-    attn_reasons = []
-    patch_reasons = []
-    if bool(safety_cfg.enabled) and float(safety_cfg.attn_prior_weight) > 0.0:
-        attn_reasons.append("xattn_safety.attn_prior_weight > 0")
-    if bool(safety_cfg.enabled) and float(safety_cfg.patch_preserve_weight) > 0.0:
-        patch_reasons.append("xattn_safety.patch_preserve_weight > 0")
-    if bool(dense_cfg.enabled):
-        patch_reasons.append("xattn_dense.enabled=true")
-    return (
-        ", ".join(attn_reasons) if attn_reasons else "not required by enabled losses",
-        ", ".join(patch_reasons) if patch_reasons else "not required by enabled losses",
-    )
-
-
-def patch_source_name(dataset):
-    return str(getattr(dataset, "patch_token_source", "unknown"))
-
-
-def ensure_external_memmap_patch_source(dataset, split_name, patch_tokens_dir):
-    if patch_tokens_dir and patch_source_name(dataset) != "external_memmap":
-        raise RuntimeError(
-            f"{split_name} patch token source is `{patch_source_name(dataset)}`, "
-            f"but external_memmap is required when {split_name}_patch_tokens_dir is set: "
-            f"{patch_tokens_dir}"
-        )
-
-
 def print_epoch_progress(epoch, epochs, step, total_steps, acc, start_time, lr):
     total_steps = max(1, total_steps)
     step = min(step, total_steps)
@@ -459,16 +425,7 @@ def maybe_auto_resume(out, cfg, bridge, optimizer, scheduler, scaler, device):
     if resume_path is None and auto_resume:
         candidate = out / "checkpoint_last.pth"
         if candidate.exists():
-            print(
-                f"[{timestamp()}] Auto-resume enabled: loading existing checkpoint_last.pth",
-                flush=True,
-            )
             resume_path = candidate
-        else:
-            print(
-                f"[{timestamp()}] Auto-resume enabled but no checkpoint found: starting fresh",
-                flush=True,
-            )
     if resume_path is None:
         return 1, -float("inf"), 0
 
@@ -489,8 +446,6 @@ def maybe_auto_resume(out, cfg, bridge, optimizer, scheduler, scaler, device):
     last_epoch = int(payload.get("epoch", 0))
     best_miou = float(payload.get("best_miou", -float("inf")))
     best_epoch = int(payload.get("best_epoch", 0))
-    payload_cfg = payload.get("config", {})
-    payload_method = payload.get("method_name", payload.get("method", "unknown"))
     if best_epoch == 0 and math.isinf(best_miou):
         fallback_metric = payload.get("val_loss", None)
         if fallback_metric is None:
@@ -502,12 +457,6 @@ def maybe_auto_resume(out, cfg, bridge, optimizer, scheduler, scaler, device):
         f"[{timestamp()}] Auto-continue loaded checkpoint: {resume_path} "
         f"(last_epoch={last_epoch}, next_epoch={last_epoch + 1}, "
         f"best_metric={best_miou:.4f}, best_epoch={best_epoch})",
-        flush=True,
-    )
-    print(
-        f"[{timestamp()}] Resume checkpoint metadata: "
-        f"method={payload_method}, "
-        f"config_method={payload_cfg.get('method_name', 'unknown') if isinstance(payload_cfg, dict) else 'unknown'}",
         flush=True,
     )
     return last_epoch + 1, best_miou, best_epoch
@@ -599,14 +548,6 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
-    train_patch_tokens_dir = cfg.data.get(
-        "train_patch_tokens_dir",
-        cfg.data.get("patch_tokens_dir", None),
-    )
-    val_patch_tokens_dir = cfg.data.get(
-        "val_patch_tokens_dir",
-        cfg.data.get("eval_patch_tokens_dir", cfg.data.get("patch_tokens_dir", None)),
-    )
 
     train_feature_path = Path(args.train_features)
     if train_feature_path.is_file():
@@ -626,11 +567,13 @@ def main():
             allow_patch_visual_same_fallback=bool(
                 cfg.data.get("allow_patch_visual_same_fallback", False)
             ),
-            patch_tokens_dir=train_patch_tokens_dir,
+            patch_tokens_dir=cfg.data.get(
+                "train_patch_tokens_dir",
+                cfg.data.get("patch_tokens_dir", None),
+            ),
             patch_shard_cache_size=int(cfg.data.get("patch_shard_cache_size", 2)),
         )
         train_feature_source = "baseline_pth_in_memory"
-        ensure_external_memmap_patch_source(train_set, "train", train_patch_tokens_dir)
     else:
         train_set = CleanFeatureDataset(
             args.train_features,
@@ -676,10 +619,12 @@ def main():
             allow_patch_visual_same_fallback=bool(
                 cfg.data.get("allow_patch_visual_same_fallback", False)
             ),
-            patch_tokens_dir=val_patch_tokens_dir,
+            patch_tokens_dir=cfg.data.get(
+                "val_patch_tokens_dir",
+                cfg.data.get("eval_patch_tokens_dir", cfg.data.get("patch_tokens_dir", None)),
+            ),
             patch_shard_cache_size=int(cfg.data.get("patch_shard_cache_size", 2)),
         )
-        ensure_external_memmap_patch_source(val_set, "val", val_patch_tokens_dir)
         val_loader = DataLoader(
             val_set,
             batch_size=int(cfg.train.batch_size),
@@ -726,15 +671,7 @@ def main():
     safety_cfg = get_safety_cfg(cfg)
     dense_cfg = get_dense_cfg(cfg)
     bridge_stats_config = build_bridge_stats_config(safety_cfg, dense_cfg)
-    attention_stats_reason, patch_stats_reason = bridge_stats_reasons(safety_cfg, dense_cfg)
     train_log_path = out / "train_log.jsonl"
-    first_patch = first_train_sample.get("patch_tokens", None)
-    if first_patch is None:
-        raise RuntimeError("Training sample has no patch_tokens; raw patch-token XAttn K/V cannot run.")
-    if torch.is_tensor(first_patch) and first_patch.shape[-1] != 768:
-        raise RuntimeError(
-            f"Expected raw patch_tokens last dim 768, got shape {tuple(first_patch.shape)}"
-        )
 
     print("=" * 78, flush=True)
     print(f"[{timestamp()}] Starting {METHOD_NAME} training", flush=True)
@@ -751,14 +688,9 @@ def main():
     print(f"Checkpoint policy         : last every epoch, epoch snapshot every {cfg.train.save_every}, best on eval improvement", flush=True)
     print("-" * 78, flush=True)
     print("Method wiring", flush=True)
-    print(f"  CLIP/text feature       : .pth[{cfg.data.get('text_features', 'ann_feats')}]", flush=True)
-    print(f"  Visual contrastive target: .pth[{cfg.data.get('visual_features_name', cfg.data.get('features_name', 'disentangled_self_attn'))}]", flush=True)
-    print(f"  XAttn K/V patch tokens  : {patch_source_name(train_set)} {cfg.data.get('patch_features_name', 'patch_tokens')}", flush=True)
-    print(f"  Train patch token dir   : {train_patch_tokens_dir}", flush=True)
-    print(f"  Val patch token dir     : {val_patch_tokens_dir}", flush=True)
-    print(f"  Main InfoNCE target     : visual_embed from .pth[{cfg.data.get('visual_features_name', cfg.data.get('features_name', 'disentangled_self_attn'))}]", flush=True)
-    print("  Top-K editor used in main InfoNCE: false", flush=True)
-    print(f"  Top-K editor used in dense loss: {bool(dense_cfg.enabled)}", flush=True)
+    print(f"  Text/Q source           : CLIP annotation feature `{cfg.data.get('text_features', 'ann_feats')}`", flush=True)
+    print(f"  DINO K/V source         : image feature `{cfg.data.get('features_name', 'disentangled_self_attn')}`", flush=True)
+    print(f"  Visual target           : same DINO region-aware feature `{cfg.data.get('features_name', 'disentangled_self_attn')}`", flush=True)
     print("  Base text projection    : frozen original Talk2DINO projection", flush=True)
     print("  Objective               : pairwise BxB InfoNCE over score(text_i, image_j)", flush=True)
     print("  Trainable module        : XAttnBridge_Clean only", flush=True)
@@ -789,19 +721,9 @@ def main():
         flush=True,
     )
     print("-" * 78, flush=True)
-    print("Feature source verification", flush=True)
-    print(f"  train feature file path : {args.train_features}", flush=True)
-    print(f"  val feature file path   : {args.eval_features}", flush=True)
-    print(f"  train patch token dir   : {train_patch_tokens_dir}", flush=True)
-    print(f"  val patch token dir     : {val_patch_tokens_dir}", flush=True)
-    print(f"  visual_features_name    : {cfg.data.get('visual_features_name', cfg.data.get('features_name', 'disentangled_self_attn'))}", flush=True)
-    print(f"  patch_features_name     : {cfg.data.get('patch_features_name', 'patch_tokens')}", flush=True)
-    print(f"  text_features           : {cfg.data.get('text_features', 'ann_feats')}", flush=True)
-    print(f"  patch_tokens source     : {patch_source_name(train_set)}", flush=True)
-    print(f"  sample visual_embed     : shape={tensor_shape(first_train_sample['visual_embed'])} dtype={tensor_dtype(first_train_sample['visual_embed'])}", flush=True)
-    print(f"  sample text_embed       : shape={tensor_shape(first_train_sample['text_clip'])} dtype={tensor_dtype(first_train_sample['text_clip'])}", flush=True)
-    print(f"  sample patch_tokens     : shape={tensor_shape(first_train_sample['patch_tokens'])} dtype={tensor_dtype(first_train_sample['patch_tokens'])}", flush=True)
-    print(f"  patch_tokens last dim   : {first_train_sample['patch_tokens'].shape[-1] if torch.is_tensor(first_train_sample['patch_tokens']) else 'unknown'}", flush=True)
+    print(f"Sample text_clip shape    : {tensor_shape(first_train_sample['text_clip'])}", flush=True)
+    print(f"Sample patch_tokens shape : {tensor_shape(first_train_sample['patch_tokens'])}", flush=True)
+    print(f"Sample visual_embed shape : {tensor_shape(first_train_sample['visual_embed'])}", flush=True)
     if "text_base" in first_train_sample:
         print(f"Sample text_base shape    : {tensor_shape(first_train_sample['text_base'])}", flush=True)
     print("-" * 78, flush=True)
@@ -851,14 +773,6 @@ def main():
         flush=True,
     )
     print(
-        "Loss routing: "
-        f"Base-guided attention={bool(cfg.bridge.get('base_guided_attention', True))} "
-        f"Dense losses={bool(dense_cfg.enabled)} "
-        f"Attention prior loss={bool(safety_cfg.enabled) and float(safety_cfg.attn_prior_weight) > 0.0} "
-        f"Patch-preserve loss={bool(safety_cfg.enabled) and float(safety_cfg.patch_preserve_weight) > 0.0}",
-        flush=True,
-    )
-    print(
         "XAttn dense editor: "
         f"enabled={bool(dense_cfg.enabled)} "
         f"topk={int(dense_cfg.topk)} "
@@ -874,14 +788,6 @@ def main():
         "Bridge train stats       : "
         f"attention_probs={bridge_stats_config['attention_probs']} "
         f"patch_logits={bridge_stats_config['patch_logits']}",
-        flush=True,
-    )
-    print(
-        "Slowdown sources         : "
-        f"requires_attention_probs={bridge_stats_config['attention_probs']} "
-        f"reason={attention_stats_reason}; "
-        f"requires_patch_logits={bridge_stats_config['patch_logits']} "
-        f"reason={patch_stats_reason}",
         flush=True,
     )
 
@@ -903,8 +809,6 @@ def main():
             flush=True,
         )
         return
-    dense_tensor_log_printed = False
-    missing_patch_warning_printed = False
     for epoch in range(start_epoch, epochs + 1):
         epoch_start = time.time()
         bridge.train()
@@ -930,29 +834,8 @@ def main():
             else:
                 with torch.no_grad():
                     text_base = frozen._frozen_base_text_to_dino(text_clip).float()
-            batch_patch_tokens = batch.get("patch_tokens", None)
-            if batch_patch_tokens is None:
-                if not missing_patch_warning_printed:
-                    print(
-                        "WARNING: batch has no patch_tokens; patch-preserve and dense losses will be zero.",
-                        flush=True,
-                    )
-                    missing_patch_warning_printed = True
-                patches = None
-            else:
-                patches = batch_patch_tokens.to(device, non_blocking=True).float()
+            patches = batch["patch_tokens"].to(device, non_blocking=True).float()
             visual = batch["visual_embed"].to(device, non_blocking=True).float()
-            if patches is None:
-                raise RuntimeError("patch_tokens is required for raw patch-token XAttn training.")
-            if not dense_tensor_log_printed:
-                print(
-                    "Dense loss tensors: "
-                    f"patch_tokens shape={tuple(patches.shape)} "
-                    f"visual_embed shape={tuple(visual.shape)} "
-                    "using patch_tokens for dense patch logits=true",
-                    flush=True,
-                )
-                dense_tensor_log_printed = True
             optimizer.zero_grad(set_to_none=True)
             with torch.amp.autocast("cuda", enabled=bool(cfg.train.fp16)):
                 scores, safety_stats = pairwise_scores(
@@ -1040,7 +923,6 @@ def main():
             f"patch_preserve_kl={epoch_metrics['patch_preserve_kl']:.6f} "
             f"dense_confident_patch_frac={epoch_metrics['dense_confident_patch_frac']:.4f} "
             f"dense_uncertain_patch_frac={epoch_metrics['dense_uncertain_patch_frac']:.4f} "
-            f"dense_edited_fraction={epoch_metrics['dense_edited_fraction']:.4f} "
             f"dense_topk={int(dense_cfg.topk)} "
             f"dense_min_base_prob={float(dense_cfg.min_base_prob):.3f} "
             f"base_norm={epoch_metrics['base_norm_mean']:.4f} "
@@ -1176,6 +1058,16 @@ def main():
             "compute_time": epoch_metrics["compute_time"],
             "avg_dataload_time_sec": epoch_metrics["data_time"],
             "avg_xattn_step_time_sec": epoch_metrics["compute_time"],
+            "contrastive_temperature": float(cfg.train.get("contrastive_temperature", 0.07)),
+            "xattn_safety": OmegaConf.to_container(safety_cfg, resolve=True),
+            "bridge_base_guidance": {
+                "base_guided_attention": bool(cfg.bridge.get("base_guided_attention", True)),
+                "base_guidance_beta": float(cfg.bridge.get("base_guidance_beta", 1.0)),
+                "base_guidance_stopgrad": bool(cfg.bridge.get("base_guidance_stopgrad", True)),
+                "base_guidance_normalize": bool(cfg.bridge.get("base_guidance_normalize", True)),
+                "base_guidance_temperature": float(cfg.bridge.get("base_guidance_temperature", 1.0)),
+            },
+            "xattn_dense": OmegaConf.to_container(dense_cfg, resolve=True),
         }
         save_checkpoint_clean(
             out / "checkpoint_last.pth",
