@@ -67,15 +67,21 @@ ccr:
 
 cpa:
   enabled: true
+  version: v2_conditional_orthogonal
   num_prototypes: 4
   hidden_dim: 256
-  prototype_scale: 0.10
+  prototype_scale: 0.15
   prototype_aggregation: logsumexp
   prototype_temperature: 0.07
   normalize: true
   topk: 5
   residual_scale: 0.25
   residual_clip: 0.5
+  use_shared_orthogonal_basis: true
+  conditional_basis_weights: true
+  weight_activation: sigmoid
+  weight_init_value: 0.075
+  prototype_dropout: 0.25
 
 cpa_loss:
   enabled: true
@@ -83,7 +89,9 @@ cpa_loss:
   preserve_weight: 0.01
   temperature: 2.0
   confident_margin: 0.20
-  diversity_weight: 0.001
+  spread_weight: 0.01
+  spread_target_cosine: 0.90
+  diversity_weight: 0.0
   diversity_margin: 0.90
   residual_l1_weight: 0.001
 

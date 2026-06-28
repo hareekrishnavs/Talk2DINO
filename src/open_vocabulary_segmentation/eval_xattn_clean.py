@@ -24,6 +24,8 @@ from class_prototype_alignment import (
     ClassPrototypeAlignmentHead,
     apply_topk_prototype_residual,
     compute_prototype_logits,
+    load_cpa_state_compat,
+    prototype_spread_loss,
 )
 
 
@@ -135,7 +137,7 @@ def load_cpa_from_payload(cfg, payload, device, enabled):
     kwargs = OmegaConf.to_container(cfg.cpa, resolve=True)
     kwargs.pop("enabled", None)
     cpa = ClassPrototypeAlignmentHead(**kwargs).to(device)
-    cpa.load_state_dict(payload["cpa"])
+    load_cpa_state_compat(cpa, payload["cpa"], log_fn=lambda message: print(message, flush=True))
     cpa.eval()
     return cpa
 
@@ -209,8 +211,12 @@ class CleanOfficialEvalModel(nn.Module):
         self._cpa_sum = {
             "cpa_residual_abs_mean": 0.0,
             "cpa_modified_fraction": 0.0,
+            "cpa_proto_pairwise_cos_mean": 0.0,
+            "cpa_conditional_weight_mean": 0.0,
         }
         self._cpa_residual_abs_max = 0.0
+        self._cpa_proto_pairwise_cos_max = -1.0
+        self._cpa_proto_pairwise_cos_min = 1.0
         self._cpa_count = 0
 
     def cpa_summary(self):
@@ -219,6 +225,10 @@ class CleanOfficialEvalModel(nn.Module):
             "cpa_residual_abs_mean": self._cpa_sum["cpa_residual_abs_mean"] / count,
             "cpa_residual_abs_max": self._cpa_residual_abs_max,
             "cpa_modified_fraction": self._cpa_sum["cpa_modified_fraction"] / count,
+            "cpa_proto_pairwise_cos_mean": self._cpa_sum["cpa_proto_pairwise_cos_mean"] / count,
+            "cpa_proto_pairwise_cos_max": self._cpa_proto_pairwise_cos_max,
+            "cpa_proto_pairwise_cos_min": self._cpa_proto_pairwise_cos_min,
+            "cpa_conditional_weight_mean": self._cpa_sum["cpa_conditional_weight_mean"] / count,
         }
 
     def __getattr__(self, name):
@@ -305,7 +315,11 @@ class CleanOfficialEvalModel(nn.Module):
             else None
         )
         if self.cpa is not None:
-            prototypes = self.cpa(mapped_text)
+            prototypes, prototype_stats = self.cpa(mapped_text, return_stats=True)
+            _, pair_mean, pair_max, pair_min = prototype_spread_loss(
+                prototypes,
+                target_cosine=0.90,
+            )
             spatial_features = image_feat.flatten(2).transpose(1, 2)
             prototype_logits = compute_prototype_logits(
                 spatial_features,
@@ -326,9 +340,21 @@ class CleanOfficialEvalModel(nn.Module):
             self._cpa_sum["cpa_modified_fraction"] += float(
                 cpa_stats["cpa_modified_fraction"].detach().cpu()
             )
+            self._cpa_sum["cpa_proto_pairwise_cos_mean"] += float(pair_mean.cpu())
+            self._cpa_sum["cpa_conditional_weight_mean"] += float(
+                prototype_stats["cpa_conditional_weight_mean"].cpu()
+            )
             self._cpa_residual_abs_max = max(
                 self._cpa_residual_abs_max,
                 float(cpa_stats["cpa_residual_abs_max"].detach().cpu()),
+            )
+            self._cpa_proto_pairwise_cos_max = max(
+                self._cpa_proto_pairwise_cos_max,
+                float(pair_max.cpu()),
+            )
+            self._cpa_proto_pairwise_cos_min = min(
+                self._cpa_proto_pairwise_cos_min,
+                float(pair_min.cpu()),
             )
             self._cpa_count += 1
         else:
@@ -471,14 +497,19 @@ def main():
         if cpa_summary is not None:
             print(
                 "CPA eval stats        : "
+                f"version={cfg.cpa.version} "
                 f"num_prototypes={int(cfg.cpa.num_prototypes)} "
                 f"aggregation={cfg.cpa.prototype_aggregation} "
+                f"prototype_temperature={float(cfg.cpa.prototype_temperature):.3f} "
                 f"topk={int(cfg.cpa.topk)} "
                 f"residual_scale={float(cfg.cpa.residual_scale):.3f} "
                 f"residual_clip={float(cfg.cpa.residual_clip):.3f} "
                 f"mean_residual={cpa_summary['cpa_residual_abs_mean']:.6f} "
                 f"max_residual={cpa_summary['cpa_residual_abs_max']:.6f} "
-                f"modified_fraction={cpa_summary['cpa_modified_fraction']:.4f}",
+                f"modified_fraction={cpa_summary['cpa_modified_fraction']:.4f} "
+                f"pairwise_cos_mean={cpa_summary['cpa_proto_pairwise_cos_mean']:.4f} "
+                f"pairwise_cos_max={cpa_summary['cpa_proto_pairwise_cos_max']:.4f} "
+                f"pairwise_cos_min={cpa_summary['cpa_proto_pairwise_cos_min']:.4f}",
                 flush=True,
             )
         with open(out / "summary.json", "w") as f:
