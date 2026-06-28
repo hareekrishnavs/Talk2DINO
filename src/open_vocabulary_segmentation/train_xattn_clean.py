@@ -31,8 +31,7 @@ from class_prototype_alignment import (
     ClassPrototypeAlignmentHead,
     apply_topk_prototype_residual,
     compute_prototype_logits,
-    load_cpa_state_compat,
-    prototype_spread_loss,
+    prototype_diversity_loss,
 )
 from eval_xattn_clean import (
     bridge_class_embeddings,
@@ -100,21 +99,15 @@ def get_safety_cfg(cfg):
 def get_cpa_cfg(cfg):
     defaults = OmegaConf.create({
         "enabled": True,
-        "version": "v2_conditional_orthogonal",
         "num_prototypes": 4,
         "hidden_dim": 256,
-        "prototype_scale": 0.15,
+        "prototype_scale": 0.10,
         "prototype_aggregation": "logsumexp",
         "prototype_temperature": 0.07,
         "normalize": True,
         "topk": 5,
         "residual_scale": 0.25,
         "residual_clip": 0.5,
-        "use_shared_orthogonal_basis": True,
-        "conditional_basis_weights": True,
-        "weight_activation": "sigmoid",
-        "weight_init_value": 0.075,
-        "prototype_dropout": 0.25,
     })
     return OmegaConf.merge(defaults, cfg.get("cpa", {}))
 
@@ -126,9 +119,7 @@ def get_cpa_loss_cfg(cfg):
         "preserve_weight": 0.01,
         "temperature": 2.0,
         "confident_margin": 0.20,
-        "spread_weight": 0.01,
-        "spread_target_cosine": 0.90,
-        "diversity_weight": 0.0,
+        "diversity_weight": 0.001,
         "diversity_margin": 0.90,
         "residual_l1_weight": 0.001,
     })
@@ -224,7 +215,7 @@ def zero_cpa_losses(reference):
     return {
         "loss_cpa_proto_infonce": zero,
         "loss_cpa_preserve": zero,
-        "loss_cpa_spread": zero,
+        "loss_cpa_diversity": zero,
         "loss_cpa_residual_l1": zero,
         "cpa_residual_abs_mean": zero,
         "cpa_residual_abs_max": zero,
@@ -232,13 +223,6 @@ def zero_cpa_losses(reference):
         "cpa_confident_patch_frac": zero,
         "cpa_proto_pairwise_cos_mean": zero,
         "cpa_proto_pairwise_cos_max": zero,
-        "cpa_proto_pairwise_cos_min": zero,
-        "cpa_spread_target_cosine": zero,
-        "cpa_conditional_weight_mean": zero,
-        "cpa_conditional_weight_min": zero,
-        "cpa_conditional_weight_max": zero,
-        "cpa_prototype_dropout": zero,
-        "cpa_prototype_active_fraction": zero,
         "cpa_topk": zero,
     }
 
@@ -252,15 +236,12 @@ def cpa_auxiliary_losses(
     loss_cfg,
     contrastive_temperature,
 ):
-    prototypes, prototype_stats = cpa(mapped_text, return_stats=True)
-    prototype_dense_scores, global_dropout_stats = compute_prototype_logits(
+    prototypes = cpa(mapped_text)
+    prototype_dense_scores = compute_prototype_logits(
         visual_embed,
         prototypes,
         temperature=cpa.prototype_temperature,
         aggregation=cpa.prototype_aggregation,
-        prototype_dropout=cpa.prototype_dropout,
-        training=cpa.training,
-        return_stats=True,
     )
     prototype_scores = (
         prototype_dense_scores.max(dim=-1).values
@@ -270,14 +251,11 @@ def cpa_auxiliary_losses(
     loss_proto_infonce = contrastive_loss(
         prototype_scores / max(float(contrastive_temperature), 1e-6)
     )
-    prototype_patch_logits, dense_dropout_stats = compute_prototype_logits(
+    prototype_patch_logits = compute_prototype_logits(
         semantic_features,
         prototypes,
         temperature=cpa.prototype_temperature,
         aggregation=cpa.prototype_aggregation,
-        prototype_dropout=cpa.prototype_dropout,
-        training=cpa.training,
-        return_stats=True,
     )
     final_patch_logits, cpa_stats = apply_topk_prototype_residual(
         base_patch_logits,
@@ -306,9 +284,9 @@ def cpa_auxiliary_losses(
             p_base.permute(0, 2, 1)[confident_mask],
             reduction="batchmean",
         )
-    loss_spread, pair_cos_mean, pair_cos_max, pair_cos_min = prototype_spread_loss(
+    loss_diversity, pair_cos_mean, pair_cos_max = prototype_diversity_loss(
         prototypes,
-        target_cosine=float(loss_cfg.spread_target_cosine),
+        margin=float(loss_cfg.diversity_margin),
     )
     selected_residual = cpa_stats["cpa_residual"].masked_select(
         cpa_stats["cpa_topk_mask"]
@@ -317,7 +295,7 @@ def cpa_auxiliary_losses(
     return {
         "loss_cpa_proto_infonce": loss_proto_infonce,
         "loss_cpa_preserve": loss_preserve,
-        "loss_cpa_spread": loss_spread,
+        "loss_cpa_diversity": loss_diversity,
         "loss_cpa_residual_l1": loss_residual_l1,
         "cpa_residual_abs_mean": cpa_stats["cpa_residual_abs_mean"],
         "cpa_residual_abs_max": cpa_stats["cpa_residual_abs_max"],
@@ -325,18 +303,6 @@ def cpa_auxiliary_losses(
         "cpa_confident_patch_frac": confident_mask.float().mean().detach(),
         "cpa_proto_pairwise_cos_mean": pair_cos_mean,
         "cpa_proto_pairwise_cos_max": pair_cos_max,
-        "cpa_proto_pairwise_cos_min": pair_cos_min,
-        "cpa_spread_target_cosine": base.new_tensor(
-            float(loss_cfg.spread_target_cosine)
-        ).detach(),
-        "cpa_conditional_weight_mean": prototype_stats["cpa_conditional_weight_mean"],
-        "cpa_conditional_weight_min": prototype_stats["cpa_conditional_weight_min"],
-        "cpa_conditional_weight_max": prototype_stats["cpa_conditional_weight_max"],
-        "cpa_prototype_dropout": base.new_tensor(float(cpa.prototype_dropout)).detach(),
-        "cpa_prototype_active_fraction": 0.5 * (
-            global_dropout_stats["cpa_prototype_active_fraction"]
-            + dense_dropout_stats["cpa_prototype_active_fraction"]
-        ),
         "cpa_topk": cpa_stats["cpa_topk"],
     }
 
@@ -354,7 +320,7 @@ def init_epoch_accumulators():
         "patch_preserve_kl": 0.0,
         "loss_cpa_proto_infonce": 0.0,
         "loss_cpa_preserve": 0.0,
-        "loss_cpa_spread": 0.0,
+        "loss_cpa_diversity": 0.0,
         "loss_cpa_residual_l1": 0.0,
         "cpa_residual_abs_mean": 0.0,
         "cpa_residual_abs_max": 0.0,
@@ -362,13 +328,6 @@ def init_epoch_accumulators():
         "cpa_confident_patch_frac": 0.0,
         "cpa_proto_pairwise_cos_mean": 0.0,
         "cpa_proto_pairwise_cos_max": 0.0,
-        "cpa_proto_pairwise_cos_min": 1.0,
-        "cpa_spread_target_cosine": 0.0,
-        "cpa_conditional_weight_mean": 0.0,
-        "cpa_conditional_weight_min": 1.0,
-        "cpa_conditional_weight_max": 0.0,
-        "cpa_prototype_dropout": 0.0,
-        "cpa_prototype_active_fraction": 0.0,
         "cpa_topk": 0.0,
         "base_norm_mean": 0.0,
         "delta_norm_mean": 0.0,
@@ -396,16 +355,12 @@ def update_epoch_accumulators(acc, loss_total, loss_infonce, losses, stats, cpa_
     for key in (
         "loss_cpa_proto_infonce",
         "loss_cpa_preserve",
-        "loss_cpa_spread",
+        "loss_cpa_diversity",
         "loss_cpa_residual_l1",
         "cpa_residual_abs_mean",
         "cpa_modified_fraction",
         "cpa_confident_patch_frac",
         "cpa_proto_pairwise_cos_mean",
-        "cpa_spread_target_cosine",
-        "cpa_conditional_weight_mean",
-        "cpa_prototype_dropout",
-        "cpa_prototype_active_fraction",
         "cpa_topk",
     ):
         acc[key] += float(cpa_losses[key].detach().cpu())
@@ -416,18 +371,6 @@ def update_epoch_accumulators(acc, loss_total, loss_infonce, losses, stats, cpa_
     acc["cpa_proto_pairwise_cos_max"] = max(
         acc["cpa_proto_pairwise_cos_max"],
         float(cpa_losses["cpa_proto_pairwise_cos_max"].detach().cpu()),
-    )
-    acc["cpa_proto_pairwise_cos_min"] = min(
-        acc["cpa_proto_pairwise_cos_min"],
-        float(cpa_losses["cpa_proto_pairwise_cos_min"].detach().cpu()),
-    )
-    acc["cpa_conditional_weight_min"] = min(
-        acc["cpa_conditional_weight_min"],
-        float(cpa_losses["cpa_conditional_weight_min"].detach().cpu()),
-    )
-    acc["cpa_conditional_weight_max"] = max(
-        acc["cpa_conditional_weight_max"],
-        float(cpa_losses["cpa_conditional_weight_max"].detach().cpu()),
     )
     acc["base_norm_mean"] += float(stats["base_norm"].detach().float().mean().cpu())
     acc["delta_norm_mean"] += float(stats["delta_norm"].detach().float().mean().cpu())
@@ -459,16 +402,12 @@ def finalize_epoch_accumulators(acc, count):
         "patch_preserve_kl",
         "loss_cpa_proto_infonce",
         "loss_cpa_preserve",
-        "loss_cpa_spread",
+        "loss_cpa_diversity",
         "loss_cpa_residual_l1",
         "cpa_residual_abs_mean",
         "cpa_modified_fraction",
         "cpa_confident_patch_frac",
         "cpa_proto_pairwise_cos_mean",
-        "cpa_spread_target_cosine",
-        "cpa_conditional_weight_mean",
-        "cpa_prototype_dropout",
-        "cpa_prototype_active_fraction",
         "cpa_topk",
         "base_norm_mean",
         "delta_norm_mean",
@@ -552,18 +491,11 @@ def maybe_auto_resume(out, cfg, bridge, cpa, optimizer, scheduler, scaler, devic
                 "CPA enabled but checkpoint does not contain CPA weights. "
                 "Start from scratch or use a CPA checkpoint."
             )
-        load_cpa_state_compat(cpa, payload["cpa"], log_fn=lambda message: print(message, flush=True))
+        cpa.load_state_dict(payload["cpa"])
     bridge._skip_zero_init_parity_check = True
     bridge._parity_checked = True
     if payload.get("optimizer") is not None:
-        try:
-            optimizer.load_state_dict(payload["optimizer"])
-        except ValueError as error:
-            print(
-                "WARNING: optimizer state is incompatible with CPA-v2 parameters; "
-                f"starting optimizer fresh ({error}).",
-                flush=True,
-            )
+        optimizer.load_state_dict(payload["optimizer"])
     if payload.get("scheduler") is not None and scheduler is not None:
         scheduler.load_state_dict(payload["scheduler"])
     if payload.get("scaler") is not None and scaler is not None:
@@ -775,7 +707,7 @@ def main():
 
     print("=" * 78, flush=True)
     method_label = (
-        f"{METHOD_NAME} + CPA-v2 Conditional Orthogonal Prototype Alignment"
+        f"{METHOD_NAME} + Class Prototype Alignment Head"
         if cpa is not None
         else METHOD_NAME
     )
@@ -881,18 +813,12 @@ def main():
     )
     print(
         "CPA: "
-        f"enabled={bool(cpa_cfg.enabled)} version={cpa_cfg.version} "
-        f"num_prototypes={int(cpa_cfg.num_prototypes)} "
+        f"enabled={bool(cpa_cfg.enabled)} num_prototypes={int(cpa_cfg.num_prototypes)} "
         f"hidden_dim={int(cpa_cfg.hidden_dim)} prototype_scale={float(cpa_cfg.prototype_scale):.3f} "
         f"aggregation={cpa_cfg.prototype_aggregation} "
         f"prototype_temperature={float(cpa_cfg.prototype_temperature):.3f} "
         f"topk={int(cpa_cfg.topk)} residual_scale={float(cpa_cfg.residual_scale):.3f} "
-        f"residual_clip={float(cpa_cfg.residual_clip):.3f} normalize={bool(cpa_cfg.normalize)} "
-        f"shared_orthogonal_basis={bool(cpa_cfg.use_shared_orthogonal_basis)} "
-        f"conditional_basis_weights={bool(cpa_cfg.conditional_basis_weights)} "
-        f"weight_activation={cpa_cfg.weight_activation} "
-        f"weight_init_value={float(cpa_cfg.weight_init_value):.3f} "
-        f"prototype_dropout={float(cpa_cfg.prototype_dropout):.3f}",
+        f"residual_clip={float(cpa_cfg.residual_clip):.3f} normalize={bool(cpa_cfg.normalize)}",
         flush=True,
     )
     print(
@@ -900,8 +826,6 @@ def main():
         f"enabled={bool(cpa_loss_cfg.enabled)} "
         f"prototype_infonce_weight={float(cpa_loss_cfg.prototype_infonce_weight):.3f} "
         f"preserve_weight={float(cpa_loss_cfg.preserve_weight):.4g} "
-        f"spread_weight={float(cpa_loss_cfg.spread_weight):.4g} "
-        f"spread_target_cosine={float(cpa_loss_cfg.spread_target_cosine):.3f} "
         f"diversity_weight={float(cpa_loss_cfg.diversity_weight):.4g} "
         f"residual_l1_weight={float(cpa_loss_cfg.residual_l1_weight):.4g} "
         f"confident_margin={float(cpa_loss_cfg.confident_margin):.3f} "
@@ -1007,7 +931,7 @@ def main():
                         loss
                         + float(cpa_loss_cfg.prototype_infonce_weight) * cpa_losses["loss_cpa_proto_infonce"]
                         + float(cpa_loss_cfg.preserve_weight) * cpa_losses["loss_cpa_preserve"]
-                        + float(cpa_loss_cfg.spread_weight) * cpa_losses["loss_cpa_spread"]
+                        + float(cpa_loss_cfg.diversity_weight) * cpa_losses["loss_cpa_diversity"]
                         + float(cpa_loss_cfg.residual_l1_weight) * cpa_losses["loss_cpa_residual_l1"]
                     )
             if not torch.isfinite(loss):
@@ -1065,7 +989,7 @@ def main():
             f"patch_preserve_kl={epoch_metrics['patch_preserve_kl']:.6f} "
             f"loss_cpa_proto_infonce={epoch_metrics['loss_cpa_proto_infonce']:.6f} "
             f"loss_cpa_preserve={epoch_metrics['loss_cpa_preserve']:.6f} "
-            f"loss_cpa_spread={epoch_metrics['loss_cpa_spread']:.6f} "
+            f"loss_cpa_diversity={epoch_metrics['loss_cpa_diversity']:.6f} "
             f"loss_cpa_residual_l1={epoch_metrics['loss_cpa_residual_l1']:.6f} "
             f"cpa_residual_abs_mean={epoch_metrics['cpa_residual_abs_mean']:.6f} "
             f"cpa_residual_abs_max={epoch_metrics['cpa_residual_abs_max']:.6f} "
@@ -1073,13 +997,6 @@ def main():
             f"cpa_confident_patch_frac={epoch_metrics['cpa_confident_patch_frac']:.4f} "
             f"cpa_proto_pairwise_cos_mean={epoch_metrics['cpa_proto_pairwise_cos_mean']:.4f} "
             f"cpa_proto_pairwise_cos_max={epoch_metrics['cpa_proto_pairwise_cos_max']:.4f} "
-            f"cpa_proto_pairwise_cos_min={epoch_metrics['cpa_proto_pairwise_cos_min']:.4f} "
-            f"cpa_spread_target_cosine={epoch_metrics['cpa_spread_target_cosine']:.4f} "
-            f"cpa_conditional_weight_mean={epoch_metrics['cpa_conditional_weight_mean']:.4f} "
-            f"cpa_conditional_weight_min={epoch_metrics['cpa_conditional_weight_min']:.4f} "
-            f"cpa_conditional_weight_max={epoch_metrics['cpa_conditional_weight_max']:.4f} "
-            f"cpa_prototype_dropout={epoch_metrics['cpa_prototype_dropout']:.3f} "
-            f"cpa_prototype_active_fraction={epoch_metrics['cpa_prototype_active_fraction']:.3f} "
             f"cpa_topk={epoch_metrics['cpa_topk']:.0f} "
             f"base_norm={epoch_metrics['base_norm_mean']:.4f} "
             f"delta_norm={epoch_metrics['delta_norm_mean']:.4f} "
@@ -1181,7 +1098,7 @@ def main():
             "patch_preserve_kl": epoch_metrics["patch_preserve_kl"],
             "loss_cpa_proto_infonce": epoch_metrics["loss_cpa_proto_infonce"],
             "loss_cpa_preserve": epoch_metrics["loss_cpa_preserve"],
-            "loss_cpa_spread": epoch_metrics["loss_cpa_spread"],
+            "loss_cpa_diversity": epoch_metrics["loss_cpa_diversity"],
             "loss_cpa_residual_l1": epoch_metrics["loss_cpa_residual_l1"],
             "cpa_residual_abs_mean": epoch_metrics["cpa_residual_abs_mean"],
             "cpa_residual_abs_max": epoch_metrics["cpa_residual_abs_max"],
@@ -1189,13 +1106,6 @@ def main():
             "cpa_confident_patch_frac": epoch_metrics["cpa_confident_patch_frac"],
             "cpa_proto_pairwise_cos_mean": epoch_metrics["cpa_proto_pairwise_cos_mean"],
             "cpa_proto_pairwise_cos_max": epoch_metrics["cpa_proto_pairwise_cos_max"],
-            "cpa_proto_pairwise_cos_min": epoch_metrics["cpa_proto_pairwise_cos_min"],
-            "cpa_spread_target_cosine": epoch_metrics["cpa_spread_target_cosine"],
-            "cpa_conditional_weight_mean": epoch_metrics["cpa_conditional_weight_mean"],
-            "cpa_conditional_weight_min": epoch_metrics["cpa_conditional_weight_min"],
-            "cpa_conditional_weight_max": epoch_metrics["cpa_conditional_weight_max"],
-            "cpa_prototype_dropout": epoch_metrics["cpa_prototype_dropout"],
-            "cpa_prototype_active_fraction": epoch_metrics["cpa_prototype_active_fraction"],
             "cpa_topk": epoch_metrics["cpa_topk"],
             "miou": miou,
             "val_loss": val_loss,
@@ -1264,7 +1174,7 @@ def main():
             "patch_preserve_kl": epoch_metrics["patch_preserve_kl"],
             "loss_cpa_proto_infonce": epoch_metrics["loss_cpa_proto_infonce"],
             "loss_cpa_preserve": epoch_metrics["loss_cpa_preserve"],
-            "loss_cpa_spread": epoch_metrics["loss_cpa_spread"],
+            "loss_cpa_diversity": epoch_metrics["loss_cpa_diversity"],
             "loss_cpa_residual_l1": epoch_metrics["loss_cpa_residual_l1"],
             "cpa_residual_abs_mean": epoch_metrics["cpa_residual_abs_mean"],
             "cpa_residual_abs_max": epoch_metrics["cpa_residual_abs_max"],
@@ -1272,13 +1182,6 @@ def main():
             "cpa_confident_patch_frac": epoch_metrics["cpa_confident_patch_frac"],
             "cpa_proto_pairwise_cos_mean": epoch_metrics["cpa_proto_pairwise_cos_mean"],
             "cpa_proto_pairwise_cos_max": epoch_metrics["cpa_proto_pairwise_cos_max"],
-            "cpa_proto_pairwise_cos_min": epoch_metrics["cpa_proto_pairwise_cos_min"],
-            "cpa_spread_target_cosine": epoch_metrics["cpa_spread_target_cosine"],
-            "cpa_conditional_weight_mean": epoch_metrics["cpa_conditional_weight_mean"],
-            "cpa_conditional_weight_min": epoch_metrics["cpa_conditional_weight_min"],
-            "cpa_conditional_weight_max": epoch_metrics["cpa_conditional_weight_max"],
-            "cpa_prototype_dropout": epoch_metrics["cpa_prototype_dropout"],
-            "cpa_prototype_active_fraction": epoch_metrics["cpa_prototype_active_fraction"],
             "cpa_topk": epoch_metrics["cpa_topk"],
             "base_norm_mean": epoch_metrics["base_norm_mean"],
             "delta_norm_mean": epoch_metrics["delta_norm_mean"],
