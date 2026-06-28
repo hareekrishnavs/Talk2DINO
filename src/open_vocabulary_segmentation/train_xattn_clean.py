@@ -27,6 +27,12 @@ from xattn_bridge_clean import (
     pairwise_scores,
     save_checkpoint_clean,
 )
+from class_prototype_alignment import (
+    ClassPrototypeAlignmentHead,
+    apply_topk_prototype_residual,
+    compute_prototype_logits,
+    prototype_diversity_loss,
+)
 from eval_xattn_clean import (
     bridge_class_embeddings,
     build_class_embeddings,
@@ -90,6 +96,64 @@ def get_safety_cfg(cfg):
     return OmegaConf.merge(defaults, cfg.get("xattn_safety", {}))
 
 
+def get_cpa_cfg(cfg):
+    defaults = OmegaConf.create({
+        "enabled": True,
+        "num_prototypes": 4,
+        "hidden_dim": 256,
+        "prototype_scale": 0.10,
+        "prototype_aggregation": "logsumexp",
+        "prototype_temperature": 0.07,
+        "normalize": True,
+        "topk": 5,
+        "residual_scale": 0.25,
+        "residual_clip": 0.5,
+    })
+    return OmegaConf.merge(defaults, cfg.get("cpa", {}))
+
+
+def get_cpa_loss_cfg(cfg):
+    defaults = OmegaConf.create({
+        "enabled": True,
+        "prototype_infonce_weight": 0.20,
+        "preserve_weight": 0.01,
+        "temperature": 2.0,
+        "confident_margin": 0.20,
+        "diversity_weight": 0.001,
+        "diversity_margin": 0.90,
+        "residual_l1_weight": 0.001,
+    })
+    return OmegaConf.merge(defaults, cfg.get("cpa_loss", {}))
+
+
+def validate_cpa_semantic_setup(cfg, feature_path, sample):
+    if not bool(cfg.get("cpa", {}).get("enabled", False)):
+        return
+    expected = "disentangled_self_attn"
+    names = {
+        "features_name": str(cfg.data.get("features_name", expected)),
+        "visual_features_name": str(cfg.data.get("visual_features_name", expected)),
+        "patch_features_name": str(cfg.data.get("patch_features_name", expected)),
+    }
+    if any(value != expected for value in names.values()):
+        raise ValueError(
+            f"CPA requires semantic disentangled_self_attn features; got {names}"
+        )
+    for key in ("patch_tokens_dir", "train_patch_tokens_dir", "val_patch_tokens_dir"):
+        if cfg.data.get(key, None) not in {None, "", "null", "None"}:
+            raise ValueError(f"CPA does not support raw patch-token option data.{key}")
+    if not feature_path.is_file():
+        raise ValueError("CPA requires the baseline-style semantic feature .pth")
+    visual = sample.get("visual_embed")
+    semantic = sample.get("patch_tokens")
+    if visual is None or semantic is None:
+        raise RuntimeError("CPA sample is missing semantic features")
+    if visual.shape != semantic.shape or visual.data_ptr() != semantic.data_ptr():
+        raise RuntimeError(
+            "CPA XAttn K/V must be the same disentangled_self_attn tensor as visual_embed"
+        )
+
+
 def kl_rows(logits_log_probs, target_probs):
     return F.kl_div(
         logits_log_probs.reshape(-1, logits_log_probs.shape[-1]),
@@ -146,6 +210,103 @@ def bridge_safety_losses(stats, safety_cfg):
     }
 
 
+def zero_cpa_losses(reference):
+    zero = reference.float().new_tensor(0.0)
+    return {
+        "loss_cpa_proto_infonce": zero,
+        "loss_cpa_preserve": zero,
+        "loss_cpa_diversity": zero,
+        "loss_cpa_residual_l1": zero,
+        "cpa_residual_abs_mean": zero,
+        "cpa_residual_abs_max": zero,
+        "cpa_modified_fraction": zero,
+        "cpa_confident_patch_frac": zero,
+        "cpa_proto_pairwise_cos_mean": zero,
+        "cpa_proto_pairwise_cos_max": zero,
+        "cpa_topk": zero,
+    }
+
+
+def cpa_auxiliary_losses(
+    cpa,
+    mapped_text,
+    visual_embed,
+    semantic_features,
+    base_patch_logits,
+    loss_cfg,
+    contrastive_temperature,
+):
+    prototypes = cpa(mapped_text)
+    prototype_dense_scores = compute_prototype_logits(
+        visual_embed,
+        prototypes,
+        temperature=cpa.prototype_temperature,
+        aggregation=cpa.prototype_aggregation,
+    )
+    prototype_scores = (
+        prototype_dense_scores.max(dim=-1).values
+        if prototype_dense_scores.dim() == 3
+        else prototype_dense_scores
+    )
+    loss_proto_infonce = contrastive_loss(
+        prototype_scores / max(float(contrastive_temperature), 1e-6)
+    )
+    prototype_patch_logits = compute_prototype_logits(
+        semantic_features,
+        prototypes,
+        temperature=cpa.prototype_temperature,
+        aggregation=cpa.prototype_aggregation,
+    )
+    final_patch_logits, cpa_stats = apply_topk_prototype_residual(
+        base_patch_logits,
+        prototype_patch_logits,
+        topk=cpa.topk,
+        residual_scale=cpa.residual_scale,
+        residual_clip=cpa.residual_clip,
+    )
+
+    base = base_patch_logits.float()
+    final = final_patch_logits.float()
+    top2 = base.topk(min(2, base.shape[1]), dim=1).values
+    margin = (
+        top2[:, 0] - top2[:, 1]
+        if top2.shape[1] > 1
+        else torch.zeros_like(top2[:, 0])
+    )
+    confident_mask = margin > float(loss_cfg.confident_margin)
+    loss_preserve = base.new_tensor(0.0)
+    if confident_mask.any():
+        temperature = max(float(loss_cfg.temperature), 1e-6)
+        p_base = F.softmax((base / temperature).detach(), dim=1)
+        log_p_final = F.log_softmax(final / temperature, dim=1)
+        loss_preserve = F.kl_div(
+            log_p_final.permute(0, 2, 1)[confident_mask],
+            p_base.permute(0, 2, 1)[confident_mask],
+            reduction="batchmean",
+        )
+    loss_diversity, pair_cos_mean, pair_cos_max = prototype_diversity_loss(
+        prototypes,
+        margin=float(loss_cfg.diversity_margin),
+    )
+    selected_residual = cpa_stats["cpa_residual"].masked_select(
+        cpa_stats["cpa_topk_mask"]
+    )
+    loss_residual_l1 = selected_residual.abs().mean()
+    return {
+        "loss_cpa_proto_infonce": loss_proto_infonce,
+        "loss_cpa_preserve": loss_preserve,
+        "loss_cpa_diversity": loss_diversity,
+        "loss_cpa_residual_l1": loss_residual_l1,
+        "cpa_residual_abs_mean": cpa_stats["cpa_residual_abs_mean"],
+        "cpa_residual_abs_max": cpa_stats["cpa_residual_abs_max"],
+        "cpa_modified_fraction": cpa_stats["cpa_modified_fraction"],
+        "cpa_confident_patch_frac": confident_mask.float().mean().detach(),
+        "cpa_proto_pairwise_cos_mean": pair_cos_mean,
+        "cpa_proto_pairwise_cos_max": pair_cos_max,
+        "cpa_topk": cpa_stats["cpa_topk"],
+    }
+
+
 def init_epoch_accumulators():
     return {
         "loss_total": 0.0,
@@ -157,6 +318,17 @@ def init_epoch_accumulators():
         "loss_patch_preserve": 0.0,
         "attn_prior_kl": 0.0,
         "patch_preserve_kl": 0.0,
+        "loss_cpa_proto_infonce": 0.0,
+        "loss_cpa_preserve": 0.0,
+        "loss_cpa_diversity": 0.0,
+        "loss_cpa_residual_l1": 0.0,
+        "cpa_residual_abs_mean": 0.0,
+        "cpa_residual_abs_max": 0.0,
+        "cpa_modified_fraction": 0.0,
+        "cpa_confident_patch_frac": 0.0,
+        "cpa_proto_pairwise_cos_mean": 0.0,
+        "cpa_proto_pairwise_cos_max": 0.0,
+        "cpa_topk": 0.0,
         "base_norm_mean": 0.0,
         "delta_norm_mean": 0.0,
         "delta_base_ratio_mean": 0.0,
@@ -170,7 +342,7 @@ def init_epoch_accumulators():
     }
 
 
-def update_epoch_accumulators(acc, loss_total, loss_infonce, losses, stats):
+def update_epoch_accumulators(acc, loss_total, loss_infonce, losses, stats, cpa_losses):
     acc["loss_total"] += float(loss_total.detach().cpu())
     acc["loss_infonce"] += float(loss_infonce.detach().cpu())
     acc["loss_delta_l2"] += float(losses["loss_delta_l2"].detach().cpu())
@@ -180,6 +352,26 @@ def update_epoch_accumulators(acc, loss_total, loss_infonce, losses, stats):
     acc["loss_patch_preserve"] += float(losses["loss_patch_preserve"].detach().cpu())
     acc["attn_prior_kl"] += float(losses["attn_prior_kl"].detach().cpu())
     acc["patch_preserve_kl"] += float(losses["patch_preserve_kl"].detach().cpu())
+    for key in (
+        "loss_cpa_proto_infonce",
+        "loss_cpa_preserve",
+        "loss_cpa_diversity",
+        "loss_cpa_residual_l1",
+        "cpa_residual_abs_mean",
+        "cpa_modified_fraction",
+        "cpa_confident_patch_frac",
+        "cpa_proto_pairwise_cos_mean",
+        "cpa_topk",
+    ):
+        acc[key] += float(cpa_losses[key].detach().cpu())
+    acc["cpa_residual_abs_max"] = max(
+        acc["cpa_residual_abs_max"],
+        float(cpa_losses["cpa_residual_abs_max"].detach().cpu()),
+    )
+    acc["cpa_proto_pairwise_cos_max"] = max(
+        acc["cpa_proto_pairwise_cos_max"],
+        float(cpa_losses["cpa_proto_pairwise_cos_max"].detach().cpu()),
+    )
     acc["base_norm_mean"] += float(stats["base_norm"].detach().float().mean().cpu())
     acc["delta_norm_mean"] += float(stats["delta_norm"].detach().float().mean().cpu())
     ratio = stats["delta_base_ratio"].detach().float()
@@ -208,6 +400,15 @@ def finalize_epoch_accumulators(acc, count):
         "loss_patch_preserve",
         "attn_prior_kl",
         "patch_preserve_kl",
+        "loss_cpa_proto_infonce",
+        "loss_cpa_preserve",
+        "loss_cpa_diversity",
+        "loss_cpa_residual_l1",
+        "cpa_residual_abs_mean",
+        "cpa_modified_fraction",
+        "cpa_confident_patch_frac",
+        "cpa_proto_pairwise_cos_mean",
+        "cpa_topk",
         "base_norm_mean",
         "delta_norm_mean",
         "delta_base_ratio_mean",
@@ -241,6 +442,8 @@ def print_epoch_progress(epoch, epochs, step, total_steps, acc, start_time, lr):
         f"inf={metrics['loss_infonce']:.4f} "
         f"attn={metrics['attn_prior_kl']:.4f} "
         f"patch={metrics['patch_preserve_kl']:.4f} "
+        f"cpa={metrics['loss_cpa_proto_infonce']:.4f} "
+        f"cpa|r|={metrics['cpa_residual_abs_mean']:.4f} "
         f"d/b={metrics['delta_base_ratio_mean']:.3f} "
         f"dmax={metrics['delta_base_ratio_max']:.4f} "
         f"cos={metrics['cosine_base_mapped_mean']:.4f} "
@@ -264,7 +467,7 @@ def projection_trainable_count(model):
     return sum(p.numel() for p in model.proj.parameters() if p.requires_grad)
 
 
-def maybe_auto_resume(out, cfg, bridge, optimizer, scheduler, scaler, device):
+def maybe_auto_resume(out, cfg, bridge, cpa, optimizer, scheduler, scaler, device):
     auto_resume = bool(cfg.train.get("auto_resume", True))
     resume_path = cfg.train.get("resume", None)
     if resume_path in {"", "null", "None"}:
@@ -282,6 +485,13 @@ def maybe_auto_resume(out, cfg, bridge, optimizer, scheduler, scaler, device):
     payload = torch.load(resume_path, map_location=device, weights_only=False)
     state = payload.get("bridge", payload.get("model"))
     bridge.load_state_dict(state)
+    if cpa is not None:
+        if payload.get("cpa") is None:
+            raise RuntimeError(
+                "CPA enabled but checkpoint does not contain CPA weights. "
+                "Start from scratch or use a CPA checkpoint."
+            )
+        cpa.load_state_dict(payload["cpa"])
     bridge._skip_zero_init_parity_check = True
     bridge._parity_checked = True
     if payload.get("optimizer") is not None:
@@ -431,6 +641,7 @@ def main():
         **loader_kwargs,
     )
     first_train_sample = train_set[0]
+    validate_cpa_semantic_setup(cfg, train_feature_path, first_train_sample)
     frozen = build_frozen_talk2dino(cfg, device)
     eval_feature_path = Path(args.eval_features)
     if eval_feature_path.is_file():
@@ -471,9 +682,18 @@ def main():
         val_loader = None
         eval_mode = "cached_seg_miou"
 
+    safety_cfg = get_safety_cfg(cfg)
+    cpa_cfg = get_cpa_cfg(cfg)
+    cpa_loss_cfg = get_cpa_loss_cfg(cfg)
     bridge = CleanXAttnBridge(**OmegaConf.to_container(cfg.bridge, resolve=True)).to(device)
+    cpa_kwargs = OmegaConf.to_container(cpa_cfg, resolve=True)
+    cpa_kwargs.pop("enabled", None)
+    cpa = ClassPrototypeAlignmentHead(**cpa_kwargs).to(device) if bool(cpa_cfg.enabled) else None
+    trainable_parameters = list(bridge.parameters())
+    if cpa is not None:
+        trainable_parameters.extend(cpa.parameters())
     optimizer = torch.optim.AdamW(
-        bridge.parameters(),
+        trainable_parameters,
         lr=float(cfg.train.lr),
         weight_decay=float(cfg.train.weight_decay),
     )
@@ -483,11 +703,15 @@ def main():
         eta_min=float(cfg.train.min_lr),
     )
     scaler = torch.amp.GradScaler("cuda", enabled=bool(cfg.train.fp16))
-    safety_cfg = get_safety_cfg(cfg)
     train_log_path = out / "train_log.jsonl"
 
     print("=" * 78, flush=True)
-    print(f"[{timestamp()}] Starting {METHOD_NAME} training", flush=True)
+    method_label = (
+        f"{METHOD_NAME} + Class Prototype Alignment Head"
+        if cpa is not None
+        else METHOD_NAME
+    )
+    print(f"[{timestamp()}] Starting {method_label} training", flush=True)
     print("=" * 78, flush=True)
     print(f"Output directory          : {out}", flush=True)
     print(f"Train features            : {args.train_features}", flush=True)
@@ -506,7 +730,7 @@ def main():
     print(f"  Visual target           : same DINO region-aware feature `{cfg.data.get('features_name', 'disentangled_self_attn')}`", flush=True)
     print("  Base text projection    : frozen original Talk2DINO projection", flush=True)
     print("  Objective               : pairwise BxB InfoNCE over score(text_i, image_j)", flush=True)
-    print("  Trainable module        : XAttnBridge_Clean only", flush=True)
+    print("  Trainable modules       : XAttnBridge_Clean and CPA only", flush=True)
     print(
         "  Bridge architecture     : "
         f"clip_dim={cfg.bridge.clip_dim}, dino_dim={cfg.bridge.dino_dim}, "
@@ -551,7 +775,8 @@ def main():
         flush=True,
     )
     print(f"Trainable parameter count : {trainable_count(bridge)}", flush=True)
-    print("Only XAttnBridge_Clean parameters are optimized in this script.", flush=True)
+    print(f"CPA trainable params      : {trainable_count(cpa) if cpa is not None else 0}", flush=True)
+    print("CLIP/DINO remain frozen; only XAttnBridge_Clean and CPA are optimized.", flush=True)
     print(f"train_feature_source      : {train_feature_source}", flush=True)
     print(f"train_eval_mode           : {eval_mode}", flush=True)
     if train_feature_source == "baseline_pth_in_memory":
@@ -578,8 +803,41 @@ def main():
         f"patch_preserve_temperature={float(safety_cfg.patch_preserve_temperature):.4g}",
         flush=True,
     )
+    print(
+        "Feature source: "
+        f"visual_features_name={cfg.data.get('visual_features_name', 'disentangled_self_attn')} "
+        f"patch_features_name={cfg.data.get('patch_features_name', 'disentangled_self_attn')} "
+        f"allow_patch_visual_same_fallback={cfg.data.get('allow_patch_visual_same_fallback', True)} "
+        "raw_patch_tokens=false patch_token_memmap=false",
+        flush=True,
+    )
+    print(
+        "CPA: "
+        f"enabled={bool(cpa_cfg.enabled)} num_prototypes={int(cpa_cfg.num_prototypes)} "
+        f"hidden_dim={int(cpa_cfg.hidden_dim)} prototype_scale={float(cpa_cfg.prototype_scale):.3f} "
+        f"aggregation={cpa_cfg.prototype_aggregation} "
+        f"prototype_temperature={float(cpa_cfg.prototype_temperature):.3f} "
+        f"topk={int(cpa_cfg.topk)} residual_scale={float(cpa_cfg.residual_scale):.3f} "
+        f"residual_clip={float(cpa_cfg.residual_clip):.3f} normalize={bool(cpa_cfg.normalize)}",
+        flush=True,
+    )
+    print(
+        "CPA loss: "
+        f"enabled={bool(cpa_loss_cfg.enabled)} "
+        f"prototype_infonce_weight={float(cpa_loss_cfg.prototype_infonce_weight):.3f} "
+        f"preserve_weight={float(cpa_loss_cfg.preserve_weight):.4g} "
+        f"diversity_weight={float(cpa_loss_cfg.diversity_weight):.4g} "
+        f"residual_l1_weight={float(cpa_loss_cfg.residual_l1_weight):.4g} "
+        f"confident_margin={float(cpa_loss_cfg.confident_margin):.3f} "
+        f"temperature={float(cpa_loss_cfg.temperature):.3f}",
+        flush=True,
+    )
+    print("CCR: enabled=false", flush=True)
+    print("Main InfoNCE: mapped_text vs visual_embed; CPA affects main InfoNCE=false", flush=True)
 
-    start_epoch, best_miou, best_epoch = maybe_auto_resume(out, cfg, bridge, optimizer, scheduler, scaler, device)
+    start_epoch, best_miou, best_epoch = maybe_auto_resume(
+        out, cfg, bridge, cpa, optimizer, scheduler, scaler, device
+    )
     if eval_mode == "baseline_pth_val_loss" and best_miou == -float("inf"):
         best_miou = float("inf")
     start = time.time()
@@ -600,6 +858,8 @@ def main():
     for epoch in range(start_epoch, epochs + 1):
         epoch_start = time.time()
         bridge.train()
+        if cpa is not None:
+            cpa.train()
         acc = init_epoch_accumulators()
         count = 0
         stop_training = False
@@ -640,6 +900,22 @@ def main():
                 )
                 loss_infonce = contrastive_loss(scores / contrastive_temperature)
                 safety_losses = bridge_safety_losses(safety_stats, safety_cfg)
+                if cpa is not None and bool(cpa_loss_cfg.enabled):
+                    if "mapped_text" not in safety_stats or "base_patch_logits" not in safety_stats:
+                        raise RuntimeError(
+                            "CPA requires mapped_text and semantic base_patch_logits from XAttn"
+                        )
+                    cpa_losses = cpa_auxiliary_losses(
+                        cpa,
+                        safety_stats["mapped_text"],
+                        visual,
+                        patches,
+                        safety_stats["base_patch_logits"],
+                        cpa_loss_cfg,
+                        contrastive_temperature,
+                    )
+                else:
+                    cpa_losses = zero_cpa_losses(safety_stats["delta"])
                 loss = loss_infonce
                 if bool(safety_cfg.enabled):
                     loss = (
@@ -650,6 +926,14 @@ def main():
                         + float(safety_cfg.attn_prior_weight) * safety_losses["loss_attn_prior"]
                         + float(safety_cfg.patch_preserve_weight) * safety_losses["loss_patch_preserve"]
                     )
+                if cpa is not None and bool(cpa_loss_cfg.enabled):
+                    loss = (
+                        loss
+                        + float(cpa_loss_cfg.prototype_infonce_weight) * cpa_losses["loss_cpa_proto_infonce"]
+                        + float(cpa_loss_cfg.preserve_weight) * cpa_losses["loss_cpa_preserve"]
+                        + float(cpa_loss_cfg.diversity_weight) * cpa_losses["loss_cpa_diversity"]
+                        + float(cpa_loss_cfg.residual_l1_weight) * cpa_losses["loss_cpa_residual_l1"]
+                    )
             if not torch.isfinite(loss):
                 print("WARNING: loss became NaN/Inf; saving checkpoint_last.pth and stopping cleanly.", flush=True)
                 stop_training = True
@@ -658,7 +942,14 @@ def main():
             scaler.step(optimizer)
             scaler.update()
             scheduler.step()
-            update_epoch_accumulators(acc, loss, loss_infonce, safety_losses, safety_stats)
+            update_epoch_accumulators(
+                acc,
+                loss,
+                loss_infonce,
+                safety_losses,
+                safety_stats,
+                cpa_losses,
+            )
             acc["data_time"] += data_time
             acc["compute_time"] += time.time() - compute_start
             count += 1
@@ -683,6 +974,7 @@ def main():
         eta = avg_epoch * (epochs - epoch)
         lr = optimizer.param_groups[0]["lr"]
         epoch_metrics = finalize_epoch_accumulators(acc, count)
+        epoch_it_s = count / max(epoch_time, 1e-6)
         projected_hours = avg_epoch * epochs / 3600.0
         print(
             f"[{timestamp()}] Epoch {epoch:03d}/{epochs:03d} summary "
@@ -695,6 +987,17 @@ def main():
             f"loss_patch_preserve={epoch_metrics['loss_patch_preserve']:.6f} "
             f"attn_prior_kl={epoch_metrics['attn_prior_kl']:.6f} "
             f"patch_preserve_kl={epoch_metrics['patch_preserve_kl']:.6f} "
+            f"loss_cpa_proto_infonce={epoch_metrics['loss_cpa_proto_infonce']:.6f} "
+            f"loss_cpa_preserve={epoch_metrics['loss_cpa_preserve']:.6f} "
+            f"loss_cpa_diversity={epoch_metrics['loss_cpa_diversity']:.6f} "
+            f"loss_cpa_residual_l1={epoch_metrics['loss_cpa_residual_l1']:.6f} "
+            f"cpa_residual_abs_mean={epoch_metrics['cpa_residual_abs_mean']:.6f} "
+            f"cpa_residual_abs_max={epoch_metrics['cpa_residual_abs_max']:.6f} "
+            f"cpa_modified_fraction={epoch_metrics['cpa_modified_fraction']:.4f} "
+            f"cpa_confident_patch_frac={epoch_metrics['cpa_confident_patch_frac']:.4f} "
+            f"cpa_proto_pairwise_cos_mean={epoch_metrics['cpa_proto_pairwise_cos_mean']:.4f} "
+            f"cpa_proto_pairwise_cos_max={epoch_metrics['cpa_proto_pairwise_cos_max']:.4f} "
+            f"cpa_topk={epoch_metrics['cpa_topk']:.0f} "
             f"base_norm={epoch_metrics['base_norm_mean']:.4f} "
             f"delta_norm={epoch_metrics['delta_norm_mean']:.4f} "
             f"delta/base_mean={epoch_metrics['delta_base_ratio_mean']:.4f} "
@@ -706,7 +1009,7 @@ def main():
         f"data/batch={epoch_metrics['data_time']:.3f}s "
             f"xattn-step={epoch_metrics['compute_time']:.3f}s "
             f"lr={lr:.3e} epoch_time={format_seconds(epoch_time)} "
-            f"elapsed={format_seconds(elapsed)} eta={format_seconds(eta)}",
+            f"it/s={epoch_it_s:.3f} elapsed={format_seconds(elapsed)} eta={format_seconds(eta)}",
             flush=True,
         )
         if epoch_metrics["delta_base_ratio_mean"] > float(safety_cfg.warn_if_ratio_above):
@@ -793,12 +1096,25 @@ def main():
             "loss_patch_preserve": epoch_metrics["loss_patch_preserve"],
             "attn_prior_kl": epoch_metrics["attn_prior_kl"],
             "patch_preserve_kl": epoch_metrics["patch_preserve_kl"],
+            "loss_cpa_proto_infonce": epoch_metrics["loss_cpa_proto_infonce"],
+            "loss_cpa_preserve": epoch_metrics["loss_cpa_preserve"],
+            "loss_cpa_diversity": epoch_metrics["loss_cpa_diversity"],
+            "loss_cpa_residual_l1": epoch_metrics["loss_cpa_residual_l1"],
+            "cpa_residual_abs_mean": epoch_metrics["cpa_residual_abs_mean"],
+            "cpa_residual_abs_max": epoch_metrics["cpa_residual_abs_max"],
+            "cpa_modified_fraction": epoch_metrics["cpa_modified_fraction"],
+            "cpa_confident_patch_frac": epoch_metrics["cpa_confident_patch_frac"],
+            "cpa_proto_pairwise_cos_mean": epoch_metrics["cpa_proto_pairwise_cos_mean"],
+            "cpa_proto_pairwise_cos_max": epoch_metrics["cpa_proto_pairwise_cos_max"],
+            "cpa_topk": epoch_metrics["cpa_topk"],
             "miou": miou,
             "val_loss": val_loss,
             "eval_mode": eval_mode,
             "lr": lr,
             "contrastive_temperature": float(cfg.train.get("contrastive_temperature", 0.07)),
             "xattn_safety": OmegaConf.to_container(safety_cfg, resolve=True),
+            "cpa_config": OmegaConf.to_container(cpa_cfg, resolve=True),
+            "cpa_loss_config": OmegaConf.to_container(cpa_loss_cfg, resolve=True),
             "bridge_base_guidance": {
                 "base_guided_attention": bool(cfg.bridge.get("base_guided_attention", True)),
                 "base_guidance_beta": float(cfg.bridge.get("base_guidance_beta", 1.0)),
@@ -818,15 +1134,7 @@ def main():
             "compute_time": epoch_metrics["compute_time"],
             "avg_dataload_time_sec": epoch_metrics["data_time"],
             "avg_xattn_step_time_sec": epoch_metrics["compute_time"],
-            "contrastive_temperature": float(cfg.train.get("contrastive_temperature", 0.07)),
-            "xattn_safety": OmegaConf.to_container(safety_cfg, resolve=True),
-            "bridge_base_guidance": {
-                "base_guided_attention": bool(cfg.bridge.get("base_guided_attention", True)),
-                "base_guidance_beta": float(cfg.bridge.get("base_guidance_beta", 1.0)),
-                "base_guidance_stopgrad": bool(cfg.bridge.get("base_guidance_stopgrad", True)),
-                "base_guidance_normalize": bool(cfg.bridge.get("base_guidance_normalize", True)),
-                "base_guidance_temperature": float(cfg.bridge.get("base_guidance_temperature", 1.0)),
-            },
+            "epoch_it_s": epoch_it_s,
         }
         save_checkpoint_clean(
             out / "checkpoint_last.pth",
@@ -838,6 +1146,7 @@ def main():
             cfg,
             checkpoint_metrics,
             scaler,
+            cpa=cpa,
         )
         last_checkpoint = out / "checkpoint_last.pth"
         best_checkpoint = out / "checkpoint_best.pth"
@@ -863,6 +1172,17 @@ def main():
             "loss_patch_preserve": epoch_metrics["loss_patch_preserve"],
             "attn_prior_kl": epoch_metrics["attn_prior_kl"],
             "patch_preserve_kl": epoch_metrics["patch_preserve_kl"],
+            "loss_cpa_proto_infonce": epoch_metrics["loss_cpa_proto_infonce"],
+            "loss_cpa_preserve": epoch_metrics["loss_cpa_preserve"],
+            "loss_cpa_diversity": epoch_metrics["loss_cpa_diversity"],
+            "loss_cpa_residual_l1": epoch_metrics["loss_cpa_residual_l1"],
+            "cpa_residual_abs_mean": epoch_metrics["cpa_residual_abs_mean"],
+            "cpa_residual_abs_max": epoch_metrics["cpa_residual_abs_max"],
+            "cpa_modified_fraction": epoch_metrics["cpa_modified_fraction"],
+            "cpa_confident_patch_frac": epoch_metrics["cpa_confident_patch_frac"],
+            "cpa_proto_pairwise_cos_mean": epoch_metrics["cpa_proto_pairwise_cos_mean"],
+            "cpa_proto_pairwise_cos_max": epoch_metrics["cpa_proto_pairwise_cos_max"],
+            "cpa_topk": epoch_metrics["cpa_topk"],
             "base_norm_mean": epoch_metrics["base_norm_mean"],
             "delta_norm_mean": epoch_metrics["delta_norm_mean"],
             "delta_base_ratio_mean": epoch_metrics["delta_base_ratio_mean"],
@@ -881,6 +1201,7 @@ def main():
             "compute_time": epoch_metrics["compute_time"],
             "avg_dataload_time_sec": epoch_metrics["data_time"],
             "avg_xattn_step_time_sec": epoch_metrics["compute_time"],
+            "epoch_it_s": epoch_it_s,
         }
         with open(train_log_path, "a") as f:
             f.write(json.dumps(log_row) + "\n")
@@ -895,6 +1216,7 @@ def main():
                 cfg,
                 checkpoint_metrics,
                 scaler,
+                cpa=cpa,
             )
             print(
                 f"[{timestamp()}] Saved best checkpoint: {best_checkpoint} "
@@ -913,6 +1235,7 @@ def main():
                 cfg,
                 checkpoint_metrics,
                 scaler,
+                cpa=cpa,
             )
             saved_epoch_checkpoint = True
             print(

@@ -284,6 +284,7 @@ class CleanXAttnBridge(nn.Module):
                 "delta": delta,
                 "gamma": gamma.detach().reshape(1),
                 "base_guidance_beta": delta.new_tensor(float(self.base_guidance_beta)),
+                "mapped_text": mapped,
             }
             if base_sim is not None:
                 stats["base_sim"] = base_sim
@@ -508,6 +509,7 @@ def save_checkpoint_clean(
     cfg,
     extra_metrics=None,
     scaler=None,
+    cpa=None,
 ):
     extra_metrics = extra_metrics or {}
     payload = {
@@ -521,6 +523,8 @@ def save_checkpoint_clean(
         "best_miou": best_miou,
         "config": OmegaConf.to_container(cfg, resolve=True),
     }
+    if cpa is not None:
+        payload["cpa"] = cpa.state_dict()
     payload.update(extra_metrics)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
