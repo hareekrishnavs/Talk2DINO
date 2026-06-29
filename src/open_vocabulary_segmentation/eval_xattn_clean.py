@@ -25,7 +25,6 @@ from class_prototype_alignment import (
     apply_topk_prototype_residual,
     compute_prototype_logits,
 )
-from cpa_logit_router import ConfidenceAwarePrototypeLogitRouter
 
 
 def parse_args():
@@ -141,27 +140,6 @@ def load_cpa_from_payload(cfg, payload, device, enabled):
     return cpa
 
 
-def load_cpa_router_from_payload(cfg, payload, device, enabled):
-    has_weights = payload.get("cpa_router") is not None
-    print(
-        f"CPA-Router enabled={bool(enabled)} checkpoint contains router weights "
-        f"{'yes' if has_weights else 'no'}",
-        flush=True,
-    )
-    if not enabled:
-        return None
-    if not has_weights:
-        raise RuntimeError(
-            "CPA-Router enabled but checkpoint does not contain router weights."
-        )
-    kwargs = OmegaConf.to_container(cfg.cpa_router, resolve=True)
-    kwargs.pop("enabled", None)
-    router = ConfidenceAwarePrototypeLogitRouter(**kwargs).to(device)
-    router.load_state_dict(payload["cpa_router"])
-    router.eval()
-    return router
-
-
 def fuse_xattn_logits(
     base_logits,
     xattn_logits,
@@ -210,7 +188,6 @@ class CleanOfficialEvalModel(nn.Module):
         class_clip,
         class_base,
         cpa=None,
-        cpa_router=None,
         xattn_delta_scale=0.5,
         xattn_logit_alpha=0.5,
         xattn_uncertainty_gate_enabled=True,
@@ -221,7 +198,6 @@ class CleanOfficialEvalModel(nn.Module):
         self.frozen = frozen
         self.bridge = bridge
         self.cpa = cpa
-        self.cpa_router = cpa_router
         self.register_buffer("class_clip", class_clip.float())
         self.register_buffer("class_base", class_base.float())
         self.xattn_delta_scale = float(xattn_delta_scale)
@@ -236,15 +212,6 @@ class CleanOfficialEvalModel(nn.Module):
         }
         self._cpa_residual_abs_max = 0.0
         self._cpa_count = 0
-        self._router_sum = {
-            "router_w_base_mean": 0.0,
-            "router_w_xattn_mean": 0.0,
-            "router_w_cpa_mean": 0.0,
-            "router_entropy_mean": 0.0,
-            "router_modified_fraction": 0.0,
-            "router_topk": 0.0,
-        }
-        self._router_count = 0
 
     def cpa_summary(self):
         count = max(1, self._cpa_count)
@@ -252,14 +219,6 @@ class CleanOfficialEvalModel(nn.Module):
             "cpa_residual_abs_mean": self._cpa_sum["cpa_residual_abs_mean"] / count,
             "cpa_residual_abs_max": self._cpa_residual_abs_max,
             "cpa_modified_fraction": self._cpa_sum["cpa_modified_fraction"] / count,
-        }
-
-    def router_summary(self):
-        if self._router_count == 0:
-            return None
-        return {
-            key: value / self._router_count
-            for key, value in self._router_sum.items()
         }
 
     def __getattr__(self, name):
@@ -354,24 +313,13 @@ class CleanOfficialEvalModel(nn.Module):
                 temperature=self.cpa.prototype_temperature,
                 aggregation=self.cpa.prototype_aggregation,
             ).reshape_as(base_simmap)
-            cpa_simmap, cpa_stats = apply_topk_prototype_residual(
+            simmap, cpa_stats = apply_topk_prototype_residual(
                 base_simmap,
                 prototype_logits,
                 topk=self.cpa.topk,
                 residual_scale=self.cpa.residual_scale,
                 residual_clip=self.cpa.residual_clip,
             )
-            if self.cpa_router is not None:
-                simmap, router_stats = self.cpa_router(
-                    base_simmap,
-                    xattn_simmap,
-                    prototype_logits,
-                )
-                for key in self._router_sum:
-                    self._router_sum[key] += float(router_stats[key].detach().cpu())
-                self._router_count += 1
-            else:
-                simmap = cpa_simmap
             self._cpa_sum["cpa_residual_abs_mean"] += float(
                 cpa_stats["cpa_residual_abs_mean"].detach().cpu()
             )
@@ -431,27 +379,15 @@ def official_parity_eval(args, cfg, device):
     )
     bridge, payload = load_bridge_from_checkpoint(args.checkpoint, cfg, device)
     cpa_enabled = bool(cfg.evaluate.get("cpa_enabled", cfg.cpa.get("enabled", False)))
-    router_enabled = bool(
-        cfg.evaluate.get(
-            "cpa_router_enabled",
-            cfg.get("cpa_router", {}).get("enabled", False),
-        )
-    )
-    if router_enabled and not cpa_enabled:
-        raise ValueError("CPA-Router evaluation requires evaluate.cpa_enabled=true")
     if cpa_enabled and bool(cfg.evaluate.pamr):
         raise ValueError("CPA evaluation requires evaluate.pamr=false")
     cpa = load_cpa_from_payload(cfg, payload, device, cpa_enabled)
-    cpa_router = load_cpa_router_from_payload(
-        cfg, payload, device, router_enabled
-    )
     wrapped = CleanOfficialEvalModel(
         frozen,
         bridge,
         class_clip,
         class_base,
         cpa=cpa,
-        cpa_router=cpa_router,
         xattn_delta_scale=float(cfg.evaluate.get("xattn_delta_scale", 0.5)),
         xattn_logit_alpha=float(cfg.evaluate.get("xattn_logit_alpha", 0.5)),
         xattn_uncertainty_gate_enabled=bool(
@@ -492,8 +428,7 @@ def official_parity_eval(args, cfg, device):
     metric = dataset.evaluate(results, logger=None)
     miou = float(metric["mIoU"] * 100)
     cpa_summary = wrapped.cpa_summary() if cpa is not None else None
-    router_summary = wrapped.router_summary()
-    return miou, payload, cpa_summary, router_summary
+    return miou, payload, cpa_summary
 
 
 def init_eval_logger(cfg, out):
@@ -525,9 +460,7 @@ def main():
     if not args.cached_fast_eval:
         print("Eval mode: official Talk2DINO slide-inference parity", flush=True)
         print("Cached eval features are not used for prediction in this mode.", flush=True)
-        miou, payload, cpa_summary, router_summary = official_parity_eval(
-            args, cfg, device
-        )
+        miou, payload, cpa_summary = official_parity_eval(args, cfg, device)
         print("=" * 64, flush=True)
         print("EVALUATION RESULTS", flush=True)
         print("=" * 64, flush=True)
@@ -535,10 +468,6 @@ def main():
         print(f"coco_stuff mIoU      : {miou:.2f}%", flush=True)
         print(f"PAMR enabled         : {bool(cfg.evaluate.pamr)}", flush=True)
         print("CCR enabled          : false", flush=True)
-        print(
-            f"CPA-Router enabled   : {router_summary is not None}",
-            flush=True,
-        )
         if cpa_summary is not None:
             print(
                 "CPA eval stats        : "
@@ -550,17 +479,6 @@ def main():
                 f"mean_residual={cpa_summary['cpa_residual_abs_mean']:.6f} "
                 f"max_residual={cpa_summary['cpa_residual_abs_max']:.6f} "
                 f"modified_fraction={cpa_summary['cpa_modified_fraction']:.4f}",
-                flush=True,
-            )
-        if router_summary is not None:
-            print(
-                "CPA-Router eval stats : "
-                f"topk={router_summary['router_topk']:.0f} "
-                f"w_base={router_summary['router_w_base_mean']:.6f} "
-                f"w_xattn={router_summary['router_w_xattn_mean']:.6f} "
-                f"w_cpa={router_summary['router_w_cpa_mean']:.6f} "
-                f"entropy={router_summary['router_entropy_mean']:.6f} "
-                f"modified_fraction={router_summary['router_modified_fraction']:.4f}",
                 flush=True,
             )
         with open(out / "summary.json", "w") as f:
@@ -575,8 +493,6 @@ def main():
                 "coco_stuff_miou": miou,
                 "cpa_enabled": cpa_summary is not None,
                 "cpa_stats": cpa_summary,
-                "cpa_router_enabled": router_summary is not None,
-                "cpa_router_stats": router_summary,
             }, f, indent=2)
         return
 

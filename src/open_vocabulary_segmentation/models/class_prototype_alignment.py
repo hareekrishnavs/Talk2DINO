@@ -16,7 +16,6 @@ class ClassPrototypeAlignmentHead(nn.Module):
         topk=5,
         residual_scale=0.25,
         residual_clip=0.5,
-        version="v1",
     ):
         super().__init__()
         self.dino_dim = int(dino_dim)
@@ -28,9 +27,6 @@ class ClassPrototypeAlignmentHead(nn.Module):
         self.topk = int(topk)
         self.residual_scale = float(residual_scale)
         self.residual_clip = float(residual_clip)
-        self.version = str(version)
-        if self.version != "v1":
-            raise ValueError(f"Only CPA-v1 is supported, got cpa.version={self.version}")
         if self.num_prototypes < 1:
             raise ValueError("cpa.num_prototypes must be at least 1")
         if self.topk < 1:

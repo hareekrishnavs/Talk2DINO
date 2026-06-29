@@ -67,7 +67,6 @@ ccr:
 
 cpa:
   enabled: true
-  version: v1
   num_prototypes: 4
   hidden_dim: 256
   prototype_scale: 0.10
@@ -87,26 +86,6 @@ cpa_loss:
   diversity_weight: 0.001
   diversity_margin: 0.90
   residual_l1_weight: 0.001
-
-cpa_router:
-  enabled: true
-  topk: 5
-  hidden_dim: 32
-  init_w_base: 0.74
-  init_w_xattn: 0.02
-  init_w_cpa: 0.24
-  use_margin: true
-  use_entropy: true
-
-cpa_router_loss:
-  enabled: true
-  prior_weight: 0.005
-  preserve_weight: 0.01
-  confident_margin: 0.20
-  temperature: 2.0
-  dense_infonce_weight: 0.05
-  pool_temperature: 0.07
-  entropy_weight: 0.0
 
 extract:
   batch_size: 64
@@ -133,7 +112,6 @@ evaluate:
   pamr: false
   ccr_enabled: false
   cpa_enabled: true
-  cpa_router_enabled: true
   template: sub_imagenet_template
   xattn_delta_scale: 0.5
   xattn_logit_alpha: 0.5
