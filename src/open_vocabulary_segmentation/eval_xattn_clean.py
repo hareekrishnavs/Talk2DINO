@@ -24,8 +24,6 @@ from class_prototype_alignment import (
     ClassPrototypeAlignmentHead,
     apply_topk_prototype_residual,
     compute_prototype_logits,
-    load_cpa_state_dict_compatible,
-    prototype_geometry,
 )
 
 
@@ -137,7 +135,7 @@ def load_cpa_from_payload(cfg, payload, device, enabled):
     kwargs = OmegaConf.to_container(cfg.cpa, resolve=True)
     kwargs.pop("enabled", None)
     cpa = ClassPrototypeAlignmentHead(**kwargs).to(device)
-    load_cpa_state_dict_compatible(cpa, payload["cpa"], context="evaluation checkpoint")
+    cpa.load_state_dict(payload["cpa"])
     cpa.eval()
     return cpa
 
@@ -211,16 +209,8 @@ class CleanOfficialEvalModel(nn.Module):
         self._cpa_sum = {
             "cpa_residual_abs_mean": 0.0,
             "cpa_modified_fraction": 0.0,
-            "cpa_proto_pairwise_cos_mean": 0.0,
-            "cpa_tangent_dir_pairwise_cos_mean": 0.0,
-            "cpa_tangent_dir_pairwise_cos_abs_mean": 0.0,
-            "cpa_radius_mean": 0.0,
         }
         self._cpa_residual_abs_max = 0.0
-        self._cpa_proto_pairwise_cos_max = -1.0
-        self._cpa_proto_pairwise_cos_min = 1.0
-        self._cpa_radius_min = float("inf")
-        self._cpa_radius_max = 0.0
         self._cpa_count = 0
 
     def cpa_summary(self):
@@ -229,14 +219,6 @@ class CleanOfficialEvalModel(nn.Module):
             "cpa_residual_abs_mean": self._cpa_sum["cpa_residual_abs_mean"] / count,
             "cpa_residual_abs_max": self._cpa_residual_abs_max,
             "cpa_modified_fraction": self._cpa_sum["cpa_modified_fraction"] / count,
-            "cpa_proto_pairwise_cos_mean": self._cpa_sum["cpa_proto_pairwise_cos_mean"] / count,
-            "cpa_proto_pairwise_cos_max": self._cpa_proto_pairwise_cos_max,
-            "cpa_proto_pairwise_cos_min": self._cpa_proto_pairwise_cos_min,
-            "cpa_tangent_dir_pairwise_cos_mean": self._cpa_sum["cpa_tangent_dir_pairwise_cos_mean"] / count,
-            "cpa_tangent_dir_pairwise_cos_abs_mean": self._cpa_sum["cpa_tangent_dir_pairwise_cos_abs_mean"] / count,
-            "cpa_radius_mean": self._cpa_sum["cpa_radius_mean"] / count,
-            "cpa_radius_min": self._cpa_radius_min,
-            "cpa_radius_max": self._cpa_radius_max,
         }
 
     def __getattr__(self, name):
@@ -323,10 +305,7 @@ class CleanOfficialEvalModel(nn.Module):
             else None
         )
         if self.cpa is not None:
-            prototypes, cpa_details = self.cpa(mapped_text, return_details=True)
-            geometry = prototype_geometry(
-                prototypes, cpa_details["tangent_directions"]
-            )
+            prototypes = self.cpa(mapped_text)
             spatial_features = image_feat.flatten(2).transpose(1, 2)
             prototype_logits = compute_prototype_logits(
                 spatial_features,
@@ -347,24 +326,6 @@ class CleanOfficialEvalModel(nn.Module):
             self._cpa_sum["cpa_modified_fraction"] += float(
                 cpa_stats["cpa_modified_fraction"].detach().cpu()
             )
-            for key in (
-                "cpa_proto_pairwise_cos_mean",
-                "cpa_tangent_dir_pairwise_cos_mean",
-                "cpa_tangent_dir_pairwise_cos_abs_mean",
-            ):
-                self._cpa_sum[key] += float(geometry[key].cpu())
-            radii = cpa_details["radii"]
-            self._cpa_sum["cpa_radius_mean"] += float(radii.mean().cpu())
-            self._cpa_proto_pairwise_cos_max = max(
-                self._cpa_proto_pairwise_cos_max,
-                float(geometry["cpa_proto_pairwise_cos_max"].cpu()),
-            )
-            self._cpa_proto_pairwise_cos_min = min(
-                self._cpa_proto_pairwise_cos_min,
-                float(geometry["cpa_proto_pairwise_cos_min"].cpu()),
-            )
-            self._cpa_radius_min = min(self._cpa_radius_min, float(radii.min().cpu()))
-            self._cpa_radius_max = max(self._cpa_radius_max, float(radii.max().cpu()))
             self._cpa_residual_abs_max = max(
                 self._cpa_residual_abs_max,
                 float(cpa_stats["cpa_residual_abs_max"].detach().cpu()),
@@ -510,22 +471,14 @@ def main():
         if cpa_summary is not None:
             print(
                 "CPA eval stats        : "
-                f"version={cfg.cpa.version} "
                 f"num_prototypes={int(cfg.cpa.num_prototypes)} "
                 f"aggregation={cfg.cpa.prototype_aggregation} "
-                f"prototype_temperature={float(cfg.cpa.prototype_temperature):.3f} "
                 f"topk={int(cfg.cpa.topk)} "
                 f"residual_scale={float(cfg.cpa.residual_scale):.3f} "
                 f"residual_clip={float(cfg.cpa.residual_clip):.3f} "
                 f"mean_residual={cpa_summary['cpa_residual_abs_mean']:.6f} "
                 f"max_residual={cpa_summary['cpa_residual_abs_max']:.6f} "
-                f"modified_fraction={cpa_summary['cpa_modified_fraction']:.4f} "
-                f"radius_mean={cpa_summary['cpa_radius_mean']:.6f} "
-                f"radius_min={cpa_summary['cpa_radius_min']:.6f} "
-                f"radius_max={cpa_summary['cpa_radius_max']:.6f} "
-                f"proto_cos_mean={cpa_summary['cpa_proto_pairwise_cos_mean']:.6f} "
-                f"proto_cos_max={cpa_summary['cpa_proto_pairwise_cos_max']:.6f} "
-                f"proto_cos_min={cpa_summary['cpa_proto_pairwise_cos_min']:.6f}",
+                f"modified_fraction={cpa_summary['cpa_modified_fraction']:.4f}",
                 flush=True,
             )
         with open(out / "summary.json", "w") as f:
