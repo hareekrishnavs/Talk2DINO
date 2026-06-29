@@ -31,7 +31,9 @@ from class_prototype_alignment import (
     ClassPrototypeAlignmentHead,
     apply_topk_prototype_residual,
     compute_prototype_logits,
-    prototype_diversity_loss,
+    load_cpa_state_dict_compatible,
+    prototype_geometry,
+    tangent_orthogonality_loss,
 )
 from eval_xattn_clean import (
     bridge_class_embeddings,
@@ -99,15 +101,21 @@ def get_safety_cfg(cfg):
 def get_cpa_cfg(cfg):
     defaults = OmegaConf.create({
         "enabled": True,
+        "version": "v3_tangent_space",
         "num_prototypes": 4,
         "hidden_dim": 256,
-        "prototype_scale": 0.10,
         "prototype_aggregation": "logsumexp",
         "prototype_temperature": 0.07,
         "normalize": True,
         "topk": 5,
         "residual_scale": 0.25,
         "residual_clip": 0.5,
+        "use_shared_tangent_basis": True,
+        "conditional_basis_weights": False,
+        "prototype_radius_min": 0.10,
+        "prototype_radius_max": 0.35,
+        "prototype_radius_init": 0.22,
+        "prototype_dropout": 0.10,
     })
     return OmegaConf.merge(defaults, cfg.get("cpa", {}))
 
@@ -119,7 +127,11 @@ def get_cpa_loss_cfg(cfg):
         "preserve_weight": 0.01,
         "temperature": 2.0,
         "confident_margin": 0.20,
-        "diversity_weight": 0.001,
+        "radius_weight": 0.001,
+        "radius_target": 0.22,
+        "tangent_orth_weight": 0.005,
+        "spread_weight": 0.0,
+        "diversity_weight": 0.0,
         "diversity_margin": 0.90,
         "residual_l1_weight": 0.001,
     })
@@ -215,6 +227,8 @@ def zero_cpa_losses(reference):
     return {
         "loss_cpa_proto_infonce": zero,
         "loss_cpa_preserve": zero,
+        "loss_cpa_radius": zero,
+        "loss_cpa_tangent_orth": zero,
         "loss_cpa_diversity": zero,
         "loss_cpa_residual_l1": zero,
         "cpa_residual_abs_mean": zero,
@@ -223,6 +237,14 @@ def zero_cpa_losses(reference):
         "cpa_confident_patch_frac": zero,
         "cpa_proto_pairwise_cos_mean": zero,
         "cpa_proto_pairwise_cos_max": zero,
+        "cpa_proto_pairwise_cos_min": zero,
+        "cpa_tangent_dir_pairwise_cos_mean": zero,
+        "cpa_tangent_dir_pairwise_cos_abs_mean": zero,
+        "cpa_radius_mean": zero,
+        "cpa_radius_min": zero,
+        "cpa_radius_max": zero,
+        "cpa_prototype_dropout": zero,
+        "cpa_prototype_active_fraction": zero,
         "cpa_topk": zero,
     }
 
@@ -236,12 +258,15 @@ def cpa_auxiliary_losses(
     loss_cfg,
     contrastive_temperature,
 ):
-    prototypes = cpa(mapped_text)
-    prototype_dense_scores = compute_prototype_logits(
+    prototypes, details = cpa(mapped_text, return_details=True)
+    prototype_dense_scores, active_fraction = compute_prototype_logits(
         visual_embed,
         prototypes,
         temperature=cpa.prototype_temperature,
         aggregation=cpa.prototype_aggregation,
+        prototype_dropout=cpa.prototype_dropout,
+        training=cpa.training,
+        return_active_fraction=True,
     )
     prototype_scores = (
         prototype_dense_scores.max(dim=-1).values
@@ -256,6 +281,8 @@ def cpa_auxiliary_losses(
         prototypes,
         temperature=cpa.prototype_temperature,
         aggregation=cpa.prototype_aggregation,
+        prototype_dropout=cpa.prototype_dropout,
+        training=cpa.training,
     )
     final_patch_logits, cpa_stats = apply_topk_prototype_residual(
         base_patch_logits,
@@ -284,10 +311,10 @@ def cpa_auxiliary_losses(
             p_base.permute(0, 2, 1)[confident_mask],
             reduction="batchmean",
         )
-    loss_diversity, pair_cos_mean, pair_cos_max = prototype_diversity_loss(
-        prototypes,
-        margin=float(loss_cfg.diversity_margin),
-    )
+    geometry = prototype_geometry(prototypes, details["tangent_directions"])
+    loss_radius = (details["radii"] - float(loss_cfg.radius_target)).pow(2).mean()
+    loss_tangent_orth = tangent_orthogonality_loss(details["tangent_directions"])
+    loss_diversity = prototypes.new_tensor(0.0)
     selected_residual = cpa_stats["cpa_residual"].masked_select(
         cpa_stats["cpa_topk_mask"]
     )
@@ -295,14 +322,20 @@ def cpa_auxiliary_losses(
     return {
         "loss_cpa_proto_infonce": loss_proto_infonce,
         "loss_cpa_preserve": loss_preserve,
+        "loss_cpa_radius": loss_radius,
+        "loss_cpa_tangent_orth": loss_tangent_orth,
         "loss_cpa_diversity": loss_diversity,
         "loss_cpa_residual_l1": loss_residual_l1,
         "cpa_residual_abs_mean": cpa_stats["cpa_residual_abs_mean"],
         "cpa_residual_abs_max": cpa_stats["cpa_residual_abs_max"],
         "cpa_modified_fraction": cpa_stats["cpa_modified_fraction"],
         "cpa_confident_patch_frac": confident_mask.float().mean().detach(),
-        "cpa_proto_pairwise_cos_mean": pair_cos_mean,
-        "cpa_proto_pairwise_cos_max": pair_cos_max,
+        **geometry,
+        "cpa_radius_mean": details["radii"].mean().detach(),
+        "cpa_radius_min": details["radii"].min().detach(),
+        "cpa_radius_max": details["radii"].max().detach(),
+        "cpa_prototype_dropout": prototypes.new_tensor(cpa.prototype_dropout).detach(),
+        "cpa_prototype_active_fraction": active_fraction,
         "cpa_topk": cpa_stats["cpa_topk"],
     }
 
@@ -320,6 +353,8 @@ def init_epoch_accumulators():
         "patch_preserve_kl": 0.0,
         "loss_cpa_proto_infonce": 0.0,
         "loss_cpa_preserve": 0.0,
+        "loss_cpa_radius": 0.0,
+        "loss_cpa_tangent_orth": 0.0,
         "loss_cpa_diversity": 0.0,
         "loss_cpa_residual_l1": 0.0,
         "cpa_residual_abs_mean": 0.0,
@@ -328,6 +363,14 @@ def init_epoch_accumulators():
         "cpa_confident_patch_frac": 0.0,
         "cpa_proto_pairwise_cos_mean": 0.0,
         "cpa_proto_pairwise_cos_max": 0.0,
+        "cpa_proto_pairwise_cos_min": 1.0,
+        "cpa_tangent_dir_pairwise_cos_mean": 0.0,
+        "cpa_tangent_dir_pairwise_cos_abs_mean": 0.0,
+        "cpa_radius_mean": 0.0,
+        "cpa_radius_min": 1.0,
+        "cpa_radius_max": 0.0,
+        "cpa_prototype_dropout": 0.0,
+        "cpa_prototype_active_fraction": 0.0,
         "cpa_topk": 0.0,
         "base_norm_mean": 0.0,
         "delta_norm_mean": 0.0,
@@ -355,12 +398,19 @@ def update_epoch_accumulators(acc, loss_total, loss_infonce, losses, stats, cpa_
     for key in (
         "loss_cpa_proto_infonce",
         "loss_cpa_preserve",
+        "loss_cpa_radius",
+        "loss_cpa_tangent_orth",
         "loss_cpa_diversity",
         "loss_cpa_residual_l1",
         "cpa_residual_abs_mean",
         "cpa_modified_fraction",
         "cpa_confident_patch_frac",
         "cpa_proto_pairwise_cos_mean",
+        "cpa_tangent_dir_pairwise_cos_mean",
+        "cpa_tangent_dir_pairwise_cos_abs_mean",
+        "cpa_radius_mean",
+        "cpa_prototype_dropout",
+        "cpa_prototype_active_fraction",
         "cpa_topk",
     ):
         acc[key] += float(cpa_losses[key].detach().cpu())
@@ -371,6 +421,18 @@ def update_epoch_accumulators(acc, loss_total, loss_infonce, losses, stats, cpa_
     acc["cpa_proto_pairwise_cos_max"] = max(
         acc["cpa_proto_pairwise_cos_max"],
         float(cpa_losses["cpa_proto_pairwise_cos_max"].detach().cpu()),
+    )
+    acc["cpa_proto_pairwise_cos_min"] = min(
+        acc["cpa_proto_pairwise_cos_min"],
+        float(cpa_losses["cpa_proto_pairwise_cos_min"].detach().cpu()),
+    )
+    acc["cpa_radius_min"] = min(
+        acc["cpa_radius_min"],
+        float(cpa_losses["cpa_radius_min"].detach().cpu()),
+    )
+    acc["cpa_radius_max"] = max(
+        acc["cpa_radius_max"],
+        float(cpa_losses["cpa_radius_max"].detach().cpu()),
     )
     acc["base_norm_mean"] += float(stats["base_norm"].detach().float().mean().cpu())
     acc["delta_norm_mean"] += float(stats["delta_norm"].detach().float().mean().cpu())
@@ -402,12 +464,19 @@ def finalize_epoch_accumulators(acc, count):
         "patch_preserve_kl",
         "loss_cpa_proto_infonce",
         "loss_cpa_preserve",
+        "loss_cpa_radius",
+        "loss_cpa_tangent_orth",
         "loss_cpa_diversity",
         "loss_cpa_residual_l1",
         "cpa_residual_abs_mean",
         "cpa_modified_fraction",
         "cpa_confident_patch_frac",
         "cpa_proto_pairwise_cos_mean",
+        "cpa_tangent_dir_pairwise_cos_mean",
+        "cpa_tangent_dir_pairwise_cos_abs_mean",
+        "cpa_radius_mean",
+        "cpa_prototype_dropout",
+        "cpa_prototype_active_fraction",
         "cpa_topk",
         "base_norm_mean",
         "delta_norm_mean",
@@ -485,17 +554,23 @@ def maybe_auto_resume(out, cfg, bridge, cpa, optimizer, scheduler, scaler, devic
     payload = torch.load(resume_path, map_location=device, weights_only=False)
     state = payload.get("bridge", payload.get("model"))
     bridge.load_state_dict(state)
+    cpa_fully_compatible = True
     if cpa is not None:
         if payload.get("cpa") is None:
             raise RuntimeError(
                 "CPA enabled but checkpoint does not contain CPA weights. "
                 "Start from scratch or use a CPA checkpoint."
             )
-        cpa.load_state_dict(payload["cpa"])
+        missing, unexpected = load_cpa_state_dict_compatible(
+            cpa, payload["cpa"], context=str(resume_path)
+        )
+        cpa_fully_compatible = not missing and not unexpected
     bridge._skip_zero_init_parity_check = True
     bridge._parity_checked = True
-    if payload.get("optimizer") is not None:
+    if payload.get("optimizer") is not None and cpa_fully_compatible:
         optimizer.load_state_dict(payload["optimizer"])
+    elif payload.get("optimizer") is not None:
+        print("CPA architecture changed; optimizer state was not restored.", flush=True)
     if payload.get("scheduler") is not None and scheduler is not None:
         scheduler.load_state_dict(payload["scheduler"])
     if payload.get("scaler") is not None and scaler is not None:
@@ -689,6 +764,24 @@ def main():
     cpa_kwargs = OmegaConf.to_container(cpa_cfg, resolve=True)
     cpa_kwargs.pop("enabled", None)
     cpa = ClassPrototypeAlignmentHead(**cpa_kwargs).to(device) if bool(cpa_cfg.enabled) else None
+    cpa_initial_geometry = None
+    if cpa is not None:
+        with torch.no_grad():
+            sample_text = torch.linspace(
+                -1.0,
+                1.0,
+                steps=8 * cpa.dino_dim,
+                device=device,
+            ).reshape(8, cpa.dino_dim)
+            sample_prototypes, sample_details = cpa(sample_text, return_details=True)
+            cpa_initial_geometry = prototype_geometry(
+                sample_prototypes, sample_details["tangent_directions"]
+            )
+            cpa_initial_geometry.update({
+                "cpa_radius_mean": sample_details["radii"].mean().detach(),
+                "cpa_radius_min": sample_details["radii"].min().detach(),
+                "cpa_radius_max": sample_details["radii"].max().detach(),
+            })
     trainable_parameters = list(bridge.parameters())
     if cpa is not None:
         trainable_parameters.extend(cpa.parameters())
@@ -707,11 +800,17 @@ def main():
 
     print("=" * 78, flush=True)
     method_label = (
-        f"{METHOD_NAME} + Class Prototype Alignment Head"
+        f"{METHOD_NAME} + CPA-v3 Tangent-Space Prototype Alignment"
         if cpa is not None
         else METHOD_NAME
     )
     print(f"[{timestamp()}] Starting {method_label} training", flush=True)
+    print(
+        "Method: Talk2DINO_XAttnBridge_Clean + "
+        "CPA-v3 Tangent-Space Prototype Alignment"
+        if cpa is not None else f"Method: {METHOD_NAME}",
+        flush=True,
+    )
     print("=" * 78, flush=True)
     print(f"Output directory          : {out}", flush=True)
     print(f"Train features            : {args.train_features}", flush=True)
@@ -813,12 +912,18 @@ def main():
     )
     print(
         "CPA: "
-        f"enabled={bool(cpa_cfg.enabled)} num_prototypes={int(cpa_cfg.num_prototypes)} "
-        f"hidden_dim={int(cpa_cfg.hidden_dim)} prototype_scale={float(cpa_cfg.prototype_scale):.3f} "
+        f"enabled={bool(cpa_cfg.enabled)} version={cpa_cfg.version} "
+        f"num_prototypes={int(cpa_cfg.num_prototypes)} hidden_dim={int(cpa_cfg.hidden_dim)} "
         f"aggregation={cpa_cfg.prototype_aggregation} "
         f"prototype_temperature={float(cpa_cfg.prototype_temperature):.3f} "
         f"topk={int(cpa_cfg.topk)} residual_scale={float(cpa_cfg.residual_scale):.3f} "
-        f"residual_clip={float(cpa_cfg.residual_clip):.3f} normalize={bool(cpa_cfg.normalize)}",
+        f"residual_clip={float(cpa_cfg.residual_clip):.3f} normalize={bool(cpa_cfg.normalize)} "
+        f"use_shared_tangent_basis={bool(cpa_cfg.use_shared_tangent_basis)} "
+        f"conditional_basis_weights={bool(cpa_cfg.conditional_basis_weights)} "
+        f"radius_min={float(cpa_cfg.prototype_radius_min):.3f} "
+        f"radius_max={float(cpa_cfg.prototype_radius_max):.3f} "
+        f"radius_init={float(cpa_cfg.prototype_radius_init):.3f} "
+        f"prototype_dropout={float(cpa_cfg.prototype_dropout):.3f}",
         flush=True,
     )
     print(
@@ -826,13 +931,32 @@ def main():
         f"enabled={bool(cpa_loss_cfg.enabled)} "
         f"prototype_infonce_weight={float(cpa_loss_cfg.prototype_infonce_weight):.3f} "
         f"preserve_weight={float(cpa_loss_cfg.preserve_weight):.4g} "
-        f"diversity_weight={float(cpa_loss_cfg.diversity_weight):.4g} "
         f"residual_l1_weight={float(cpa_loss_cfg.residual_l1_weight):.4g} "
+        f"radius_weight={float(cpa_loss_cfg.radius_weight):.4g} "
+        f"radius_target={float(cpa_loss_cfg.radius_target):.3f} "
+        f"tangent_orth_weight={float(cpa_loss_cfg.tangent_orth_weight):.4g} "
+        f"spread_weight={float(cpa_loss_cfg.spread_weight):.4g} "
+        f"diversity_weight={float(cpa_loss_cfg.diversity_weight):.4g} "
         f"confident_margin={float(cpa_loss_cfg.confident_margin):.3f} "
         f"temperature={float(cpa_loss_cfg.temperature):.3f}",
         flush=True,
     )
     print("CCR: enabled=false", flush=True)
+    print(f"PAMR: enabled={bool(cfg.evaluate.get('pamr', False))}", flush=True)
+    if cpa_initial_geometry is not None:
+        initial = {key: float(value.cpu()) for key, value in cpa_initial_geometry.items()}
+        print(
+            "CPA-v3 initialization: "
+            f"proto_cos_mean={initial['cpa_proto_pairwise_cos_mean']:.6f} "
+            f"proto_cos_max={initial['cpa_proto_pairwise_cos_max']:.6f} "
+            f"proto_cos_min={initial['cpa_proto_pairwise_cos_min']:.6f} "
+            f"radius_mean={initial['cpa_radius_mean']:.6f} "
+            f"radius_min={initial['cpa_radius_min']:.6f} "
+            f"radius_max={initial['cpa_radius_max']:.6f}",
+            flush=True,
+        )
+        if initial["cpa_proto_pairwise_cos_mean"] >= 0.999:
+            print("WARNING: CPA-v3 prototypes are collapsed at initialization.", flush=True)
     print("Main InfoNCE: mapped_text vs visual_embed; CPA affects main InfoNCE=false", flush=True)
 
     start_epoch, best_miou, best_epoch = maybe_auto_resume(
@@ -931,8 +1055,9 @@ def main():
                         loss
                         + float(cpa_loss_cfg.prototype_infonce_weight) * cpa_losses["loss_cpa_proto_infonce"]
                         + float(cpa_loss_cfg.preserve_weight) * cpa_losses["loss_cpa_preserve"]
-                        + float(cpa_loss_cfg.diversity_weight) * cpa_losses["loss_cpa_diversity"]
                         + float(cpa_loss_cfg.residual_l1_weight) * cpa_losses["loss_cpa_residual_l1"]
+                        + float(cpa_loss_cfg.radius_weight) * cpa_losses["loss_cpa_radius"]
+                        + float(cpa_loss_cfg.tangent_orth_weight) * cpa_losses["loss_cpa_tangent_orth"]
                     )
             if not torch.isfinite(loss):
                 print("WARNING: loss became NaN/Inf; saving checkpoint_last.pth and stopping cleanly.", flush=True)
@@ -989,14 +1114,23 @@ def main():
             f"patch_preserve_kl={epoch_metrics['patch_preserve_kl']:.6f} "
             f"loss_cpa_proto_infonce={epoch_metrics['loss_cpa_proto_infonce']:.6f} "
             f"loss_cpa_preserve={epoch_metrics['loss_cpa_preserve']:.6f} "
-            f"loss_cpa_diversity={epoch_metrics['loss_cpa_diversity']:.6f} "
             f"loss_cpa_residual_l1={epoch_metrics['loss_cpa_residual_l1']:.6f} "
+            f"loss_cpa_radius={epoch_metrics['loss_cpa_radius']:.6f} "
+            f"loss_cpa_tangent_orth={epoch_metrics['loss_cpa_tangent_orth']:.6f} "
             f"cpa_residual_abs_mean={epoch_metrics['cpa_residual_abs_mean']:.6f} "
             f"cpa_residual_abs_max={epoch_metrics['cpa_residual_abs_max']:.6f} "
             f"cpa_modified_fraction={epoch_metrics['cpa_modified_fraction']:.4f} "
             f"cpa_confident_patch_frac={epoch_metrics['cpa_confident_patch_frac']:.4f} "
             f"cpa_proto_pairwise_cos_mean={epoch_metrics['cpa_proto_pairwise_cos_mean']:.4f} "
             f"cpa_proto_pairwise_cos_max={epoch_metrics['cpa_proto_pairwise_cos_max']:.4f} "
+            f"cpa_proto_pairwise_cos_min={epoch_metrics['cpa_proto_pairwise_cos_min']:.4f} "
+            f"cpa_tangent_dir_pairwise_cos_mean={epoch_metrics['cpa_tangent_dir_pairwise_cos_mean']:.4f} "
+            f"cpa_tangent_dir_pairwise_cos_abs_mean={epoch_metrics['cpa_tangent_dir_pairwise_cos_abs_mean']:.4f} "
+            f"cpa_radius_mean={epoch_metrics['cpa_radius_mean']:.4f} "
+            f"cpa_radius_min={epoch_metrics['cpa_radius_min']:.4f} "
+            f"cpa_radius_max={epoch_metrics['cpa_radius_max']:.4f} "
+            f"cpa_prototype_dropout={epoch_metrics['cpa_prototype_dropout']:.3f} "
+            f"cpa_prototype_active_fraction={epoch_metrics['cpa_prototype_active_fraction']:.4f} "
             f"cpa_topk={epoch_metrics['cpa_topk']:.0f} "
             f"base_norm={epoch_metrics['base_norm_mean']:.4f} "
             f"delta_norm={epoch_metrics['delta_norm_mean']:.4f} "
@@ -1098,6 +1232,8 @@ def main():
             "patch_preserve_kl": epoch_metrics["patch_preserve_kl"],
             "loss_cpa_proto_infonce": epoch_metrics["loss_cpa_proto_infonce"],
             "loss_cpa_preserve": epoch_metrics["loss_cpa_preserve"],
+            "loss_cpa_radius": epoch_metrics["loss_cpa_radius"],
+            "loss_cpa_tangent_orth": epoch_metrics["loss_cpa_tangent_orth"],
             "loss_cpa_diversity": epoch_metrics["loss_cpa_diversity"],
             "loss_cpa_residual_l1": epoch_metrics["loss_cpa_residual_l1"],
             "cpa_residual_abs_mean": epoch_metrics["cpa_residual_abs_mean"],
@@ -1106,6 +1242,14 @@ def main():
             "cpa_confident_patch_frac": epoch_metrics["cpa_confident_patch_frac"],
             "cpa_proto_pairwise_cos_mean": epoch_metrics["cpa_proto_pairwise_cos_mean"],
             "cpa_proto_pairwise_cos_max": epoch_metrics["cpa_proto_pairwise_cos_max"],
+            "cpa_proto_pairwise_cos_min": epoch_metrics["cpa_proto_pairwise_cos_min"],
+            "cpa_tangent_dir_pairwise_cos_mean": epoch_metrics["cpa_tangent_dir_pairwise_cos_mean"],
+            "cpa_tangent_dir_pairwise_cos_abs_mean": epoch_metrics["cpa_tangent_dir_pairwise_cos_abs_mean"],
+            "cpa_radius_mean": epoch_metrics["cpa_radius_mean"],
+            "cpa_radius_min": epoch_metrics["cpa_radius_min"],
+            "cpa_radius_max": epoch_metrics["cpa_radius_max"],
+            "cpa_prototype_dropout": epoch_metrics["cpa_prototype_dropout"],
+            "cpa_prototype_active_fraction": epoch_metrics["cpa_prototype_active_fraction"],
             "cpa_topk": epoch_metrics["cpa_topk"],
             "miou": miou,
             "val_loss": val_loss,
@@ -1115,6 +1259,17 @@ def main():
             "xattn_safety": OmegaConf.to_container(safety_cfg, resolve=True),
             "cpa_config": OmegaConf.to_container(cpa_cfg, resolve=True),
             "cpa_loss_config": OmegaConf.to_container(cpa_loss_cfg, resolve=True),
+            "cpa_metadata": {
+                "version": str(cpa_cfg.version),
+                "use_shared_tangent_basis": bool(cpa_cfg.use_shared_tangent_basis),
+                "prototype_radius_min": float(cpa_cfg.prototype_radius_min),
+                "prototype_radius_max": float(cpa_cfg.prototype_radius_max),
+                "prototype_radius_init": float(cpa_cfg.prototype_radius_init),
+                "prototype_dropout": float(cpa_cfg.prototype_dropout),
+                "radius_weight": float(cpa_loss_cfg.radius_weight),
+                "radius_target": float(cpa_loss_cfg.radius_target),
+                "tangent_orth_weight": float(cpa_loss_cfg.tangent_orth_weight),
+            },
             "bridge_base_guidance": {
                 "base_guided_attention": bool(cfg.bridge.get("base_guided_attention", True)),
                 "base_guidance_beta": float(cfg.bridge.get("base_guidance_beta", 1.0)),
@@ -1130,6 +1285,8 @@ def main():
             "base_guidance_beta": epoch_metrics["base_guidance_beta"],
             "base_norm_mean": epoch_metrics["base_norm_mean"],
             "delta_norm_mean": epoch_metrics["delta_norm_mean"],
+            "base_norm": epoch_metrics["base_norm_mean"],
+            "delta_norm": epoch_metrics["delta_norm_mean"],
             "data_time": epoch_metrics["data_time"],
             "compute_time": epoch_metrics["compute_time"],
             "avg_dataload_time_sec": epoch_metrics["data_time"],
@@ -1174,6 +1331,8 @@ def main():
             "patch_preserve_kl": epoch_metrics["patch_preserve_kl"],
             "loss_cpa_proto_infonce": epoch_metrics["loss_cpa_proto_infonce"],
             "loss_cpa_preserve": epoch_metrics["loss_cpa_preserve"],
+            "loss_cpa_radius": epoch_metrics["loss_cpa_radius"],
+            "loss_cpa_tangent_orth": epoch_metrics["loss_cpa_tangent_orth"],
             "loss_cpa_diversity": epoch_metrics["loss_cpa_diversity"],
             "loss_cpa_residual_l1": epoch_metrics["loss_cpa_residual_l1"],
             "cpa_residual_abs_mean": epoch_metrics["cpa_residual_abs_mean"],
@@ -1182,12 +1341,23 @@ def main():
             "cpa_confident_patch_frac": epoch_metrics["cpa_confident_patch_frac"],
             "cpa_proto_pairwise_cos_mean": epoch_metrics["cpa_proto_pairwise_cos_mean"],
             "cpa_proto_pairwise_cos_max": epoch_metrics["cpa_proto_pairwise_cos_max"],
+            "cpa_proto_pairwise_cos_min": epoch_metrics["cpa_proto_pairwise_cos_min"],
+            "cpa_tangent_dir_pairwise_cos_mean": epoch_metrics["cpa_tangent_dir_pairwise_cos_mean"],
+            "cpa_tangent_dir_pairwise_cos_abs_mean": epoch_metrics["cpa_tangent_dir_pairwise_cos_abs_mean"],
+            "cpa_radius_mean": epoch_metrics["cpa_radius_mean"],
+            "cpa_radius_min": epoch_metrics["cpa_radius_min"],
+            "cpa_radius_max": epoch_metrics["cpa_radius_max"],
+            "cpa_prototype_dropout": epoch_metrics["cpa_prototype_dropout"],
+            "cpa_prototype_active_fraction": epoch_metrics["cpa_prototype_active_fraction"],
             "cpa_topk": epoch_metrics["cpa_topk"],
             "base_norm_mean": epoch_metrics["base_norm_mean"],
             "delta_norm_mean": epoch_metrics["delta_norm_mean"],
+            "base_norm": epoch_metrics["base_norm_mean"],
+            "delta_norm": epoch_metrics["delta_norm_mean"],
             "delta_base_ratio_mean": epoch_metrics["delta_base_ratio_mean"],
             "delta_base_ratio_max": epoch_metrics["delta_base_ratio_max"],
             "cosine_base_mapped_mean": epoch_metrics["cosine_base_mapped_mean"],
+            "cos_base_mapped_mean": epoch_metrics["cosine_base_mapped_mean"],
             "cosine_base_mapped_min": epoch_metrics["cosine_base_mapped_min"],
             "gamma": epoch_metrics["gamma"],
             "base_guidance_beta": epoch_metrics["base_guidance_beta"],
@@ -1196,12 +1366,14 @@ def main():
             "eval_mode": eval_mode,
             "lr": lr,
             "epoch_time_sec": epoch_time,
+            "epoch_time": epoch_time,
             "eta_sec": eta,
             "data_time": epoch_metrics["data_time"],
             "compute_time": epoch_metrics["compute_time"],
             "avg_dataload_time_sec": epoch_metrics["data_time"],
             "avg_xattn_step_time_sec": epoch_metrics["compute_time"],
             "epoch_it_s": epoch_it_s,
+            "it/s": epoch_it_s,
         }
         with open(train_log_path, "a") as f:
             f.write(json.dumps(log_row) + "\n")
