@@ -33,6 +33,7 @@ from class_prototype_alignment import (
     compute_prototype_logits,
     prototype_diversity_loss,
 )
+from cpa_logit_router import ConfidenceAwarePrototypeLogitRouter
 from eval_xattn_clean import (
     bridge_class_embeddings,
     build_class_embeddings,
@@ -99,6 +100,7 @@ def get_safety_cfg(cfg):
 def get_cpa_cfg(cfg):
     defaults = OmegaConf.create({
         "enabled": True,
+        "version": "v1",
         "num_prototypes": 4,
         "hidden_dim": 256,
         "prototype_scale": 0.10,
@@ -124,6 +126,34 @@ def get_cpa_loss_cfg(cfg):
         "residual_l1_weight": 0.001,
     })
     return OmegaConf.merge(defaults, cfg.get("cpa_loss", {}))
+
+
+def get_cpa_router_cfg(cfg):
+    defaults = OmegaConf.create({
+        "enabled": True,
+        "topk": 5,
+        "hidden_dim": 32,
+        "init_w_base": 0.74,
+        "init_w_xattn": 0.02,
+        "init_w_cpa": 0.24,
+        "use_margin": True,
+        "use_entropy": True,
+    })
+    return OmegaConf.merge(defaults, cfg.get("cpa_router", {}))
+
+
+def get_cpa_router_loss_cfg(cfg):
+    defaults = OmegaConf.create({
+        "enabled": True,
+        "prior_weight": 0.005,
+        "preserve_weight": 0.01,
+        "confident_margin": 0.20,
+        "temperature": 2.0,
+        "dense_infonce_weight": 0.05,
+        "pool_temperature": 0.07,
+        "entropy_weight": 0.0,
+    })
+    return OmegaConf.merge(defaults, cfg.get("cpa_router_loss", {}))
 
 
 def validate_cpa_semantic_setup(cfg, feature_path, sample):
@@ -227,6 +257,48 @@ def zero_cpa_losses(reference):
     }
 
 
+def zero_router_losses(reference):
+    zero = reference.float().new_tensor(0.0)
+    return {
+        "loss_router_prior": zero,
+        "loss_router_preserve": zero,
+        "loss_router_dense_infonce": zero,
+        "loss_router_entropy": zero,
+        "router_w_base_mean": zero,
+        "router_w_xattn_mean": zero,
+        "router_w_cpa_mean": zero,
+        "router_w_base_min": zero,
+        "router_w_xattn_min": zero,
+        "router_w_cpa_min": zero,
+        "router_w_base_max": zero,
+        "router_w_xattn_max": zero,
+        "router_w_cpa_max": zero,
+        "router_entropy_mean": zero,
+        "router_modified_fraction": zero,
+        "router_topk": zero,
+    }
+
+
+ROUTER_METRIC_KEYS = (
+    "loss_router_prior",
+    "loss_router_preserve",
+    "loss_router_dense_infonce",
+    "loss_router_entropy",
+    "router_w_base_mean",
+    "router_w_xattn_mean",
+    "router_w_cpa_mean",
+    "router_w_base_min",
+    "router_w_xattn_min",
+    "router_w_cpa_min",
+    "router_w_base_max",
+    "router_w_xattn_max",
+    "router_w_cpa_max",
+    "router_entropy_mean",
+    "router_modified_fraction",
+    "router_topk",
+)
+
+
 def cpa_auxiliary_losses(
     cpa,
     mapped_text,
@@ -304,6 +376,78 @@ def cpa_auxiliary_losses(
         "cpa_proto_pairwise_cos_mean": pair_cos_mean,
         "cpa_proto_pairwise_cos_max": pair_cos_max,
         "cpa_topk": cpa_stats["cpa_topk"],
+        "prototype_patch_logits": prototype_patch_logits,
+    }
+
+
+def router_auxiliary_losses(
+    router,
+    base_patch_logits,
+    xattn_patch_logits,
+    prototype_patch_logits,
+    loss_cfg,
+    contrastive_temperature,
+):
+    final_patch_logits, router_stats = router(
+        base_patch_logits,
+        xattn_patch_logits,
+        prototype_patch_logits,
+    )
+    weights = router_stats["router_weights"].float().clamp_min(1e-8)
+    target = router.initial_weights.to(weights).view(1, 1, 1, 3)
+    loss_prior = (target * (target.log() - weights.log())).sum(dim=-1).mean()
+
+    base = base_patch_logits.float()
+    final = final_patch_logits.float()
+    top2 = base.topk(min(2, base.shape[1]), dim=1).values
+    margin = (
+        top2[:, 0] - top2[:, 1]
+        if top2.shape[1] > 1
+        else torch.zeros_like(top2[:, 0])
+    )
+    confident_mask = margin > float(loss_cfg.confident_margin)
+    loss_preserve = base.new_tensor(0.0)
+    if confident_mask.any():
+        temperature = max(float(loss_cfg.temperature), 1e-6)
+        p_base = F.softmax((base / temperature).detach(), dim=1)
+        log_p_final = F.log_softmax(final / temperature, dim=1)
+        loss_preserve = F.kl_div(
+            log_p_final.permute(0, 2, 1)[confident_mask],
+            p_base.permute(0, 2, 1)[confident_mask],
+            reduction="batchmean",
+        )
+
+    pool_temperature = max(float(loss_cfg.pool_temperature), 1e-6)
+    dense_scores = pool_temperature * torch.logsumexp(
+        final / pool_temperature,
+        dim=-1,
+    )
+    loss_dense_infonce = contrastive_loss(
+        dense_scores / max(float(contrastive_temperature), 1e-6)
+    )
+    loss_entropy = -(weights * weights.log()).sum(dim=-1).mean()
+    return {
+        "loss_router_prior": loss_prior,
+        "loss_router_preserve": loss_preserve,
+        "loss_router_dense_infonce": loss_dense_infonce,
+        "loss_router_entropy": loss_entropy,
+        **{
+            key: router_stats[key]
+            for key in (
+                "router_w_base_mean",
+                "router_w_xattn_mean",
+                "router_w_cpa_mean",
+                "router_w_base_min",
+                "router_w_xattn_min",
+                "router_w_cpa_min",
+                "router_w_base_max",
+                "router_w_xattn_max",
+                "router_w_cpa_max",
+                "router_entropy_mean",
+                "router_modified_fraction",
+                "router_topk",
+            )
+        },
     }
 
 
@@ -329,6 +473,22 @@ def init_epoch_accumulators():
         "cpa_proto_pairwise_cos_mean": 0.0,
         "cpa_proto_pairwise_cos_max": 0.0,
         "cpa_topk": 0.0,
+        "loss_router_prior": 0.0,
+        "loss_router_preserve": 0.0,
+        "loss_router_dense_infonce": 0.0,
+        "loss_router_entropy": 0.0,
+        "router_w_base_mean": 0.0,
+        "router_w_xattn_mean": 0.0,
+        "router_w_cpa_mean": 0.0,
+        "router_w_base_min": 1.0,
+        "router_w_xattn_min": 1.0,
+        "router_w_cpa_min": 1.0,
+        "router_w_base_max": 0.0,
+        "router_w_xattn_max": 0.0,
+        "router_w_cpa_max": 0.0,
+        "router_entropy_mean": 0.0,
+        "router_modified_fraction": 0.0,
+        "router_topk": 0.0,
         "base_norm_mean": 0.0,
         "delta_norm_mean": 0.0,
         "delta_base_ratio_mean": 0.0,
@@ -342,7 +502,9 @@ def init_epoch_accumulators():
     }
 
 
-def update_epoch_accumulators(acc, loss_total, loss_infonce, losses, stats, cpa_losses):
+def update_epoch_accumulators(
+    acc, loss_total, loss_infonce, losses, stats, cpa_losses, router_losses
+):
     acc["loss_total"] += float(loss_total.detach().cpu())
     acc["loss_infonce"] += float(loss_infonce.detach().cpu())
     acc["loss_delta_l2"] += float(losses["loss_delta_l2"].detach().cpu())
@@ -372,6 +534,24 @@ def update_epoch_accumulators(acc, loss_total, loss_infonce, losses, stats, cpa_
         acc["cpa_proto_pairwise_cos_max"],
         float(cpa_losses["cpa_proto_pairwise_cos_max"].detach().cpu()),
     )
+    for key in (
+        "loss_router_prior",
+        "loss_router_preserve",
+        "loss_router_dense_infonce",
+        "loss_router_entropy",
+        "router_w_base_mean",
+        "router_w_xattn_mean",
+        "router_w_cpa_mean",
+        "router_entropy_mean",
+        "router_modified_fraction",
+        "router_topk",
+    ):
+        acc[key] += float(router_losses[key].detach().cpu())
+    for expert in ("base", "xattn", "cpa"):
+        min_key = f"router_w_{expert}_min"
+        max_key = f"router_w_{expert}_max"
+        acc[min_key] = min(acc[min_key], float(router_losses[min_key].detach().cpu()))
+        acc[max_key] = max(acc[max_key], float(router_losses[max_key].detach().cpu()))
     acc["base_norm_mean"] += float(stats["base_norm"].detach().float().mean().cpu())
     acc["delta_norm_mean"] += float(stats["delta_norm"].detach().float().mean().cpu())
     ratio = stats["delta_base_ratio"].detach().float()
@@ -409,6 +589,16 @@ def finalize_epoch_accumulators(acc, count):
         "cpa_confident_patch_frac",
         "cpa_proto_pairwise_cos_mean",
         "cpa_topk",
+        "loss_router_prior",
+        "loss_router_preserve",
+        "loss_router_dense_infonce",
+        "loss_router_entropy",
+        "router_w_base_mean",
+        "router_w_xattn_mean",
+        "router_w_cpa_mean",
+        "router_entropy_mean",
+        "router_modified_fraction",
+        "router_topk",
         "base_norm_mean",
         "delta_norm_mean",
         "delta_base_ratio_mean",
@@ -444,6 +634,10 @@ def print_epoch_progress(epoch, epochs, step, total_steps, acc, start_time, lr):
         f"patch={metrics['patch_preserve_kl']:.4f} "
         f"cpa={metrics['loss_cpa_proto_infonce']:.4f} "
         f"cpa|r|={metrics['cpa_residual_abs_mean']:.4f} "
+        f"route={metrics['loss_router_dense_infonce']:.4f} "
+        f"rw={metrics['router_w_base_mean']:.2f}/"
+        f"{metrics['router_w_xattn_mean']:.2f}/"
+        f"{metrics['router_w_cpa_mean']:.2f} "
         f"d/b={metrics['delta_base_ratio_mean']:.3f} "
         f"dmax={metrics['delta_base_ratio_max']:.4f} "
         f"cos={metrics['cosine_base_mapped_mean']:.4f} "
@@ -467,7 +661,9 @@ def projection_trainable_count(model):
     return sum(p.numel() for p in model.proj.parameters() if p.requires_grad)
 
 
-def maybe_auto_resume(out, cfg, bridge, cpa, optimizer, scheduler, scaler, device):
+def maybe_auto_resume(
+    out, cfg, bridge, cpa, cpa_router, optimizer, scheduler, scaler, device
+):
     auto_resume = bool(cfg.train.get("auto_resume", True))
     resume_path = cfg.train.get("resume", None)
     if resume_path in {"", "null", "None"}:
@@ -492,6 +688,12 @@ def maybe_auto_resume(out, cfg, bridge, cpa, optimizer, scheduler, scaler, devic
                 "Start from scratch or use a CPA checkpoint."
             )
         cpa.load_state_dict(payload["cpa"])
+    if cpa_router is not None:
+        if payload.get("cpa_router") is None:
+            raise RuntimeError(
+                "CPA-Router enabled but checkpoint does not contain router weights."
+            )
+        cpa_router.load_state_dict(payload["cpa_router"])
     bridge._skip_zero_init_parity_check = True
     bridge._parity_checked = True
     if payload.get("optimizer") is not None:
@@ -685,13 +887,26 @@ def main():
     safety_cfg = get_safety_cfg(cfg)
     cpa_cfg = get_cpa_cfg(cfg)
     cpa_loss_cfg = get_cpa_loss_cfg(cfg)
+    router_cfg = get_cpa_router_cfg(cfg)
+    router_loss_cfg = get_cpa_router_loss_cfg(cfg)
+    if bool(router_cfg.enabled) and not bool(cpa_cfg.enabled):
+        raise ValueError("CPA-Router requires cpa.enabled=true")
     bridge = CleanXAttnBridge(**OmegaConf.to_container(cfg.bridge, resolve=True)).to(device)
     cpa_kwargs = OmegaConf.to_container(cpa_cfg, resolve=True)
     cpa_kwargs.pop("enabled", None)
     cpa = ClassPrototypeAlignmentHead(**cpa_kwargs).to(device) if bool(cpa_cfg.enabled) else None
+    router_kwargs = OmegaConf.to_container(router_cfg, resolve=True)
+    router_kwargs.pop("enabled", None)
+    cpa_router = (
+        ConfidenceAwarePrototypeLogitRouter(**router_kwargs).to(device)
+        if bool(router_cfg.enabled)
+        else None
+    )
     trainable_parameters = list(bridge.parameters())
     if cpa is not None:
         trainable_parameters.extend(cpa.parameters())
+    if cpa_router is not None:
+        trainable_parameters.extend(cpa_router.parameters())
     optimizer = torch.optim.AdamW(
         trainable_parameters,
         lr=float(cfg.train.lr),
@@ -707,7 +922,9 @@ def main():
 
     print("=" * 78, flush=True)
     method_label = (
-        f"{METHOD_NAME} + Class Prototype Alignment Head"
+        f"{METHOD_NAME} + CPA-v1 + Confidence-Aware Prototype Logit Router"
+        if cpa_router is not None
+        else f"{METHOD_NAME} + Class Prototype Alignment Head"
         if cpa is not None
         else METHOD_NAME
     )
@@ -730,7 +947,7 @@ def main():
     print(f"  Visual target           : same DINO region-aware feature `{cfg.data.get('features_name', 'disentangled_self_attn')}`", flush=True)
     print("  Base text projection    : frozen original Talk2DINO projection", flush=True)
     print("  Objective               : pairwise BxB InfoNCE over score(text_i, image_j)", flush=True)
-    print("  Trainable modules       : XAttnBridge_Clean and CPA only", flush=True)
+    print("  Trainable modules       : XAttnBridge_Clean, CPA-v1, and CPA-Router", flush=True)
     print(
         "  Bridge architecture     : "
         f"clip_dim={cfg.bridge.clip_dim}, dino_dim={cfg.bridge.dino_dim}, "
@@ -776,7 +993,8 @@ def main():
     )
     print(f"Trainable parameter count : {trainable_count(bridge)}", flush=True)
     print(f"CPA trainable params      : {trainable_count(cpa) if cpa is not None else 0}", flush=True)
-    print("CLIP/DINO remain frozen; only XAttnBridge_Clean and CPA are optimized.", flush=True)
+    print(f"Router trainable params   : {trainable_count(cpa_router) if cpa_router is not None else 0}", flush=True)
+    print("CLIP/DINO remain frozen; only XAttnBridge_Clean, CPA, and CPA-Router are optimized.", flush=True)
     print(f"train_feature_source      : {train_feature_source}", flush=True)
     print(f"train_eval_mode           : {eval_mode}", flush=True)
     if train_feature_source == "baseline_pth_in_memory":
@@ -813,7 +1031,8 @@ def main():
     )
     print(
         "CPA: "
-        f"enabled={bool(cpa_cfg.enabled)} num_prototypes={int(cpa_cfg.num_prototypes)} "
+        f"enabled={bool(cpa_cfg.enabled)} version={cpa_cfg.version} "
+        f"num_prototypes={int(cpa_cfg.num_prototypes)} "
         f"hidden_dim={int(cpa_cfg.hidden_dim)} prototype_scale={float(cpa_cfg.prototype_scale):.3f} "
         f"aggregation={cpa_cfg.prototype_aggregation} "
         f"prototype_temperature={float(cpa_cfg.prototype_temperature):.3f} "
@@ -832,11 +1051,40 @@ def main():
         f"temperature={float(cpa_loss_cfg.temperature):.3f}",
         flush=True,
     )
+    print(
+        "CPA-Router: "
+        f"enabled={bool(router_cfg.enabled)} topk={int(router_cfg.topk)} "
+        f"hidden_dim={int(router_cfg.hidden_dim)} "
+        f"init_w_base={float(router_cfg.init_w_base):.3f} "
+        f"init_w_xattn={float(router_cfg.init_w_xattn):.3f} "
+        f"init_w_cpa={float(router_cfg.init_w_cpa):.3f} "
+        f"use_margin={bool(router_cfg.use_margin)} "
+        f"use_entropy={bool(router_cfg.use_entropy)}",
+        flush=True,
+    )
+    print(
+        "CPA-Router loss: "
+        f"enabled={bool(router_loss_cfg.enabled)} "
+        f"prior_weight={float(router_loss_cfg.prior_weight):.4g} "
+        f"preserve_weight={float(router_loss_cfg.preserve_weight):.4g} "
+        f"dense_infonce_weight={float(router_loss_cfg.dense_infonce_weight):.4g} "
+        f"entropy_weight={float(router_loss_cfg.entropy_weight):.4g} "
+        f"pool_temperature={float(router_loss_cfg.pool_temperature):.3f}",
+        flush=True,
+    )
+    if cpa_router is not None:
+        initial = cpa_router.initial_weights.detach().cpu().tolist()
+        print(
+            "CPA-Router initialized weights: "
+            f"base={initial[0]:.6f} xattn={initial[1]:.6f} cpa={initial[2]:.6f}",
+            flush=True,
+        )
     print("CCR: enabled=false", flush=True)
-    print("Main InfoNCE: mapped_text vs visual_embed; CPA affects main InfoNCE=false", flush=True)
+    print(f"PAMR: enabled={bool(cfg.evaluate.get('pamr', False))}", flush=True)
+    print("Main InfoNCE: mapped_text vs visual_embed; CPA-Router affects main InfoNCE=false", flush=True)
 
     start_epoch, best_miou, best_epoch = maybe_auto_resume(
-        out, cfg, bridge, cpa, optimizer, scheduler, scaler, device
+        out, cfg, bridge, cpa, cpa_router, optimizer, scheduler, scaler, device
     )
     if eval_mode == "baseline_pth_val_loss" and best_miou == -float("inf"):
         best_miou = float("inf")
@@ -860,6 +1108,8 @@ def main():
         bridge.train()
         if cpa is not None:
             cpa.train()
+        if cpa_router is not None:
+            cpa_router.train()
         acc = init_epoch_accumulators()
         count = 0
         stop_training = False
@@ -900,10 +1150,15 @@ def main():
                 )
                 loss_infonce = contrastive_loss(scores / contrastive_temperature)
                 safety_losses = bridge_safety_losses(safety_stats, safety_cfg)
-                if cpa is not None and bool(cpa_loss_cfg.enabled):
-                    if "mapped_text" not in safety_stats or "base_patch_logits" not in safety_stats:
+                if cpa is not None and (
+                    bool(cpa_loss_cfg.enabled) or cpa_router is not None
+                ):
+                    if any(
+                        key not in safety_stats
+                        for key in ("mapped_text", "base_patch_logits", "xattn_patch_logits")
+                    ):
                         raise RuntimeError(
-                            "CPA requires mapped_text and semantic base_patch_logits from XAttn"
+                            "CPA-Router requires mapped_text and semantic base/XAttn patch logits"
                         )
                     cpa_losses = cpa_auxiliary_losses(
                         cpa,
@@ -916,6 +1171,17 @@ def main():
                     )
                 else:
                     cpa_losses = zero_cpa_losses(safety_stats["delta"])
+                if cpa_router is not None and bool(router_loss_cfg.enabled):
+                    router_losses = router_auxiliary_losses(
+                        cpa_router,
+                        safety_stats["base_patch_logits"],
+                        safety_stats["xattn_patch_logits"],
+                        cpa_losses["prototype_patch_logits"],
+                        router_loss_cfg,
+                        contrastive_temperature,
+                    )
+                else:
+                    router_losses = zero_router_losses(safety_stats["delta"])
                 loss = loss_infonce
                 if bool(safety_cfg.enabled):
                     loss = (
@@ -934,6 +1200,14 @@ def main():
                         + float(cpa_loss_cfg.diversity_weight) * cpa_losses["loss_cpa_diversity"]
                         + float(cpa_loss_cfg.residual_l1_weight) * cpa_losses["loss_cpa_residual_l1"]
                     )
+                if cpa_router is not None and bool(router_loss_cfg.enabled):
+                    loss = (
+                        loss
+                        + float(router_loss_cfg.prior_weight) * router_losses["loss_router_prior"]
+                        + float(router_loss_cfg.preserve_weight) * router_losses["loss_router_preserve"]
+                        + float(router_loss_cfg.dense_infonce_weight) * router_losses["loss_router_dense_infonce"]
+                        + float(router_loss_cfg.entropy_weight) * router_losses["loss_router_entropy"]
+                    )
             if not torch.isfinite(loss):
                 print("WARNING: loss became NaN/Inf; saving checkpoint_last.pth and stopping cleanly.", flush=True)
                 stop_training = True
@@ -949,6 +1223,7 @@ def main():
                 safety_losses,
                 safety_stats,
                 cpa_losses,
+                router_losses,
             )
             acc["data_time"] += data_time
             acc["compute_time"] += time.time() - compute_start
@@ -991,6 +1266,22 @@ def main():
             f"loss_cpa_preserve={epoch_metrics['loss_cpa_preserve']:.6f} "
             f"loss_cpa_diversity={epoch_metrics['loss_cpa_diversity']:.6f} "
             f"loss_cpa_residual_l1={epoch_metrics['loss_cpa_residual_l1']:.6f} "
+            f"loss_router_prior={epoch_metrics['loss_router_prior']:.6f} "
+            f"loss_router_preserve={epoch_metrics['loss_router_preserve']:.6f} "
+            f"loss_router_dense_infonce={epoch_metrics['loss_router_dense_infonce']:.6f} "
+            f"loss_router_entropy={epoch_metrics['loss_router_entropy']:.6f} "
+            f"router_w_base_mean={epoch_metrics['router_w_base_mean']:.4f} "
+            f"router_w_xattn_mean={epoch_metrics['router_w_xattn_mean']:.4f} "
+            f"router_w_cpa_mean={epoch_metrics['router_w_cpa_mean']:.4f} "
+            f"router_w_base_min={epoch_metrics['router_w_base_min']:.4f} "
+            f"router_w_xattn_min={epoch_metrics['router_w_xattn_min']:.4f} "
+            f"router_w_cpa_min={epoch_metrics['router_w_cpa_min']:.4f} "
+            f"router_w_base_max={epoch_metrics['router_w_base_max']:.4f} "
+            f"router_w_xattn_max={epoch_metrics['router_w_xattn_max']:.4f} "
+            f"router_w_cpa_max={epoch_metrics['router_w_cpa_max']:.4f} "
+            f"router_entropy_mean={epoch_metrics['router_entropy_mean']:.4f} "
+            f"router_modified_fraction={epoch_metrics['router_modified_fraction']:.4f} "
+            f"router_topk={epoch_metrics['router_topk']:.0f} "
             f"cpa_residual_abs_mean={epoch_metrics['cpa_residual_abs_mean']:.6f} "
             f"cpa_residual_abs_max={epoch_metrics['cpa_residual_abs_max']:.6f} "
             f"cpa_modified_fraction={epoch_metrics['cpa_modified_fraction']:.4f} "
@@ -1017,6 +1308,12 @@ def main():
                 "WARNING: XAttn correction is becoming large; absent-class risk may increase.",
                 flush=True,
             )
+        if cpa_router is not None and epoch_metrics["router_w_base_mean"] > 0.95:
+            print("WARNING: CPA-Router is close to all-base routing.", flush=True)
+        if cpa_router is not None and epoch_metrics["router_w_cpa_mean"] > 0.90:
+            print("WARNING: CPA-Router is close to all-CPA routing.", flush=True)
+        if cpa_router is not None and epoch_metrics["router_w_xattn_mean"] > 0.50:
+            print("WARNING: CPA-Router XAttn routing is aggressive.", flush=True)
         if epoch_metrics["cosine_base_mapped_mean"] < 0.90:
             print(
                 "WARNING: mapped text is drifting far from Talk2DINO base space.",
@@ -1107,6 +1404,7 @@ def main():
             "cpa_proto_pairwise_cos_mean": epoch_metrics["cpa_proto_pairwise_cos_mean"],
             "cpa_proto_pairwise_cos_max": epoch_metrics["cpa_proto_pairwise_cos_max"],
             "cpa_topk": epoch_metrics["cpa_topk"],
+            **{key: epoch_metrics[key] for key in ROUTER_METRIC_KEYS},
             "miou": miou,
             "val_loss": val_loss,
             "eval_mode": eval_mode,
@@ -1115,6 +1413,8 @@ def main():
             "xattn_safety": OmegaConf.to_container(safety_cfg, resolve=True),
             "cpa_config": OmegaConf.to_container(cpa_cfg, resolve=True),
             "cpa_loss_config": OmegaConf.to_container(cpa_loss_cfg, resolve=True),
+            "cpa_router_config": OmegaConf.to_container(router_cfg, resolve=True),
+            "cpa_router_loss_config": OmegaConf.to_container(router_loss_cfg, resolve=True),
             "bridge_base_guidance": {
                 "base_guided_attention": bool(cfg.bridge.get("base_guided_attention", True)),
                 "base_guidance_beta": float(cfg.bridge.get("base_guidance_beta", 1.0)),
@@ -1147,6 +1447,7 @@ def main():
             checkpoint_metrics,
             scaler,
             cpa=cpa,
+            cpa_router=cpa_router,
         )
         last_checkpoint = out / "checkpoint_last.pth"
         best_checkpoint = out / "checkpoint_best.pth"
@@ -1183,11 +1484,16 @@ def main():
             "cpa_proto_pairwise_cos_mean": epoch_metrics["cpa_proto_pairwise_cos_mean"],
             "cpa_proto_pairwise_cos_max": epoch_metrics["cpa_proto_pairwise_cos_max"],
             "cpa_topk": epoch_metrics["cpa_topk"],
+            **{key: epoch_metrics[key] for key in ROUTER_METRIC_KEYS},
             "base_norm_mean": epoch_metrics["base_norm_mean"],
             "delta_norm_mean": epoch_metrics["delta_norm_mean"],
+            "base_norm": epoch_metrics["base_norm_mean"],
+            "delta_norm": epoch_metrics["delta_norm_mean"],
             "delta_base_ratio_mean": epoch_metrics["delta_base_ratio_mean"],
+            "delta/base_mean": epoch_metrics["delta_base_ratio_mean"],
             "delta_base_ratio_max": epoch_metrics["delta_base_ratio_max"],
             "cosine_base_mapped_mean": epoch_metrics["cosine_base_mapped_mean"],
+            "cos_base_mapped_mean": epoch_metrics["cosine_base_mapped_mean"],
             "cosine_base_mapped_min": epoch_metrics["cosine_base_mapped_min"],
             "gamma": epoch_metrics["gamma"],
             "base_guidance_beta": epoch_metrics["base_guidance_beta"],
@@ -1196,12 +1502,14 @@ def main():
             "eval_mode": eval_mode,
             "lr": lr,
             "epoch_time_sec": epoch_time,
+            "epoch_time": epoch_time,
             "eta_sec": eta,
             "data_time": epoch_metrics["data_time"],
             "compute_time": epoch_metrics["compute_time"],
             "avg_dataload_time_sec": epoch_metrics["data_time"],
             "avg_xattn_step_time_sec": epoch_metrics["compute_time"],
             "epoch_it_s": epoch_it_s,
+            "it/s": epoch_it_s,
         }
         with open(train_log_path, "a") as f:
             f.write(json.dumps(log_row) + "\n")
@@ -1217,6 +1525,7 @@ def main():
                 checkpoint_metrics,
                 scaler,
                 cpa=cpa,
+                cpa_router=cpa_router,
             )
             print(
                 f"[{timestamp()}] Saved best checkpoint: {best_checkpoint} "
@@ -1236,6 +1545,7 @@ def main():
                 checkpoint_metrics,
                 scaler,
                 cpa=cpa,
+                cpa_router=cpa_router,
             )
             saved_epoch_checkpoint = True
             print(
