@@ -33,7 +33,6 @@ from class_prototype_alignment import (
     compute_prototype_logits,
     prototype_diversity_loss,
 )
-from vab_adapter import VocabularyAwareBridgeAdapter
 from eval_xattn_clean import (
     bridge_class_embeddings,
     build_class_embeddings,
@@ -50,11 +49,6 @@ def parse_args():
     parser.add_argument("--train_features", required=True)
     parser.add_argument("--eval_features", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument(
-        "--init_checkpoint",
-        default=None,
-        help="Initialize bridge/CPA weights without restoring optimizer or epoch state.",
-    )
     parser.add_argument("--opts", nargs="+", default=None)
     return parser.parse_args()
 
@@ -87,7 +81,6 @@ def file_size_mb(path):
 def get_safety_cfg(cfg):
     defaults = OmegaConf.create({
         "enabled": True,
-        "version": "v1",
         "delta_l2_weight": 0.001,
         "ratio_target": 0.07,
         "ratio_penalty_weight": 0.02,
@@ -131,52 +124,6 @@ def get_cpa_loss_cfg(cfg):
         "residual_l1_weight": 0.001,
     })
     return OmegaConf.merge(defaults, cfg.get("cpa_loss", {}))
-
-
-def get_vab_cfg(cfg):
-    defaults = OmegaConf.create({
-        "enabled": False,
-        "dino_dim": 768,
-        "hidden_dim": 128,
-        "num_heads": 4,
-        "dropout": 0.0,
-        "gamma_init": 0.0,
-        "gamma_max": 0.03,
-        "delta_ratio_clip": 0.05,
-        "normalize_output": True,
-        "detach_visual": True,
-        "train_only_vab": True,
-        "freeze_existing": True,
-    })
-    return OmegaConf.merge(defaults, cfg.get("vab", {}))
-
-
-def get_vab_loss_cfg(cfg):
-    defaults = OmegaConf.create({
-        "enabled": True,
-        "delta_l2_weight": 0.001,
-        "ratio_weight": 0.01,
-        "ratio_target": 0.03,
-        "cos_preserve_weight": 0.01,
-        "cos_min": 0.995,
-        "vocab_structure_weight": 0.005,
-        "region_margin_weight": 0.005,
-        "region_margin": 0.05,
-        "region_teacher_temperature": 0.07,
-        "region_min_prob": 0.35,
-        "region_min_margin": 0.10,
-        "region_max_entropy": 0.75,
-    })
-    return OmegaConf.merge(defaults, cfg.get("vab_loss", {}))
-
-
-def build_vab(vab_cfg, device):
-    if not bool(vab_cfg.enabled):
-        return None
-    kwargs = OmegaConf.to_container(vab_cfg, resolve=True)
-    for key in ("enabled", "train_only_vab", "freeze_existing"):
-        kwargs.pop(key, None)
-    return VocabularyAwareBridgeAdapter(**kwargs).to(device)
 
 
 def validate_cpa_semantic_setup(cfg, feature_path, sample):
@@ -360,115 +307,6 @@ def cpa_auxiliary_losses(
     }
 
 
-def scores_from_mapped_text(mapped_text, visual_embed):
-    mapped = F.normalize(mapped_text.float(), dim=-1)
-    visual = F.normalize(visual_embed.float(), dim=-1)
-    if visual.dim() == 2:
-        return torch.einsum("jtd,jd->jt", mapped, visual)
-    if visual.dim() == 3:
-        return torch.einsum("jtd,jrd->jtr", mapped, visual).max(dim=-1).values
-    raise ValueError(f"Unsupported visual_embed shape: {tuple(visual.shape)}")
-
-
-def map_vocabulary_with_bridge(bridge, class_clip, class_base, semantic_features):
-    num_classes, num_templates, clip_dim = class_clip.shape
-    flat_clip = class_clip.reshape(num_classes * num_templates, clip_dim)
-    flat_base = class_base.reshape(num_classes * num_templates, class_base.shape[-1])
-    mapped = bridge(flat_clip, semantic_features, flat_base)
-    if mapped.dim() == 2:
-        mapped = mapped.unsqueeze(0)
-    mapped = mapped.reshape(
-        semantic_features.shape[0],
-        num_classes,
-        num_templates,
-        -1,
-    ).mean(dim=2)
-    return F.normalize(mapped, dim=-1)
-
-
-def zero_vab_losses(reference):
-    zero = reference.float().new_tensor(0.0)
-    return {
-        "loss_vab_delta_l2": zero,
-        "loss_vab_ratio": zero,
-        "loss_vab_cos_preserve": zero,
-        "loss_vab_vocab_structure": zero,
-        "loss_vab_region_margin": zero,
-        "vab_region_reliable_fraction": zero.detach(),
-        "vab_region_margin_skipped": zero.new_tensor(1.0).detach(),
-    }
-
-
-def vab_safety_losses(
-    vab_stats,
-    mapped_vocab_base,
-    mapped_vocab_vab,
-    semantic_features,
-    loss_cfg,
-):
-    delta = vab_stats["vab_delta"].float()
-    ratio = vab_stats["vab_delta_base_ratio"].float()
-    cosine = vab_stats["vab_cos_base_vab"].float()
-    loss_delta_l2 = delta.norm(dim=-1).pow(2).mean()
-    loss_ratio = F.relu(ratio - float(loss_cfg.ratio_target)).pow(2).mean()
-    loss_cos = F.relu(float(loss_cfg.cos_min) - cosine).pow(2).mean()
-
-    vocab_base = F.normalize(mapped_vocab_base.float(), dim=-1)
-    vocab_vab = F.normalize(mapped_vocab_vab.float(), dim=-1)
-    sim_base = torch.matmul(vocab_base, vocab_base.transpose(-2, -1)).detach()
-    sim_vab = torch.matmul(vocab_vab, vocab_vab.transpose(-2, -1))
-    loss_vocab_structure = F.mse_loss(sim_vab, sim_base)
-
-    regions = F.normalize(semantic_features.detach().float(), dim=-1)
-    region_logits_base = torch.einsum("bcd,brd->bcr", vocab_base, regions)
-    region_logits_vab = torch.einsum("bcd,brd->bcr", vocab_vab, regions)
-    temperature = max(float(loss_cfg.region_teacher_temperature), 1e-6)
-    teacher_probs = F.softmax(region_logits_base.detach() / temperature, dim=1)
-    top2_probs, top2_indices = teacher_probs.topk(
-        min(2, teacher_probs.shape[1]), dim=1
-    )
-    top1_prob = top2_probs[:, 0]
-    top1_index = top2_indices[:, 0]
-    if top2_probs.shape[1] > 1:
-        teacher_margin = top2_probs[:, 0] - top2_probs[:, 1]
-    else:
-        teacher_margin = torch.ones_like(top1_prob)
-    entropy = -(teacher_probs.clamp_min(1e-8) * teacher_probs.clamp_min(1e-8).log()).sum(dim=1)
-    if teacher_probs.shape[1] > 1:
-        entropy = entropy / math.log(teacher_probs.shape[1])
-    reliable = (
-        (top1_prob >= float(loss_cfg.region_min_prob))
-        & (teacher_margin >= float(loss_cfg.region_min_margin))
-        & (entropy <= float(loss_cfg.region_max_entropy))
-    )
-    positive = region_logits_vab.gather(1, top1_index.unsqueeze(1)).squeeze(1)
-    negative_logits = region_logits_vab.masked_fill(
-        F.one_hot(top1_index, num_classes=region_logits_vab.shape[1])
-        .permute(0, 2, 1)
-        .bool(),
-        -torch.inf,
-    )
-    hardest_negative = negative_logits.max(dim=1).values
-    margin_values = F.relu(
-        float(loss_cfg.region_margin) - positive + hardest_negative
-    )
-    if reliable.any():
-        loss_region_margin = margin_values[reliable].mean()
-        skipped = margin_values.new_tensor(0.0)
-    else:
-        loss_region_margin = mapped_vocab_vab.sum() * 0.0
-        skipped = margin_values.new_tensor(1.0)
-    return {
-        "loss_vab_delta_l2": loss_delta_l2,
-        "loss_vab_ratio": loss_ratio,
-        "loss_vab_cos_preserve": loss_cos,
-        "loss_vab_vocab_structure": loss_vocab_structure,
-        "loss_vab_region_margin": loss_region_margin,
-        "vab_region_reliable_fraction": reliable.float().mean().detach(),
-        "vab_region_margin_skipped": skipped.detach(),
-    }
-
-
 def init_epoch_accumulators():
     return {
         "loss_total": 0.0,
@@ -491,20 +329,6 @@ def init_epoch_accumulators():
         "cpa_proto_pairwise_cos_mean": 0.0,
         "cpa_proto_pairwise_cos_max": 0.0,
         "cpa_topk": 0.0,
-        "loss_vab_delta_l2": 0.0,
-        "loss_vab_ratio": 0.0,
-        "loss_vab_cos_preserve": 0.0,
-        "loss_vab_vocab_structure": 0.0,
-        "loss_vab_region_margin": 0.0,
-        "vab_region_reliable_fraction": 0.0,
-        "vab_region_margin_skipped": 0.0,
-        "vab_gamma": 0.0,
-        "vab_delta_norm_mean": 0.0,
-        "vab_delta_base_ratio_mean": 0.0,
-        "vab_delta_base_ratio_max": 0.0,
-        "vab_cos_base_vab_mean": 0.0,
-        "vab_cos_base_vab_min": 1.0,
-        "vab_attn_entropy_mean": 0.0,
         "base_norm_mean": 0.0,
         "delta_norm_mean": 0.0,
         "delta_base_ratio_mean": 0.0,
@@ -518,16 +342,7 @@ def init_epoch_accumulators():
     }
 
 
-def update_epoch_accumulators(
-    acc,
-    loss_total,
-    loss_infonce,
-    losses,
-    stats,
-    cpa_losses,
-    vab_losses,
-    vab_stats,
-):
+def update_epoch_accumulators(acc, loss_total, loss_infonce, losses, stats, cpa_losses):
     acc["loss_total"] += float(loss_total.detach().cpu())
     acc["loss_infonce"] += float(loss_infonce.detach().cpu())
     acc["loss_delta_l2"] += float(losses["loss_delta_l2"].detach().cpu())
@@ -557,33 +372,6 @@ def update_epoch_accumulators(
         acc["cpa_proto_pairwise_cos_max"],
         float(cpa_losses["cpa_proto_pairwise_cos_max"].detach().cpu()),
     )
-    for key in (
-        "loss_vab_delta_l2",
-        "loss_vab_ratio",
-        "loss_vab_cos_preserve",
-        "loss_vab_vocab_structure",
-        "loss_vab_region_margin",
-        "vab_region_reliable_fraction",
-        "vab_region_margin_skipped",
-    ):
-        acc[key] += float(vab_losses[key].detach().cpu())
-    if vab_stats is not None:
-        for key in (
-            "vab_gamma",
-            "vab_delta_norm_mean",
-            "vab_delta_base_ratio_mean",
-            "vab_cos_base_vab_mean",
-            "vab_attn_entropy_mean",
-        ):
-            acc[key] += float(vab_stats[key].detach().float().mean().cpu())
-        acc["vab_delta_base_ratio_max"] = max(
-            acc["vab_delta_base_ratio_max"],
-            float(vab_stats["vab_delta_base_ratio_max"].detach().cpu()),
-        )
-        acc["vab_cos_base_vab_min"] = min(
-            acc["vab_cos_base_vab_min"],
-            float(vab_stats["vab_cos_base_vab_min"].detach().cpu()),
-        )
     acc["base_norm_mean"] += float(stats["base_norm"].detach().float().mean().cpu())
     acc["delta_norm_mean"] += float(stats["delta_norm"].detach().float().mean().cpu())
     ratio = stats["delta_base_ratio"].detach().float()
@@ -621,18 +409,6 @@ def finalize_epoch_accumulators(acc, count):
         "cpa_confident_patch_frac",
         "cpa_proto_pairwise_cos_mean",
         "cpa_topk",
-        "loss_vab_delta_l2",
-        "loss_vab_ratio",
-        "loss_vab_cos_preserve",
-        "loss_vab_vocab_structure",
-        "loss_vab_region_margin",
-        "vab_region_reliable_fraction",
-        "vab_region_margin_skipped",
-        "vab_gamma",
-        "vab_delta_norm_mean",
-        "vab_delta_base_ratio_mean",
-        "vab_cos_base_vab_mean",
-        "vab_attn_entropy_mean",
         "base_norm_mean",
         "delta_norm_mean",
         "delta_base_ratio_mean",
@@ -668,9 +444,6 @@ def print_epoch_progress(epoch, epochs, step, total_steps, acc, start_time, lr):
         f"patch={metrics['patch_preserve_kl']:.4f} "
         f"cpa={metrics['loss_cpa_proto_infonce']:.4f} "
         f"cpa|r|={metrics['cpa_residual_abs_mean']:.4f} "
-        f"vab={metrics['loss_vab_region_margin']:.4f} "
-        f"vg={metrics['vab_gamma']:.3f} "
-        f"vr={metrics['vab_delta_base_ratio_mean']:.3f} "
         f"d/b={metrics['delta_base_ratio_mean']:.3f} "
         f"dmax={metrics['delta_base_ratio_max']:.4f} "
         f"cos={metrics['cosine_base_mapped_mean']:.4f} "
@@ -694,42 +467,7 @@ def projection_trainable_count(model):
     return sum(p.numel() for p in model.proj.parameters() if p.requires_grad)
 
 
-def load_initial_weights(path, bridge, cpa, vab, device):
-    if path in {None, "", "null", "None"}:
-        return
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(f"Initialization checkpoint does not exist: {path}")
-    payload = torch.load(path, map_location=device, weights_only=False)
-    bridge_state = payload.get("bridge", payload.get("model"))
-    if bridge_state is None:
-        raise RuntimeError("Initialization checkpoint has no bridge/model weights")
-    bridge_result = bridge.load_state_dict(bridge_state, strict=False)
-    if cpa is not None:
-        if payload.get("cpa") is None:
-            raise RuntimeError("CPA is enabled but initialization checkpoint has no CPA weights")
-        cpa_result = cpa.load_state_dict(payload["cpa"], strict=False)
-    else:
-        cpa_result = None
-    if vab is not None and payload.get("vab") is not None:
-        vab.load_state_dict(payload["vab"], strict=False)
-        vab_status = "loaded"
-    else:
-        vab_status = "new zero-output adapter"
-    bridge._skip_zero_init_parity_check = True
-    bridge._parity_checked = True
-    print(
-        f"[{timestamp()}] Initialized model weights from {path}; optimizer/epoch not restored. "
-        f"bridge_missing={len(bridge_result.missing_keys)} "
-        f"bridge_unexpected={len(bridge_result.unexpected_keys)} "
-        f"cpa_missing={len(cpa_result.missing_keys) if cpa_result is not None else 0} "
-        f"cpa_unexpected={len(cpa_result.unexpected_keys) if cpa_result is not None else 0} "
-        f"VAB={vab_status}",
-        flush=True,
-    )
-
-
-def maybe_auto_resume(out, cfg, bridge, cpa, vab, optimizer, scheduler, scaler, device):
+def maybe_auto_resume(out, cfg, bridge, cpa, optimizer, scheduler, scaler, device):
     auto_resume = bool(cfg.train.get("auto_resume", True))
     resume_path = cfg.train.get("resume", None)
     if resume_path in {"", "null", "None"}:
@@ -754,13 +492,6 @@ def maybe_auto_resume(out, cfg, bridge, cpa, vab, optimizer, scheduler, scaler, 
                 "Start from scratch or use a CPA checkpoint."
             )
         cpa.load_state_dict(payload["cpa"])
-    if vab is not None:
-        if payload.get("vab") is None:
-            raise RuntimeError(
-                "VAB enabled but resume checkpoint does not contain VAB weights. "
-                "Use --init_checkpoint for a CPA-v1 checkpoint."
-            )
-        vab.load_state_dict(payload["vab"])
     bridge._skip_zero_init_parity_check = True
     bridge._parity_checked = True
     if payload.get("optimizer") is not None:
@@ -789,10 +520,8 @@ def maybe_auto_resume(out, cfg, bridge, cpa, vab, optimizer, scheduler, scaler, 
 
 
 @torch.no_grad()
-def evaluate_baseline_val_loss(bridge, vab, val_loader, frozen, device):
+def evaluate_baseline_val_loss(bridge, val_loader, frozen, device):
     bridge.eval()
-    if vab is not None:
-        vab.eval()
     losses = []
     for batch in val_loader:
         text_clip = batch["text_clip"].to(device, non_blocking=True).float()
@@ -800,17 +529,10 @@ def evaluate_baseline_val_loss(bridge, vab, val_loader, frozen, device):
             text_base = frozen._frozen_base_text_to_dino(text_clip).float()
         patches = batch["patch_tokens"].to(device, non_blocking=True).float()
         visual = batch["visual_embed"].to(device, non_blocking=True).float()
-        scores, stats = pairwise_scores(
-            bridge, text_clip, text_base, patches, visual, return_stats=True
-        )
-        if vab is not None:
-            mapped = vab(stats["mapped_text"], patches)
-            scores = scores_from_mapped_text(mapped, visual)
+        scores = pairwise_scores(bridge, text_clip, text_base, patches, visual)
         loss = contrastive_loss(scores)
         losses.append(float(loss.detach().cpu()))
     bridge.train()
-    if vab is not None:
-        vab.train()
     if not losses:
         return float("inf")
     return float(torch.tensor(losses).mean())
@@ -819,7 +541,6 @@ def evaluate_baseline_val_loss(bridge, vab, val_loader, frozen, device):
 @torch.no_grad()
 def evaluate_cached_miou(
     bridge,
-    vab,
     eval_samples,
     class_clip,
     class_base,
@@ -832,8 +553,6 @@ def evaluate_cached_miou(
     xattn_margin_threshold=None,
 ):
     bridge.eval()
-    if vab is not None:
-        vab.eval()
     total_inter = torch.zeros(num_classes)
     total_union = torch.zeros(num_classes)
     base_text = mean_template_embeddings(class_base.to(device))
@@ -846,8 +565,6 @@ def evaluate_cached_miou(
             class_base,
             delta_scale=xattn_delta_scale,
         )
-        if vab is not None:
-            mapped = vab(mapped, patches)
         patch_norm = torch.nn.functional.normalize(patches, dim=-1)
         xattn_logits = torch.einsum(
             "bnd,cd->bcn",
@@ -877,8 +594,6 @@ def evaluate_cached_miou(
         total_inter += inter
         total_union += union
     bridge.train()
-    if vab is not None:
-        vab.train()
     return float(torch.nanmean(total_inter / total_union.clamp_min(1)) * 100.0)
 
 
@@ -970,67 +685,13 @@ def main():
     safety_cfg = get_safety_cfg(cfg)
     cpa_cfg = get_cpa_cfg(cfg)
     cpa_loss_cfg = get_cpa_loss_cfg(cfg)
-    vab_cfg = get_vab_cfg(cfg)
-    vab_loss_cfg = get_vab_loss_cfg(cfg)
     bridge = CleanXAttnBridge(**OmegaConf.to_container(cfg.bridge, resolve=True)).to(device)
-    if str(cpa_cfg.version) != "v1":
-        raise ValueError("Only CPA-v1 is supported in this training path")
     cpa_kwargs = OmegaConf.to_container(cpa_cfg, resolve=True)
     cpa_kwargs.pop("enabled", None)
-    cpa_kwargs.pop("version", None)
     cpa = ClassPrototypeAlignmentHead(**cpa_kwargs).to(device) if bool(cpa_cfg.enabled) else None
-    vab = build_vab(vab_cfg, device)
-    if vab is not None and bool(vab_cfg.train_only_vab) and float(vab_cfg.gamma_init) == 0.0:
-        raise ValueError(
-            "VAB cannot train when both gamma_init and the final MLP layer are zero. "
-            "Use vab.gamma_init=0.01; zero-output initialization still gives exact CPA parity."
-        )
-
-    configured_resume = cfg.train.get("resume", None)
-    if configured_resume in {None, "", "null", "None"}:
-        configured_resume = None
-    resume_candidate = (
-        Path(configured_resume)
-        if configured_resume is not None
-        else out / "checkpoint_last.pth"
-    )
-    has_resume = resume_candidate.exists() and (
-        configured_resume is not None or bool(cfg.train.get("auto_resume", True))
-    )
-    if vab is not None and bool(vab_cfg.train_only_vab) and not has_resume and not args.init_checkpoint:
-        raise ValueError(
-            "VAB phase-1 training requires --init_checkpoint with the CPA-v1 checkpoint"
-        )
-    if args.init_checkpoint and has_resume:
-        print(
-            f"[{timestamp()}] Existing auto-resume checkpoint takes precedence over "
-            f"--init_checkpoint: {resume_candidate}",
-            flush=True,
-        )
-    elif args.init_checkpoint:
-        load_initial_weights(args.init_checkpoint, bridge, cpa, vab, device)
-
-    freeze_existing = vab is not None and (
-        bool(vab_cfg.freeze_existing) or bool(vab_cfg.train_only_vab)
-    )
-    if freeze_existing:
-        bridge.requires_grad_(False)
-        if cpa is not None:
-            cpa.requires_grad_(False)
-    if vab is not None:
-        vab.requires_grad_(True)
-    trainable_named_parameters = []
-    for module_name, module in (("bridge", bridge), ("cpa", cpa), ("vab", vab)):
-        if module is None:
-            continue
-        trainable_named_parameters.extend(
-            (f"{module_name}.{name}", parameter)
-            for name, parameter in module.named_parameters()
-            if parameter.requires_grad
-        )
-    trainable_parameters = [parameter for _, parameter in trainable_named_parameters]
-    if not trainable_parameters:
-        raise RuntimeError("No trainable parameters selected")
+    trainable_parameters = list(bridge.parameters())
+    if cpa is not None:
+        trainable_parameters.extend(cpa.parameters())
     optimizer = torch.optim.AdamW(
         trainable_parameters,
         lr=float(cfg.train.lr),
@@ -1044,35 +705,11 @@ def main():
     scaler = torch.amp.GradScaler("cuda", enabled=bool(cfg.train.fp16))
     train_log_path = out / "train_log.jsonl"
 
-    vab_class_clip = vab_class_base = None
-    vab_vocab_size = 0
-    if vab is not None and bool(vab_loss_cfg.enabled):
-        vocab_dataset = build_coco_stuff_eval_dataset(cfg)
-        vocab_classnames = list(vocab_dataset.CLASSES)
-        if vocab_classnames and vocab_classnames[0] == "background":
-            vocab_classnames = vocab_classnames[1:]
-        vab_vocab_size = len(vocab_classnames)
-        if vab_vocab_size != 171:
-            raise RuntimeError(
-                f"COCO-Stuff VAB vocabulary must contain 171 classes, got {vab_vocab_size}"
-            )
-        vab_class_clip, vab_class_base = build_class_embeddings(
-            frozen,
-            cfg,
-            vocab_classnames,
-            device,
-            keep_templates=True,
-        )
-
     print("=" * 78, flush=True)
     method_label = (
-        f"{METHOD_NAME} + VAB + CPA-v1"
-        if vab is not None and cpa is not None
-        else (
-            f"{METHOD_NAME} + Class Prototype Alignment Head"
-            if cpa is not None
-            else METHOD_NAME
-        )
+        f"{METHOD_NAME} + Class Prototype Alignment Head"
+        if cpa is not None
+        else METHOD_NAME
     )
     print(f"[{timestamp()}] Starting {method_label} training", flush=True)
     print("=" * 78, flush=True)
@@ -1093,11 +730,7 @@ def main():
     print(f"  Visual target           : same DINO region-aware feature `{cfg.data.get('features_name', 'disentangled_self_attn')}`", flush=True)
     print("  Base text projection    : frozen original Talk2DINO projection", flush=True)
     print("  Objective               : pairwise BxB InfoNCE over score(text_i, image_j)", flush=True)
-    print(
-        "  Trainable modules       : "
-        + ("VAB only" if bool(vab_cfg.train_only_vab) and vab is not None else "configured modules"),
-        flush=True,
-    )
+    print("  Trainable modules       : XAttnBridge_Clean and CPA only", flush=True)
     print(
         "  Bridge architecture     : "
         f"clip_dim={cfg.bridge.clip_dim}, dino_dim={cfg.bridge.dino_dim}, "
@@ -1141,18 +774,9 @@ def main():
         "Talk2DINO slide-inference parity.",
         flush=True,
     )
-    print(f"Bridge trainable params   : {trainable_count(bridge)}", flush=True)
+    print(f"Trainable parameter count : {trainable_count(bridge)}", flush=True)
     print(f"CPA trainable params      : {trainable_count(cpa) if cpa is not None else 0}", flush=True)
-    print(f"VAB trainable params      : {trainable_count(vab) if vab is not None else 0}", flush=True)
-    print(f"Trainable parameter count : {sum(p.numel() for p in trainable_parameters)}", flush=True)
-    print("Trainable parameter names :", flush=True)
-    for name, parameter in trainable_named_parameters:
-        print(f"  {name}: {parameter.numel()}", flush=True)
-    print(
-        f"CLIP frozen=true DINO frozen=true XAttn frozen={trainable_count(bridge) == 0} "
-        f"CPA frozen={cpa is None or trainable_count(cpa) == 0}",
-        flush=True,
-    )
+    print("CLIP/DINO remain frozen; only XAttnBridge_Clean and CPA are optimized.", flush=True)
     print(f"train_feature_source      : {train_feature_source}", flush=True)
     print(f"train_eval_mode           : {eval_mode}", flush=True)
     if train_feature_source == "baseline_pth_in_memory":
@@ -1189,8 +813,7 @@ def main():
     )
     print(
         "CPA: "
-        f"enabled={bool(cpa_cfg.enabled)} version={cpa_cfg.version} "
-        f"num_prototypes={int(cpa_cfg.num_prototypes)} "
+        f"enabled={bool(cpa_cfg.enabled)} num_prototypes={int(cpa_cfg.num_prototypes)} "
         f"hidden_dim={int(cpa_cfg.hidden_dim)} prototype_scale={float(cpa_cfg.prototype_scale):.3f} "
         f"aggregation={cpa_cfg.prototype_aggregation} "
         f"prototype_temperature={float(cpa_cfg.prototype_temperature):.3f} "
@@ -1209,31 +832,11 @@ def main():
         f"temperature={float(cpa_loss_cfg.temperature):.3f}",
         flush=True,
     )
-    print(
-        "VAB: "
-        f"enabled={vab is not None} train_only_vab={bool(vab_cfg.train_only_vab)} "
-        f"freeze_existing={bool(vab_cfg.freeze_existing)} hidden_dim={int(vab_cfg.hidden_dim)} "
-        f"num_heads={int(vab_cfg.num_heads)} gamma_init={float(vab_cfg.gamma_init):.4f} "
-        f"gamma_max={float(vab_cfg.gamma_max):.4f} "
-        f"delta_ratio_clip={float(vab_cfg.delta_ratio_clip):.4f} "
-        f"detach_visual={bool(vab_cfg.detach_visual)} vocab_size={vab_vocab_size}",
-        flush=True,
-    )
-    print(
-        "VAB loss: "
-        f"enabled={bool(vab_loss_cfg.enabled)} "
-        f"vocab_structure_weight={float(vab_loss_cfg.vocab_structure_weight):.4g} "
-        f"region_margin_weight={float(vab_loss_cfg.region_margin_weight):.4g}",
-        flush=True,
-    )
-    print(
-        "PAMR=false Router=false USRC=false DCD=false VCDD=false CCR=false",
-        flush=True,
-    )
-    print("Main InfoNCE: VAB(mapped_text) vs visual_embed; CPA affects main InfoNCE=false", flush=True)
+    print("CCR: enabled=false", flush=True)
+    print("Main InfoNCE: mapped_text vs visual_embed; CPA affects main InfoNCE=false", flush=True)
 
     start_epoch, best_miou, best_epoch = maybe_auto_resume(
-        out, cfg, bridge, cpa, vab, optimizer, scheduler, scaler, device
+        out, cfg, bridge, cpa, optimizer, scheduler, scaler, device
     )
     if eval_mode == "baseline_pth_val_loss" and best_miou == -float("inf"):
         best_miou = float("inf")
@@ -1254,11 +857,9 @@ def main():
         return
     for epoch in range(start_epoch, epochs + 1):
         epoch_start = time.time()
-        bridge.eval() if freeze_existing else bridge.train()
+        bridge.train()
         if cpa is not None:
-            cpa.eval() if freeze_existing else cpa.train()
-        if vab is not None:
-            vab.train()
+            cpa.train()
         acc = init_epoch_accumulators()
         count = 0
         stop_training = False
@@ -1293,15 +894,6 @@ def main():
                     visual,
                     return_stats=True,
                 )
-                mapped_for_cpa = safety_stats["mapped_text"]
-                vab_stats = None
-                if vab is not None:
-                    mapped_for_cpa, vab_stats = vab(
-                        mapped_for_cpa,
-                        patches,
-                        return_stats=True,
-                    )
-                    scores = scores_from_mapped_text(mapped_for_cpa, visual)
                 contrastive_temperature = max(
                     float(cfg.train.get("contrastive_temperature", 0.07)),
                     1e-6,
@@ -1315,7 +907,7 @@ def main():
                         )
                     cpa_losses = cpa_auxiliary_losses(
                         cpa,
-                        mapped_for_cpa,
+                        safety_stats["mapped_text"],
                         visual,
                         patches,
                         safety_stats["base_patch_logits"],
@@ -1324,32 +916,6 @@ def main():
                     )
                 else:
                     cpa_losses = zero_cpa_losses(safety_stats["delta"])
-                if vab is not None and bool(vab_loss_cfg.enabled):
-                    if freeze_existing:
-                        with torch.no_grad():
-                            mapped_vocab_base = map_vocabulary_with_bridge(
-                                bridge,
-                                vab_class_clip,
-                                vab_class_base,
-                                patches,
-                            )
-                    else:
-                        mapped_vocab_base = map_vocabulary_with_bridge(
-                            bridge,
-                            vab_class_clip,
-                            vab_class_base,
-                            patches,
-                        )
-                    mapped_vocab_vab = vab(mapped_vocab_base, patches)
-                    vab_losses = vab_safety_losses(
-                        vab_stats,
-                        mapped_vocab_base,
-                        mapped_vocab_vab,
-                        patches,
-                        vab_loss_cfg,
-                    )
-                else:
-                    vab_losses = zero_vab_losses(safety_stats["delta"])
                 loss = loss_infonce
                 if bool(safety_cfg.enabled):
                     loss = (
@@ -1368,15 +934,6 @@ def main():
                         + float(cpa_loss_cfg.diversity_weight) * cpa_losses["loss_cpa_diversity"]
                         + float(cpa_loss_cfg.residual_l1_weight) * cpa_losses["loss_cpa_residual_l1"]
                     )
-                if vab is not None and bool(vab_loss_cfg.enabled):
-                    loss = (
-                        loss
-                        + float(vab_loss_cfg.delta_l2_weight) * vab_losses["loss_vab_delta_l2"]
-                        + float(vab_loss_cfg.ratio_weight) * vab_losses["loss_vab_ratio"]
-                        + float(vab_loss_cfg.cos_preserve_weight) * vab_losses["loss_vab_cos_preserve"]
-                        + float(vab_loss_cfg.vocab_structure_weight) * vab_losses["loss_vab_vocab_structure"]
-                        + float(vab_loss_cfg.region_margin_weight) * vab_losses["loss_vab_region_margin"]
-                    )
             if not torch.isfinite(loss):
                 print("WARNING: loss became NaN/Inf; saving checkpoint_last.pth and stopping cleanly.", flush=True)
                 stop_training = True
@@ -1392,8 +949,6 @@ def main():
                 safety_losses,
                 safety_stats,
                 cpa_losses,
-                vab_losses,
-                vab_stats,
             )
             acc["data_time"] += data_time
             acc["compute_time"] += time.time() - compute_start
@@ -1443,20 +998,6 @@ def main():
             f"cpa_proto_pairwise_cos_mean={epoch_metrics['cpa_proto_pairwise_cos_mean']:.4f} "
             f"cpa_proto_pairwise_cos_max={epoch_metrics['cpa_proto_pairwise_cos_max']:.4f} "
             f"cpa_topk={epoch_metrics['cpa_topk']:.0f} "
-            f"loss_vab_delta_l2={epoch_metrics['loss_vab_delta_l2']:.6f} "
-            f"loss_vab_ratio={epoch_metrics['loss_vab_ratio']:.6f} "
-            f"loss_vab_cos_preserve={epoch_metrics['loss_vab_cos_preserve']:.6f} "
-            f"loss_vab_vocab_structure={epoch_metrics['loss_vab_vocab_structure']:.6f} "
-            f"loss_vab_region_margin={epoch_metrics['loss_vab_region_margin']:.6f} "
-            f"vab_region_reliable_fraction={epoch_metrics['vab_region_reliable_fraction']:.4f} "
-            f"vab_region_margin_skipped={epoch_metrics['vab_region_margin_skipped']:.4f} "
-            f"vab_gamma={epoch_metrics['vab_gamma']:.6f} "
-            f"vab_delta_base_ratio_mean={epoch_metrics['vab_delta_base_ratio_mean']:.6f} "
-            f"vab_delta_base_ratio_max={epoch_metrics['vab_delta_base_ratio_max']:.6f} "
-            f"vab_cos_base_vab_mean={epoch_metrics['vab_cos_base_vab_mean']:.6f} "
-            f"vab_cos_base_vab_min={epoch_metrics['vab_cos_base_vab_min']:.6f} "
-            f"vab_attn_entropy_mean={epoch_metrics['vab_attn_entropy_mean']:.6f} "
-            f"vab_trainable_params={trainable_count(vab) if vab is not None else 0} "
             f"base_norm={epoch_metrics['base_norm_mean']:.4f} "
             f"delta_norm={epoch_metrics['delta_norm_mean']:.4f} "
             f"delta/base_mean={epoch_metrics['delta_base_ratio_mean']:.4f} "
@@ -1502,7 +1043,7 @@ def main():
         is_eval_epoch = epoch % int(cfg.train.save_every) == 0 or epoch == epochs
         if is_eval_epoch:
             if eval_mode == "baseline_pth_val_loss":
-                val_loss = evaluate_baseline_val_loss(bridge, vab, val_loader, frozen, device)
+                val_loss = evaluate_baseline_val_loss(bridge, val_loader, frozen, device)
                 print(
                     f"[{timestamp()}] Epoch {epoch:03d}/{epochs:03d} baseline val contrastive loss={val_loss:.6f}",
                     flush=True,
@@ -1510,7 +1051,6 @@ def main():
             else:
                 miou = evaluate_cached_miou(
                     bridge,
-                    vab,
                     eval_samples,
                     class_clip,
                     class_base,
@@ -1567,21 +1107,6 @@ def main():
             "cpa_proto_pairwise_cos_mean": epoch_metrics["cpa_proto_pairwise_cos_mean"],
             "cpa_proto_pairwise_cos_max": epoch_metrics["cpa_proto_pairwise_cos_max"],
             "cpa_topk": epoch_metrics["cpa_topk"],
-            "loss_vab_delta_l2": epoch_metrics["loss_vab_delta_l2"],
-            "loss_vab_ratio": epoch_metrics["loss_vab_ratio"],
-            "loss_vab_cos_preserve": epoch_metrics["loss_vab_cos_preserve"],
-            "loss_vab_vocab_structure": epoch_metrics["loss_vab_vocab_structure"],
-            "loss_vab_region_margin": epoch_metrics["loss_vab_region_margin"],
-            "vab_region_reliable_fraction": epoch_metrics["vab_region_reliable_fraction"],
-            "vab_region_margin_skipped": epoch_metrics["vab_region_margin_skipped"],
-            "vab_gamma": epoch_metrics["vab_gamma"],
-            "vab_delta_norm_mean": epoch_metrics["vab_delta_norm_mean"],
-            "vab_delta_base_ratio_mean": epoch_metrics["vab_delta_base_ratio_mean"],
-            "vab_delta_base_ratio_max": epoch_metrics["vab_delta_base_ratio_max"],
-            "vab_cos_base_vab_mean": epoch_metrics["vab_cos_base_vab_mean"],
-            "vab_cos_base_vab_min": epoch_metrics["vab_cos_base_vab_min"],
-            "vab_attn_entropy_mean": epoch_metrics["vab_attn_entropy_mean"],
-            "vab_trainable_params": trainable_count(vab) if vab is not None else 0,
             "miou": miou,
             "val_loss": val_loss,
             "eval_mode": eval_mode,
@@ -1590,8 +1115,6 @@ def main():
             "xattn_safety": OmegaConf.to_container(safety_cfg, resolve=True),
             "cpa_config": OmegaConf.to_container(cpa_cfg, resolve=True),
             "cpa_loss_config": OmegaConf.to_container(cpa_loss_cfg, resolve=True),
-            "vab_config": OmegaConf.to_container(vab_cfg, resolve=True),
-            "vab_loss_config": OmegaConf.to_container(vab_loss_cfg, resolve=True),
             "bridge_base_guidance": {
                 "base_guided_attention": bool(cfg.bridge.get("base_guided_attention", True)),
                 "base_guidance_beta": float(cfg.bridge.get("base_guidance_beta", 1.0)),
@@ -1624,7 +1147,6 @@ def main():
             checkpoint_metrics,
             scaler,
             cpa=cpa,
-            vab=vab,
         )
         last_checkpoint = out / "checkpoint_last.pth"
         best_checkpoint = out / "checkpoint_best.pth"
@@ -1661,21 +1183,6 @@ def main():
             "cpa_proto_pairwise_cos_mean": epoch_metrics["cpa_proto_pairwise_cos_mean"],
             "cpa_proto_pairwise_cos_max": epoch_metrics["cpa_proto_pairwise_cos_max"],
             "cpa_topk": epoch_metrics["cpa_topk"],
-            "loss_vab_delta_l2": epoch_metrics["loss_vab_delta_l2"],
-            "loss_vab_ratio": epoch_metrics["loss_vab_ratio"],
-            "loss_vab_cos_preserve": epoch_metrics["loss_vab_cos_preserve"],
-            "loss_vab_vocab_structure": epoch_metrics["loss_vab_vocab_structure"],
-            "loss_vab_region_margin": epoch_metrics["loss_vab_region_margin"],
-            "vab_region_reliable_fraction": epoch_metrics["vab_region_reliable_fraction"],
-            "vab_region_margin_skipped": epoch_metrics["vab_region_margin_skipped"],
-            "vab_gamma": epoch_metrics["vab_gamma"],
-            "vab_delta_norm_mean": epoch_metrics["vab_delta_norm_mean"],
-            "vab_delta_base_ratio_mean": epoch_metrics["vab_delta_base_ratio_mean"],
-            "vab_delta_base_ratio_max": epoch_metrics["vab_delta_base_ratio_max"],
-            "vab_cos_base_vab_mean": epoch_metrics["vab_cos_base_vab_mean"],
-            "vab_cos_base_vab_min": epoch_metrics["vab_cos_base_vab_min"],
-            "vab_attn_entropy_mean": epoch_metrics["vab_attn_entropy_mean"],
-            "vab_trainable_params": trainable_count(vab) if vab is not None else 0,
             "base_norm_mean": epoch_metrics["base_norm_mean"],
             "delta_norm_mean": epoch_metrics["delta_norm_mean"],
             "delta_base_ratio_mean": epoch_metrics["delta_base_ratio_mean"],
@@ -1710,7 +1217,6 @@ def main():
                 checkpoint_metrics,
                 scaler,
                 cpa=cpa,
-                vab=vab,
             )
             print(
                 f"[{timestamp()}] Saved best checkpoint: {best_checkpoint} "
@@ -1730,7 +1236,6 @@ def main():
                 checkpoint_metrics,
                 scaler,
                 cpa=cpa,
-                vab=vab,
             )
             saved_epoch_checkpoint = True
             print(

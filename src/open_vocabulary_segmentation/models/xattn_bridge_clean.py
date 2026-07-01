@@ -510,7 +510,6 @@ def save_checkpoint_clean(
     extra_metrics=None,
     scaler=None,
     cpa=None,
-    vab=None,
 ):
     extra_metrics = extra_metrics or {}
     payload = {
@@ -526,8 +525,6 @@ def save_checkpoint_clean(
     }
     if cpa is not None:
         payload["cpa"] = cpa.state_dict()
-    if vab is not None:
-        payload["vab"] = vab.state_dict()
     payload.update(extra_metrics)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
