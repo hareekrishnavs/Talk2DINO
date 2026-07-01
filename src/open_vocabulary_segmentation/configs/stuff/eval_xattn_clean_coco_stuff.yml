@@ -4,10 +4,25 @@ method_name: Talk2DINO_XAttnBridge_Clean
 
 evaluate:
   pamr: false
+  vab_enabled: false
   template: sub_imagenet_template
   task:
     - coco_stuff
   coco_stuff: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/stuff.py
+
+vab:
+  enabled: false
+  dino_dim: 768
+  hidden_dim: 128
+  num_heads: 4
+  dropout: 0.0
+  gamma_init: 0.0
+  gamma_max: 0.03
+  delta_ratio_clip: 0.05
+  normalize_output: true
+  detach_visual: true
+  train_only_vab: true
+  freeze_existing: true
 
 postprocess:
   mode: none

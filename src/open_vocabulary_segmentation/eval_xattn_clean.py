@@ -25,6 +25,7 @@ from class_prototype_alignment import (
     apply_topk_prototype_residual,
     compute_prototype_logits,
 )
+from vab_adapter import VocabularyAwareBridgeAdapter
 
 
 def parse_args():
@@ -134,10 +135,36 @@ def load_cpa_from_payload(cfg, payload, device, enabled):
         raise RuntimeError("CPA enabled but checkpoint does not contain CPA weights.")
     kwargs = OmegaConf.to_container(cfg.cpa, resolve=True)
     kwargs.pop("enabled", None)
+    version = str(kwargs.pop("version", "v1"))
+    if version != "v1":
+        raise ValueError("Only CPA-v1 is supported in this evaluation path")
     cpa = ClassPrototypeAlignmentHead(**kwargs).to(device)
     cpa.load_state_dict(payload["cpa"])
     cpa.eval()
     return cpa
+
+
+def load_vab_from_payload(cfg, payload, device, enabled):
+    has_weights = payload.get("vab") is not None
+    print(
+        f"VAB enabled={bool(enabled)} checkpoint contains VAB weights "
+        f"{'yes' if has_weights else 'no'}",
+        flush=True,
+    )
+    if not enabled:
+        return None
+    if not has_weights:
+        raise RuntimeError(
+            "VAB evaluation is enabled but the checkpoint contains no VAB weights. "
+            "Set evaluate.vab_enabled=false for CPA-v1 parity evaluation."
+        )
+    kwargs = OmegaConf.to_container(cfg.vab, resolve=True)
+    for key in ("enabled", "train_only_vab", "freeze_existing"):
+        kwargs.pop(key, None)
+    vab = VocabularyAwareBridgeAdapter(**kwargs).to(device)
+    vab.load_state_dict(payload["vab"])
+    vab.eval()
+    return vab
 
 
 def fuse_xattn_logits(
@@ -188,6 +215,7 @@ class CleanOfficialEvalModel(nn.Module):
         class_clip,
         class_base,
         cpa=None,
+        vab=None,
         xattn_delta_scale=0.5,
         xattn_logit_alpha=0.5,
         xattn_uncertainty_gate_enabled=True,
@@ -198,6 +226,7 @@ class CleanOfficialEvalModel(nn.Module):
         self.frozen = frozen
         self.bridge = bridge
         self.cpa = cpa
+        self.vab = vab
         self.register_buffer("class_clip", class_clip.float())
         self.register_buffer("class_base", class_base.float())
         self.xattn_delta_scale = float(xattn_delta_scale)
@@ -212,6 +241,16 @@ class CleanOfficialEvalModel(nn.Module):
         }
         self._cpa_residual_abs_max = 0.0
         self._cpa_count = 0
+        self._vab_sum = {
+            "vab_gamma": 0.0,
+            "vab_delta_norm_mean": 0.0,
+            "vab_delta_base_ratio_mean": 0.0,
+            "vab_cos_base_vab_mean": 0.0,
+            "vab_attn_entropy_mean": 0.0,
+        }
+        self._vab_delta_base_ratio_max = 0.0
+        self._vab_cos_base_vab_min = 1.0
+        self._vab_count = 0
 
     def cpa_summary(self):
         count = max(1, self._cpa_count)
@@ -220,6 +259,15 @@ class CleanOfficialEvalModel(nn.Module):
             "cpa_residual_abs_max": self._cpa_residual_abs_max,
             "cpa_modified_fraction": self._cpa_sum["cpa_modified_fraction"] / count,
         }
+
+    def vab_summary(self):
+        if self.vab is None:
+            return None
+        count = max(1, self._vab_count)
+        summary = {key: value / count for key, value in self._vab_sum.items()}
+        summary["vab_delta_base_ratio_max"] = self._vab_delta_base_ratio_max
+        summary["vab_cos_base_vab_min"] = self._vab_cos_base_vab_min
+        return summary
 
     def __getattr__(self, name):
         try:
@@ -273,6 +321,23 @@ class CleanOfficialEvalModel(nn.Module):
             self.class_base.to(image_feat.device),
             delta_scale=self.xattn_delta_scale,
         )
+        if self.vab is not None:
+            mapped_text, vab_stats = self.vab(
+                mapped_text,
+                semantic_features,
+                return_stats=True,
+            )
+            for key in self._vab_sum:
+                self._vab_sum[key] += float(vab_stats[key].detach().cpu())
+            self._vab_delta_base_ratio_max = max(
+                self._vab_delta_base_ratio_max,
+                float(vab_stats["vab_delta_base_ratio_max"].detach().cpu()),
+            )
+            self._vab_cos_base_vab_min = min(
+                self._vab_cos_base_vab_min,
+                float(vab_stats["vab_cos_base_vab_min"].detach().cpu()),
+            )
+            self._vab_count += 1
         if not self._logged_xattn_eval_path:
             from utils import get_logger
 
@@ -283,6 +348,7 @@ class CleanOfficialEvalModel(nn.Module):
                 "raw_patch_tokens_as_xattn_kv=false, "
                 f"class_base={tuple(self.class_base.shape)}, "
                 f"mapped_text={tuple(mapped_text.shape)}, "
+                f"vab_enabled={self.vab is not None}, "
                 "base_guided_attention="
                 f"{bool(getattr(self.bridge, 'base_guided_attention', False))}, "
                 f"beta={float(getattr(self.bridge, 'base_guidance_beta', 0.0)):.3f}, "
@@ -382,12 +448,15 @@ def official_parity_eval(args, cfg, device):
     if cpa_enabled and bool(cfg.evaluate.pamr):
         raise ValueError("CPA evaluation requires evaluate.pamr=false")
     cpa = load_cpa_from_payload(cfg, payload, device, cpa_enabled)
+    vab_enabled = bool(cfg.evaluate.get("vab_enabled", False))
+    vab = load_vab_from_payload(cfg, payload, device, vab_enabled)
     wrapped = CleanOfficialEvalModel(
         frozen,
         bridge,
         class_clip,
         class_base,
         cpa=cpa,
+        vab=vab,
         xattn_delta_scale=float(cfg.evaluate.get("xattn_delta_scale", 0.5)),
         xattn_logit_alpha=float(cfg.evaluate.get("xattn_logit_alpha", 0.5)),
         xattn_uncertainty_gate_enabled=bool(
@@ -428,7 +497,7 @@ def official_parity_eval(args, cfg, device):
     metric = dataset.evaluate(results, logger=None)
     miou = float(metric["mIoU"] * 100)
     cpa_summary = wrapped.cpa_summary() if cpa is not None else None
-    return miou, payload, cpa_summary
+    return miou, payload, cpa_summary, wrapped.vab_summary()
 
 
 def init_eval_logger(cfg, out):
@@ -460,7 +529,7 @@ def main():
     if not args.cached_fast_eval:
         print("Eval mode: official Talk2DINO slide-inference parity", flush=True)
         print("Cached eval features are not used for prediction in this mode.", flush=True)
-        miou, payload, cpa_summary = official_parity_eval(args, cfg, device)
+        miou, payload, cpa_summary, vab_summary = official_parity_eval(args, cfg, device)
         print("=" * 64, flush=True)
         print("EVALUATION RESULTS", flush=True)
         print("=" * 64, flush=True)
@@ -468,6 +537,7 @@ def main():
         print(f"coco_stuff mIoU      : {miou:.2f}%", flush=True)
         print(f"PAMR enabled         : {bool(cfg.evaluate.pamr)}", flush=True)
         print("CCR enabled          : false", flush=True)
+        print(f"VAB enabled          : {vab_summary is not None}", flush=True)
         if cpa_summary is not None:
             print(
                 "CPA eval stats        : "
@@ -479,6 +549,18 @@ def main():
                 f"mean_residual={cpa_summary['cpa_residual_abs_mean']:.6f} "
                 f"max_residual={cpa_summary['cpa_residual_abs_max']:.6f} "
                 f"modified_fraction={cpa_summary['cpa_modified_fraction']:.4f}",
+                flush=True,
+            )
+        if vab_summary is not None:
+            print(
+                "VAB eval stats        : "
+                f"gamma={vab_summary['vab_gamma']:.6f} "
+                f"delta_norm={vab_summary['vab_delta_norm_mean']:.6f} "
+                f"delta/base_mean={vab_summary['vab_delta_base_ratio_mean']:.6f} "
+                f"delta/base_max={vab_summary['vab_delta_base_ratio_max']:.6f} "
+                f"cos_mean={vab_summary['vab_cos_base_vab_mean']:.6f} "
+                f"cos_min={vab_summary['vab_cos_base_vab_min']:.6f} "
+                f"attn_entropy={vab_summary['vab_attn_entropy_mean']:.6f}",
                 flush=True,
             )
         with open(out / "summary.json", "w") as f:
@@ -493,6 +575,8 @@ def main():
                 "coco_stuff_miou": miou,
                 "cpa_enabled": cpa_summary is not None,
                 "cpa_stats": cpa_summary,
+                "vab_enabled": vab_summary is not None,
+                "vab_stats": vab_summary,
             }, f, indent=2)
         return
 
@@ -508,6 +592,12 @@ def main():
         keep_templates=True,
     )
     bridge, payload = load_bridge_from_checkpoint(args.checkpoint, cfg, device)
+    vab = load_vab_from_payload(
+        cfg,
+        payload,
+        device,
+        bool(cfg.evaluate.get("vab_enabled", False)),
+    )
     manifest, samples = load_all_eval_samples(args.features)
     base_text = mean_template_embeddings(base_cls.to(device))
 
@@ -533,6 +623,8 @@ def main():
             base_cls,
             delta_scale=xattn_delta_scale,
         )
+        if vab is not None:
+            mapped = vab(mapped, patches)
         patch_norm = F.normalize(patches, dim=-1)
         xattn_logits = torch.einsum("bnd,cd->bcn", patch_norm, mapped)
         base_logits = torch.einsum("bnd,cd->bcn", patch_norm, base_text)
