@@ -33,6 +33,7 @@ from class_prototype_alignment import (
     compute_prototype_logits,
     prototype_diversity_loss,
 )
+from vcdd_head import VocabularyConditionedDenseDistillationHead
 from eval_xattn_clean import (
     bridge_class_embeddings,
     build_class_embeddings,
@@ -99,6 +100,7 @@ def get_safety_cfg(cfg):
 def get_cpa_cfg(cfg):
     defaults = OmegaConf.create({
         "enabled": True,
+        "version": "v1",
         "num_prototypes": 4,
         "hidden_dim": 256,
         "prototype_scale": 0.10,
@@ -110,6 +112,42 @@ def get_cpa_cfg(cfg):
         "residual_clip": 0.5,
     })
     return OmegaConf.merge(defaults, cfg.get("cpa", {}))
+
+
+def get_vcdd_cfg(cfg):
+    defaults = OmegaConf.create({
+        "enabled": False,
+        "compact_attention": True,
+        "train_attention_path": "/scratch/haree/talk2dino_features/coco_stuff2017_vitb/vcdd_attention_lift_train_fp16.pt",
+        "val_attention_path": "/scratch/haree/talk2dino_features/coco_stuff2017_vitb/vcdd_attention_lift_val_fp16.pt",
+        "hidden_dim": 256,
+        "dropout": 0.0,
+        "scale": 0.05,
+        "residual_clip": 0.25,
+        "topk": 5,
+        "topk_source": "cpa",
+        "detach_attention": True,
+    })
+    return OmegaConf.merge(defaults, cfg.get("vcdd", {}))
+
+
+def get_vcdd_loss_cfg(cfg):
+    defaults = OmegaConf.create({
+        "enabled": False,
+        "ce_weight": 0.05,
+        "kl_weight": 0.02,
+        "preserve_weight": 0.01,
+        "residual_l1_weight": 0.001,
+        "teacher_temperature": 0.07,
+        "kl_temperature": 0.07,
+        "preserve_temperature": 0.07,
+        "min_prob": 0.30,
+        "min_margin": 0.10,
+        "max_entropy": 0.70,
+        "min_reliable_fraction": 0.05,
+        "entropy_sharpen_weight": 0.0,
+    })
+    return OmegaConf.merge(defaults, cfg.get("vcdd_loss", {}))
 
 
 def get_cpa_loss_cfg(cfg):
@@ -307,6 +345,177 @@ def cpa_auxiliary_losses(
     }
 
 
+def load_vcdd_attention_index(path):
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"VCDD attention file not found: {path}")
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    if "image_ids" not in payload or "attention" not in payload:
+        raise KeyError("VCDD attention file must contain `image_ids` and `attention`")
+    image_ids = payload["image_ids"].long()
+    attention = payload["attention"]
+    if attention.ndim != 3 or attention.shape[1:] != (12, 1024):
+        raise ValueError(f"VCDD attention must be [N,12,1024], got {tuple(attention.shape)}")
+    if image_ids.numel() != attention.shape[0]:
+        raise ValueError("VCDD attention image_ids length does not match rows")
+    if not torch.isfinite(attention.float()).all():
+        raise ValueError("VCDD attention contains NaN/Inf")
+    index = {}
+    for row, image_id in enumerate(image_ids.tolist()):
+        if int(image_id) in index:
+            raise ValueError(f"Duplicate VCDD attention image_id={image_id}")
+        index[int(image_id)] = row
+    sums = attention.float().sum(dim=1)
+    print(
+        "VCDD attention loaded     : "
+        f"path={path} shape={tuple(attention.shape)} dtype={attention.dtype} "
+        f"sum_mean={float(sums.mean()):.6f} sum_min={float(sums.min()):.6f} "
+        f"sum_max={float(sums.max()):.6f}",
+        flush=True,
+    )
+    return {"path": path, "attention": attention, "index": index, "meta": payload.get("meta", {})}
+
+
+def gather_vcdd_attention(attention_store, image_ids, device):
+    rows = []
+    missing = []
+    for image_id in image_ids.detach().cpu().tolist():
+        row = attention_store["index"].get(int(image_id))
+        if row is None:
+            missing.append(int(image_id))
+        else:
+            rows.append(row)
+    if missing:
+        raise KeyError(f"VCDD attention missing image_ids: {missing[:8]}")
+    return attention_store["attention"][rows].to(device, non_blocking=True).float()
+
+
+def lift_region_logits(region_logits, attention_lift):
+    attention = attention_lift.float()
+    attention = attention / attention.sum(dim=1, keepdim=True).clamp_min(1e-6)
+    return torch.einsum("brp,bcr->bcp", attention, region_logits.float())
+
+
+@torch.no_grad()
+def build_eval_vocabulary(frozen, cfg, device):
+    dataset = build_coco_stuff_eval_dataset(cfg)
+    class_names = list(dataset.CLASSES)
+    if class_names and class_names[0] == "background":
+        class_names = class_names[1:]
+    class_clip, class_base = build_class_embeddings(
+        frozen,
+        cfg,
+        class_names,
+        device,
+        keep_templates=True,
+    )
+    return class_names, class_clip.float(), class_base.float()
+
+
+def bridge_vocabulary_embeddings(bridge, class_clip, semantic_features, class_base, delta_scale=0.5):
+    num_classes, num_templates, clip_dim = class_clip.shape
+    flat_clip = class_clip.reshape(num_classes * num_templates, clip_dim)
+    flat_base = class_base.reshape(num_classes * num_templates, class_base.shape[-1])
+    mapped, stats = bridge(flat_clip, semantic_features, flat_base, return_stats=True)
+    mapped = F.normalize(flat_base.unsqueeze(0) + float(delta_scale) * stats["delta"].float(), dim=-1)
+    return F.normalize(mapped.reshape(semantic_features.shape[0], num_classes, num_templates, -1).mean(dim=2), dim=-1)
+
+
+def zero_vcdd_losses(reference, vocab_size=0):
+    zero = reference.float().new_tensor(0.0)
+    return {
+        "loss_vcdd_ce": zero,
+        "loss_vcdd_kl": zero,
+        "loss_vcdd_preserve": zero,
+        "loss_vcdd_residual_l1": zero,
+        "vcdd_reliable_patch_fraction": zero,
+        "vcdd_fallback_used_fraction": zero,
+        "vcdd_teacher_top1_prob_mean": zero,
+        "vcdd_teacher_margin_mean": zero,
+        "vcdd_teacher_entropy_mean": zero,
+        "vcdd_region_residual_abs_mean": zero,
+        "vcdd_region_residual_abs_max": zero,
+        "vcdd_dense_residual_abs_mean": zero,
+        "vcdd_dense_residual_abs_max": zero,
+        "vcdd_modified_fraction": zero,
+        "vcdd_attention_sum_mean": zero,
+        "vcdd_vocab_size": zero.new_tensor(float(vocab_size)),
+    }
+
+
+def vcdd_dense_losses(
+    vcdd,
+    semantic_features,
+    mapped_vocab_text,
+    attention_lift,
+    dense_base_logits,
+    dense_cpa_v1_logits,
+    loss_cfg,
+):
+    final_dense_logits, vcdd_stats = vcdd(
+        semantic_features,
+        mapped_vocab_text,
+        attention_lift,
+        dense_cpa_v1_logits,
+        dense_base_logits=dense_base_logits,
+    )
+    teacher = dense_cpa_v1_logits.detach().float()
+    final = final_dense_logits.float()
+    teacher_temp = max(float(loss_cfg.teacher_temperature), 1e-6)
+    teacher_probs = F.softmax(teacher / teacher_temp, dim=1)
+    top2 = teacher_probs.topk(k=min(2, teacher_probs.shape[1]), dim=1).values
+    top1_prob = top2[:, 0]
+    margin = top2[:, 0] - top2[:, 1] if top2.shape[1] > 1 else torch.zeros_like(top2[:, 0])
+    entropy = -(teacher_probs * teacher_probs.clamp_min(1e-8).log()).sum(dim=1)
+    entropy_norm = entropy / math.log(max(teacher_probs.shape[1], 2))
+    reliable = (
+        (top1_prob >= float(loss_cfg.min_prob))
+        & (margin >= float(loss_cfg.min_margin))
+        & (entropy_norm <= float(loss_cfg.max_entropy))
+    )
+    fallback_used = final.new_tensor(0.0)
+    min_count = int(math.ceil(float(loss_cfg.min_reliable_fraction) * reliable.numel()))
+    if reliable.sum().item() < min_count and min_count > 0:
+        flat_conf = top1_prob.reshape(-1)
+        top_idx = flat_conf.topk(min(min_count, flat_conf.numel())).indices
+        reliable = torch.zeros_like(flat_conf, dtype=torch.bool).scatter(0, top_idx, True).reshape_as(reliable)
+        fallback_used = final.new_tensor(1.0)
+    unreliable = ~reliable
+    labels = teacher.argmax(dim=1)
+    zero = final.new_tensor(0.0)
+    loss_ce = zero
+    loss_kl = zero
+    if reliable.any():
+        final_rel = final.permute(0, 2, 1)[reliable]
+        labels_rel = labels[reliable]
+        loss_ce = F.cross_entropy(final_rel, labels_rel)
+        kl_temp = max(float(loss_cfg.kl_temperature), 1e-6)
+        p_teacher = F.softmax((teacher / kl_temp).permute(0, 2, 1)[reliable], dim=-1)
+        log_p_student = F.log_softmax((final / kl_temp).permute(0, 2, 1)[reliable], dim=-1)
+        loss_kl = F.kl_div(log_p_student, p_teacher, reduction="batchmean") * (kl_temp ** 2)
+    loss_preserve = zero
+    if unreliable.any():
+        preserve_temp = max(float(loss_cfg.preserve_temperature), 1e-6)
+        p_cpa = F.softmax((teacher / preserve_temp).permute(0, 2, 1)[unreliable], dim=-1)
+        log_p_final = F.log_softmax((final / preserve_temp).permute(0, 2, 1)[unreliable], dim=-1)
+        loss_preserve = F.kl_div(log_p_final, p_cpa, reduction="batchmean") * (preserve_temp ** 2)
+    loss_residual_l1 = (final - teacher).abs().mean()
+    out = {
+        "loss_vcdd_ce": loss_ce,
+        "loss_vcdd_kl": loss_kl,
+        "loss_vcdd_preserve": loss_preserve,
+        "loss_vcdd_residual_l1": loss_residual_l1,
+        "vcdd_reliable_patch_fraction": reliable.float().mean().detach(),
+        "vcdd_fallback_used_fraction": fallback_used.detach(),
+        "vcdd_teacher_top1_prob_mean": top1_prob.mean().detach(),
+        "vcdd_teacher_margin_mean": margin.mean().detach(),
+        "vcdd_teacher_entropy_mean": entropy_norm.mean().detach(),
+        "vcdd_vocab_size": final.new_tensor(float(final.shape[1])).detach(),
+    }
+    out.update(vcdd_stats)
+    return out
+
+
 def init_epoch_accumulators():
     return {
         "loss_total": 0.0,
@@ -329,6 +538,22 @@ def init_epoch_accumulators():
         "cpa_proto_pairwise_cos_mean": 0.0,
         "cpa_proto_pairwise_cos_max": 0.0,
         "cpa_topk": 0.0,
+        "loss_vcdd_ce": 0.0,
+        "loss_vcdd_kl": 0.0,
+        "loss_vcdd_preserve": 0.0,
+        "loss_vcdd_residual_l1": 0.0,
+        "vcdd_reliable_patch_fraction": 0.0,
+        "vcdd_fallback_used_fraction": 0.0,
+        "vcdd_teacher_top1_prob_mean": 0.0,
+        "vcdd_teacher_margin_mean": 0.0,
+        "vcdd_teacher_entropy_mean": 0.0,
+        "vcdd_region_residual_abs_mean": 0.0,
+        "vcdd_region_residual_abs_max": 0.0,
+        "vcdd_dense_residual_abs_mean": 0.0,
+        "vcdd_dense_residual_abs_max": 0.0,
+        "vcdd_modified_fraction": 0.0,
+        "vcdd_attention_sum_mean": 0.0,
+        "vcdd_vocab_size": 0.0,
         "base_norm_mean": 0.0,
         "delta_norm_mean": 0.0,
         "delta_base_ratio_mean": 0.0,
@@ -342,7 +567,7 @@ def init_epoch_accumulators():
     }
 
 
-def update_epoch_accumulators(acc, loss_total, loss_infonce, losses, stats, cpa_losses):
+def update_epoch_accumulators(acc, loss_total, loss_infonce, losses, stats, cpa_losses, vcdd_losses):
     acc["loss_total"] += float(loss_total.detach().cpu())
     acc["loss_infonce"] += float(loss_infonce.detach().cpu())
     acc["loss_delta_l2"] += float(losses["loss_delta_l2"].detach().cpu())
@@ -371,6 +596,31 @@ def update_epoch_accumulators(acc, loss_total, loss_infonce, losses, stats, cpa_
     acc["cpa_proto_pairwise_cos_max"] = max(
         acc["cpa_proto_pairwise_cos_max"],
         float(cpa_losses["cpa_proto_pairwise_cos_max"].detach().cpu()),
+    )
+    for key in (
+        "loss_vcdd_ce",
+        "loss_vcdd_kl",
+        "loss_vcdd_preserve",
+        "loss_vcdd_residual_l1",
+        "vcdd_reliable_patch_fraction",
+        "vcdd_fallback_used_fraction",
+        "vcdd_teacher_top1_prob_mean",
+        "vcdd_teacher_margin_mean",
+        "vcdd_teacher_entropy_mean",
+        "vcdd_region_residual_abs_mean",
+        "vcdd_dense_residual_abs_mean",
+        "vcdd_modified_fraction",
+        "vcdd_attention_sum_mean",
+        "vcdd_vocab_size",
+    ):
+        acc[key] += float(vcdd_losses[key].detach().cpu())
+    acc["vcdd_region_residual_abs_max"] = max(
+        acc["vcdd_region_residual_abs_max"],
+        float(vcdd_losses["vcdd_region_residual_abs_max"].detach().cpu()),
+    )
+    acc["vcdd_dense_residual_abs_max"] = max(
+        acc["vcdd_dense_residual_abs_max"],
+        float(vcdd_losses["vcdd_dense_residual_abs_max"].detach().cpu()),
     )
     acc["base_norm_mean"] += float(stats["base_norm"].detach().float().mean().cpu())
     acc["delta_norm_mean"] += float(stats["delta_norm"].detach().float().mean().cpu())
@@ -409,6 +659,20 @@ def finalize_epoch_accumulators(acc, count):
         "cpa_confident_patch_frac",
         "cpa_proto_pairwise_cos_mean",
         "cpa_topk",
+        "loss_vcdd_ce",
+        "loss_vcdd_kl",
+        "loss_vcdd_preserve",
+        "loss_vcdd_residual_l1",
+        "vcdd_reliable_patch_fraction",
+        "vcdd_fallback_used_fraction",
+        "vcdd_teacher_top1_prob_mean",
+        "vcdd_teacher_margin_mean",
+        "vcdd_teacher_entropy_mean",
+        "vcdd_region_residual_abs_mean",
+        "vcdd_dense_residual_abs_mean",
+        "vcdd_modified_fraction",
+        "vcdd_attention_sum_mean",
+        "vcdd_vocab_size",
         "base_norm_mean",
         "delta_norm_mean",
         "delta_base_ratio_mean",
@@ -444,6 +708,8 @@ def print_epoch_progress(epoch, epochs, step, total_steps, acc, start_time, lr):
         f"patch={metrics['patch_preserve_kl']:.4f} "
         f"cpa={metrics['loss_cpa_proto_infonce']:.4f} "
         f"cpa|r|={metrics['cpa_residual_abs_mean']:.4f} "
+        f"vcdd={metrics['loss_vcdd_ce']:.4f} "
+        f"vrel={metrics['vcdd_reliable_patch_fraction']:.3f} "
         f"d/b={metrics['delta_base_ratio_mean']:.3f} "
         f"dmax={metrics['delta_base_ratio_max']:.4f} "
         f"cos={metrics['cosine_base_mapped_mean']:.4f} "
@@ -467,7 +733,7 @@ def projection_trainable_count(model):
     return sum(p.numel() for p in model.proj.parameters() if p.requires_grad)
 
 
-def maybe_auto_resume(out, cfg, bridge, cpa, optimizer, scheduler, scaler, device):
+def maybe_auto_resume(out, cfg, bridge, cpa, vcdd, optimizer, scheduler, scaler, device):
     auto_resume = bool(cfg.train.get("auto_resume", True))
     resume_path = cfg.train.get("resume", None)
     if resume_path in {"", "null", "None"}:
@@ -492,6 +758,14 @@ def maybe_auto_resume(out, cfg, bridge, cpa, optimizer, scheduler, scaler, devic
                 "Start from scratch or use a CPA checkpoint."
             )
         cpa.load_state_dict(payload["cpa"])
+    if vcdd is not None:
+        if payload.get("vcdd") is None:
+            print(
+                "VCDD enabled but resume checkpoint has no VCDD weights; keeping zero-init VCDD head.",
+                flush=True,
+            )
+        else:
+            vcdd.load_state_dict(payload["vcdd"])
     bridge._skip_zero_init_parity_check = True
     bridge._parity_checked = True
     if payload.get("optimizer") is not None:
@@ -685,13 +959,48 @@ def main():
     safety_cfg = get_safety_cfg(cfg)
     cpa_cfg = get_cpa_cfg(cfg)
     cpa_loss_cfg = get_cpa_loss_cfg(cfg)
+    vcdd_cfg = get_vcdd_cfg(cfg)
+    vcdd_loss_cfg = get_vcdd_loss_cfg(cfg)
     bridge = CleanXAttnBridge(**OmegaConf.to_container(cfg.bridge, resolve=True)).to(device)
     cpa_kwargs = OmegaConf.to_container(cpa_cfg, resolve=True)
     cpa_kwargs.pop("enabled", None)
+    cpa_version = cpa_kwargs.pop("version", "v1")
+    if str(cpa_version) != "v1":
+        raise ValueError("Only CPA-v1 is supported in the VCDD path")
     cpa = ClassPrototypeAlignmentHead(**cpa_kwargs).to(device) if bool(cpa_cfg.enabled) else None
+    if bool(vcdd_cfg.enabled) and cpa is None:
+        raise ValueError("VCDD requires CPA-v1 to be enabled")
+    vcdd_attention_store = (
+        load_vcdd_attention_index(vcdd_cfg.train_attention_path)
+        if bool(vcdd_cfg.enabled)
+        else None
+    )
+    vcdd_class_names = []
+    vcdd_class_clip = None
+    vcdd_class_base = None
+    if bool(vcdd_cfg.enabled):
+        vcdd_class_names, vcdd_class_clip, vcdd_class_base = build_eval_vocabulary(
+            frozen,
+            cfg,
+            device,
+        )
+    vcdd = None
+    if bool(vcdd_cfg.enabled):
+        vcdd = VocabularyConditionedDenseDistillationHead(
+            dino_dim=int(cfg.bridge.get("dino_dim", 768)),
+            hidden_dim=int(vcdd_cfg.hidden_dim),
+            dropout=float(vcdd_cfg.dropout),
+            scale=float(vcdd_cfg.scale),
+            residual_clip=float(vcdd_cfg.residual_clip),
+            topk=int(vcdd_cfg.topk),
+            topk_source=str(vcdd_cfg.topk_source),
+            detach_attention=bool(vcdd_cfg.detach_attention),
+        ).to(device)
     trainable_parameters = list(bridge.parameters())
     if cpa is not None:
         trainable_parameters.extend(cpa.parameters())
+    if vcdd is not None:
+        trainable_parameters.extend(vcdd.parameters())
     optimizer = torch.optim.AdamW(
         trainable_parameters,
         lr=float(cfg.train.lr),
@@ -707,9 +1016,9 @@ def main():
 
     print("=" * 78, flush=True)
     method_label = (
-        f"{METHOD_NAME} + Class Prototype Alignment Head"
-        if cpa is not None
-        else METHOD_NAME
+        f"{METHOD_NAME} + CPA-v1 + VCDD"
+        if vcdd is not None
+        else (f"{METHOD_NAME} + Class Prototype Alignment Head" if cpa is not None else METHOD_NAME)
     )
     print(f"[{timestamp()}] Starting {method_label} training", flush=True)
     print("=" * 78, flush=True)
@@ -730,7 +1039,11 @@ def main():
     print(f"  Visual target           : same DINO region-aware feature `{cfg.data.get('features_name', 'disentangled_self_attn')}`", flush=True)
     print("  Base text projection    : frozen original Talk2DINO projection", flush=True)
     print("  Objective               : pairwise BxB InfoNCE over score(text_i, image_j)", flush=True)
-    print("  Trainable modules       : XAttnBridge_Clean and CPA only", flush=True)
+    print(
+        "  Trainable modules       : "
+        f"XAttnBridge_Clean, CPA-v1{', VCDD' if vcdd is not None else ''}",
+        flush=True,
+    )
     print(
         "  Bridge architecture     : "
         f"clip_dim={cfg.bridge.clip_dim}, dino_dim={cfg.bridge.dino_dim}, "
@@ -776,7 +1089,8 @@ def main():
     )
     print(f"Trainable parameter count : {trainable_count(bridge)}", flush=True)
     print(f"CPA trainable params      : {trainable_count(cpa) if cpa is not None else 0}", flush=True)
-    print("CLIP/DINO remain frozen; only XAttnBridge_Clean and CPA are optimized.", flush=True)
+    print(f"VCDD trainable params     : {trainable_count(vcdd) if vcdd is not None else 0}", flush=True)
+    print("CLIP/DINO remain frozen; no raw patch tokens, dense_patch_features, precomputed teacher logits, or GT masks are used.", flush=True)
     print(f"train_feature_source      : {train_feature_source}", flush=True)
     print(f"train_eval_mode           : {eval_mode}", flush=True)
     if train_feature_source == "baseline_pth_in_memory":
@@ -832,11 +1146,33 @@ def main():
         f"temperature={float(cpa_loss_cfg.temperature):.3f}",
         flush=True,
     )
+    print(
+        "VCDD: "
+        f"enabled={bool(vcdd_cfg.enabled)} attention_path={vcdd_cfg.train_attention_path} "
+        f"hidden_dim={int(vcdd_cfg.hidden_dim)} scale={float(vcdd_cfg.scale):.3f} "
+        f"residual_clip={float(vcdd_cfg.residual_clip):.3f} topk={int(vcdd_cfg.topk)} "
+        f"topk_source={vcdd_cfg.topk_source} detach_attention={bool(vcdd_cfg.detach_attention)} "
+        f"vocab_size={len(vcdd_class_names)}",
+        flush=True,
+    )
+    if vcdd_class_names:
+        print(f"VCDD first classes        : {vcdd_class_names[:10]}", flush=True)
+    print(
+        "VCDD loss: "
+        f"enabled={bool(vcdd_loss_cfg.enabled)} ce={float(vcdd_loss_cfg.ce_weight):.4g} "
+        f"kl={float(vcdd_loss_cfg.kl_weight):.4g} preserve={float(vcdd_loss_cfg.preserve_weight):.4g} "
+        f"residual_l1={float(vcdd_loss_cfg.residual_l1_weight):.4g} "
+        f"teacher_temperature={float(vcdd_loss_cfg.teacher_temperature):.3f} "
+        f"kl_temperature={float(vcdd_loss_cfg.kl_temperature):.3f} "
+        f"preserve_temperature={float(vcdd_loss_cfg.preserve_temperature):.3f}",
+        flush=True,
+    )
     print("CCR: enabled=false", flush=True)
+    print("CPA-Router=false USRC=false CPA-v2/v3=false PAMR=false max_train_hours=false", flush=True)
     print("Main InfoNCE: mapped_text vs visual_embed; CPA affects main InfoNCE=false", flush=True)
 
     start_epoch, best_miou, best_epoch = maybe_auto_resume(
-        out, cfg, bridge, cpa, optimizer, scheduler, scaler, device
+        out, cfg, bridge, cpa, vcdd, optimizer, scheduler, scaler, device
     )
     if eval_mode == "baseline_pth_val_loss" and best_miou == -float("inf"):
         best_miou = float("inf")
@@ -860,6 +1196,8 @@ def main():
         bridge.train()
         if cpa is not None:
             cpa.train()
+        if vcdd is not None:
+            vcdd.train()
         acc = init_epoch_accumulators()
         count = 0
         stop_training = False
@@ -916,6 +1254,61 @@ def main():
                     )
                 else:
                     cpa_losses = zero_cpa_losses(safety_stats["delta"])
+                if vcdd is not None and bool(vcdd_loss_cfg.enabled):
+                    attention_lift = gather_vcdd_attention(
+                        vcdd_attention_store,
+                        batch["image_id"],
+                        device,
+                    )
+                    mapped_vocab_text = bridge_vocabulary_embeddings(
+                        bridge,
+                        vcdd_class_clip.to(device),
+                        patches,
+                        vcdd_class_base.to(device),
+                        delta_scale=float(cfg.evaluate.get("xattn_delta_scale", 0.5)),
+                    )
+                    base_vocab_text = mean_template_embeddings(vcdd_class_base.to(device))
+                    dense_base_region_logits = torch.einsum(
+                        "brd,cd->bcr",
+                        F.normalize(patches.float(), dim=-1),
+                        F.normalize(base_vocab_text.float(), dim=-1),
+                    )
+                    vocab_prototypes = cpa(mapped_vocab_text)
+                    region_prototype_logits = compute_prototype_logits(
+                        patches,
+                        vocab_prototypes,
+                        temperature=cpa.prototype_temperature,
+                        aggregation=cpa.prototype_aggregation,
+                    )
+                    dense_base_logits = lift_region_logits(
+                        dense_base_region_logits,
+                        attention_lift,
+                    )
+                    dense_prototype_logits = lift_region_logits(
+                        region_prototype_logits,
+                        attention_lift,
+                    )
+                    dense_cpa_v1_logits, _ = apply_topk_prototype_residual(
+                        dense_base_logits,
+                        dense_prototype_logits,
+                        topk=cpa.topk,
+                        residual_scale=cpa.residual_scale,
+                        residual_clip=cpa.residual_clip,
+                    )
+                    vcdd_losses = vcdd_dense_losses(
+                        vcdd,
+                        patches,
+                        mapped_vocab_text,
+                        attention_lift,
+                        dense_base_logits,
+                        dense_cpa_v1_logits,
+                        vcdd_loss_cfg,
+                    )
+                else:
+                    vcdd_losses = zero_vcdd_losses(
+                        safety_stats["delta"],
+                        len(vcdd_class_names),
+                    )
                 loss = loss_infonce
                 if bool(safety_cfg.enabled):
                     loss = (
@@ -934,6 +1327,14 @@ def main():
                         + float(cpa_loss_cfg.diversity_weight) * cpa_losses["loss_cpa_diversity"]
                         + float(cpa_loss_cfg.residual_l1_weight) * cpa_losses["loss_cpa_residual_l1"]
                     )
+                if vcdd is not None and bool(vcdd_loss_cfg.enabled):
+                    loss = (
+                        loss
+                        + float(vcdd_loss_cfg.ce_weight) * vcdd_losses["loss_vcdd_ce"]
+                        + float(vcdd_loss_cfg.kl_weight) * vcdd_losses["loss_vcdd_kl"]
+                        + float(vcdd_loss_cfg.preserve_weight) * vcdd_losses["loss_vcdd_preserve"]
+                        + float(vcdd_loss_cfg.residual_l1_weight) * vcdd_losses["loss_vcdd_residual_l1"]
+                    )
             if not torch.isfinite(loss):
                 print("WARNING: loss became NaN/Inf; saving checkpoint_last.pth and stopping cleanly.", flush=True)
                 stop_training = True
@@ -949,6 +1350,7 @@ def main():
                 safety_losses,
                 safety_stats,
                 cpa_losses,
+                vcdd_losses,
             )
             acc["data_time"] += data_time
             acc["compute_time"] += time.time() - compute_start
@@ -975,7 +1377,6 @@ def main():
         lr = optimizer.param_groups[0]["lr"]
         epoch_metrics = finalize_epoch_accumulators(acc, count)
         epoch_it_s = count / max(epoch_time, 1e-6)
-        projected_hours = avg_epoch * epochs / 3600.0
         print(
             f"[{timestamp()}] Epoch {epoch:03d}/{epochs:03d} summary "
             f"loss_total={epoch_metrics['loss_total']:.6f} "
@@ -998,6 +1399,21 @@ def main():
             f"cpa_proto_pairwise_cos_mean={epoch_metrics['cpa_proto_pairwise_cos_mean']:.4f} "
             f"cpa_proto_pairwise_cos_max={epoch_metrics['cpa_proto_pairwise_cos_max']:.4f} "
             f"cpa_topk={epoch_metrics['cpa_topk']:.0f} "
+            f"loss_vcdd_ce={epoch_metrics['loss_vcdd_ce']:.6f} "
+            f"loss_vcdd_kl={epoch_metrics['loss_vcdd_kl']:.6f} "
+            f"loss_vcdd_preserve={epoch_metrics['loss_vcdd_preserve']:.6f} "
+            f"loss_vcdd_residual_l1={epoch_metrics['loss_vcdd_residual_l1']:.6f} "
+            f"vcdd_reliable_patch_fraction={epoch_metrics['vcdd_reliable_patch_fraction']:.4f} "
+            f"vcdd_fallback_used_fraction={epoch_metrics['vcdd_fallback_used_fraction']:.4f} "
+            f"vcdd_teacher_top1_prob_mean={epoch_metrics['vcdd_teacher_top1_prob_mean']:.4f} "
+            f"vcdd_teacher_margin_mean={epoch_metrics['vcdd_teacher_margin_mean']:.4f} "
+            f"vcdd_teacher_entropy_mean={epoch_metrics['vcdd_teacher_entropy_mean']:.4f} "
+            f"vcdd_region_residual_abs_mean={epoch_metrics['vcdd_region_residual_abs_mean']:.6f} "
+            f"vcdd_dense_residual_abs_mean={epoch_metrics['vcdd_dense_residual_abs_mean']:.6f} "
+            f"vcdd_dense_residual_abs_max={epoch_metrics['vcdd_dense_residual_abs_max']:.6f} "
+            f"vcdd_modified_fraction={epoch_metrics['vcdd_modified_fraction']:.4f} "
+            f"vcdd_attention_sum_mean={epoch_metrics['vcdd_attention_sum_mean']:.6f} "
+            f"vcdd_vocab_size={epoch_metrics['vcdd_vocab_size']:.0f} "
             f"base_norm={epoch_metrics['base_norm_mean']:.4f} "
             f"delta_norm={epoch_metrics['delta_norm_mean']:.4f} "
             f"delta/base_mean={epoch_metrics['delta_base_ratio_mean']:.4f} "
@@ -1031,13 +1447,6 @@ def main():
                 flush=True,
             )
             stop_training = True
-        if projected_hours > float(cfg.train.max_train_hours):
-            print(
-                f"WARNING projected {epochs} epochs = {projected_hours:.2f}h "
-                f"> train.max_train_hours={cfg.train.max_train_hours}",
-                flush=True,
-            )
-
         miou = None
         val_loss = None
         is_eval_epoch = epoch % int(cfg.train.save_every) == 0 or epoch == epochs
@@ -1107,6 +1516,22 @@ def main():
             "cpa_proto_pairwise_cos_mean": epoch_metrics["cpa_proto_pairwise_cos_mean"],
             "cpa_proto_pairwise_cos_max": epoch_metrics["cpa_proto_pairwise_cos_max"],
             "cpa_topk": epoch_metrics["cpa_topk"],
+            "loss_vcdd_ce": epoch_metrics["loss_vcdd_ce"],
+            "loss_vcdd_kl": epoch_metrics["loss_vcdd_kl"],
+            "loss_vcdd_preserve": epoch_metrics["loss_vcdd_preserve"],
+            "loss_vcdd_residual_l1": epoch_metrics["loss_vcdd_residual_l1"],
+            "vcdd_reliable_patch_fraction": epoch_metrics["vcdd_reliable_patch_fraction"],
+            "vcdd_fallback_used_fraction": epoch_metrics["vcdd_fallback_used_fraction"],
+            "vcdd_teacher_top1_prob_mean": epoch_metrics["vcdd_teacher_top1_prob_mean"],
+            "vcdd_teacher_margin_mean": epoch_metrics["vcdd_teacher_margin_mean"],
+            "vcdd_teacher_entropy_mean": epoch_metrics["vcdd_teacher_entropy_mean"],
+            "vcdd_region_residual_abs_mean": epoch_metrics["vcdd_region_residual_abs_mean"],
+            "vcdd_region_residual_abs_max": epoch_metrics["vcdd_region_residual_abs_max"],
+            "vcdd_dense_residual_abs_mean": epoch_metrics["vcdd_dense_residual_abs_mean"],
+            "vcdd_dense_residual_abs_max": epoch_metrics["vcdd_dense_residual_abs_max"],
+            "vcdd_modified_fraction": epoch_metrics["vcdd_modified_fraction"],
+            "vcdd_attention_sum_mean": epoch_metrics["vcdd_attention_sum_mean"],
+            "vcdd_vocab_size": epoch_metrics["vcdd_vocab_size"],
             "miou": miou,
             "val_loss": val_loss,
             "eval_mode": eval_mode,
@@ -1115,6 +1540,8 @@ def main():
             "xattn_safety": OmegaConf.to_container(safety_cfg, resolve=True),
             "cpa_config": OmegaConf.to_container(cpa_cfg, resolve=True),
             "cpa_loss_config": OmegaConf.to_container(cpa_loss_cfg, resolve=True),
+            "vcdd_config": OmegaConf.to_container(vcdd_cfg, resolve=True),
+            "vcdd_loss_config": OmegaConf.to_container(vcdd_loss_cfg, resolve=True),
             "bridge_base_guidance": {
                 "base_guided_attention": bool(cfg.bridge.get("base_guided_attention", True)),
                 "base_guidance_beta": float(cfg.bridge.get("base_guidance_beta", 1.0)),
@@ -1147,6 +1574,7 @@ def main():
             checkpoint_metrics,
             scaler,
             cpa=cpa,
+            vcdd=vcdd,
         )
         last_checkpoint = out / "checkpoint_last.pth"
         best_checkpoint = out / "checkpoint_best.pth"
@@ -1183,6 +1611,22 @@ def main():
             "cpa_proto_pairwise_cos_mean": epoch_metrics["cpa_proto_pairwise_cos_mean"],
             "cpa_proto_pairwise_cos_max": epoch_metrics["cpa_proto_pairwise_cos_max"],
             "cpa_topk": epoch_metrics["cpa_topk"],
+            "loss_vcdd_ce": epoch_metrics["loss_vcdd_ce"],
+            "loss_vcdd_kl": epoch_metrics["loss_vcdd_kl"],
+            "loss_vcdd_preserve": epoch_metrics["loss_vcdd_preserve"],
+            "loss_vcdd_residual_l1": epoch_metrics["loss_vcdd_residual_l1"],
+            "vcdd_reliable_patch_fraction": epoch_metrics["vcdd_reliable_patch_fraction"],
+            "vcdd_fallback_used_fraction": epoch_metrics["vcdd_fallback_used_fraction"],
+            "vcdd_teacher_top1_prob_mean": epoch_metrics["vcdd_teacher_top1_prob_mean"],
+            "vcdd_teacher_margin_mean": epoch_metrics["vcdd_teacher_margin_mean"],
+            "vcdd_teacher_entropy_mean": epoch_metrics["vcdd_teacher_entropy_mean"],
+            "vcdd_region_residual_abs_mean": epoch_metrics["vcdd_region_residual_abs_mean"],
+            "vcdd_region_residual_abs_max": epoch_metrics["vcdd_region_residual_abs_max"],
+            "vcdd_dense_residual_abs_mean": epoch_metrics["vcdd_dense_residual_abs_mean"],
+            "vcdd_dense_residual_abs_max": epoch_metrics["vcdd_dense_residual_abs_max"],
+            "vcdd_modified_fraction": epoch_metrics["vcdd_modified_fraction"],
+            "vcdd_attention_sum_mean": epoch_metrics["vcdd_attention_sum_mean"],
+            "vcdd_vocab_size": epoch_metrics["vcdd_vocab_size"],
             "base_norm_mean": epoch_metrics["base_norm_mean"],
             "delta_norm_mean": epoch_metrics["delta_norm_mean"],
             "delta_base_ratio_mean": epoch_metrics["delta_base_ratio_mean"],
@@ -1217,6 +1661,7 @@ def main():
                 checkpoint_metrics,
                 scaler,
                 cpa=cpa,
+                vcdd=vcdd,
             )
             print(
                 f"[{timestamp()}] Saved best checkpoint: {best_checkpoint} "
@@ -1236,6 +1681,7 @@ def main():
                 checkpoint_metrics,
                 scaler,
                 cpa=cpa,
+                vcdd=vcdd,
             )
             saved_epoch_checkpoint = True
             print(

@@ -427,10 +427,13 @@ class CleanFeatureDataset(Dataset):
 
 
 def collate_train_features(batch):
+    if any("image_id" not in item for item in batch):
+        raise KeyError("collate_train_features requires every sample to include image_id")
     output = {
         "text_clip": torch.stack([x["text_clip"] for x in batch]),
         "visual_embed": torch.stack([x["visual_embed"] for x in batch]),
         "patch_tokens": torch.stack([x["patch_tokens"] for x in batch]),
+        "image_id": torch.as_tensor([int(x["image_id"]) for x in batch], dtype=torch.long),
     }
     if "text_base" in batch[0]:
         output["text_base"] = torch.stack([x["text_base"] for x in batch])
@@ -510,6 +513,7 @@ def save_checkpoint_clean(
     extra_metrics=None,
     scaler=None,
     cpa=None,
+    vcdd=None,
 ):
     extra_metrics = extra_metrics or {}
     payload = {
@@ -525,6 +529,8 @@ def save_checkpoint_clean(
     }
     if cpa is not None:
         payload["cpa"] = cpa.state_dict()
+    if vcdd is not None:
+        payload["vcdd"] = vcdd.state_dict()
     payload.update(extra_metrics)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

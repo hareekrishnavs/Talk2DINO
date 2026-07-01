@@ -25,6 +25,7 @@ from class_prototype_alignment import (
     apply_topk_prototype_residual,
     compute_prototype_logits,
 )
+from vcdd_head import VocabularyConditionedDenseDistillationHead
 
 
 def parse_args():
@@ -134,10 +135,54 @@ def load_cpa_from_payload(cfg, payload, device, enabled):
         raise RuntimeError("CPA enabled but checkpoint does not contain CPA weights.")
     kwargs = OmegaConf.to_container(cfg.cpa, resolve=True)
     kwargs.pop("enabled", None)
+    version = kwargs.pop("version", "v1")
+    if str(version) != "v1":
+        raise ValueError("Only CPA-v1 is supported in this eval path")
     cpa = ClassPrototypeAlignmentHead(**kwargs).to(device)
     cpa.load_state_dict(payload["cpa"])
     cpa.eval()
     return cpa
+
+
+def get_vcdd_cfg(cfg):
+    defaults = OmegaConf.create({
+        "enabled": False,
+        "hidden_dim": 256,
+        "dropout": 0.0,
+        "scale": 0.05,
+        "residual_clip": 0.25,
+        "topk": 5,
+        "topk_source": "cpa",
+        "detach_attention": True,
+    })
+    return OmegaConf.merge(defaults, cfg.get("vcdd", {}))
+
+
+def load_vcdd_from_payload(cfg, payload, device, enabled):
+    has_weights = payload.get("vcdd") is not None
+    print(
+        f"VCDD enabled={bool(enabled)} checkpoint contains VCDD weights "
+        f"{'yes' if has_weights else 'no'}",
+        flush=True,
+    )
+    if not enabled:
+        return None
+    if not has_weights:
+        raise RuntimeError("VCDD enabled but checkpoint does not contain VCDD weights.")
+    vcdd_cfg = get_vcdd_cfg(cfg)
+    vcdd = VocabularyConditionedDenseDistillationHead(
+        dino_dim=int(cfg.bridge.get("dino_dim", 768)),
+        hidden_dim=int(vcdd_cfg.hidden_dim),
+        dropout=float(vcdd_cfg.dropout),
+        scale=float(vcdd_cfg.scale),
+        residual_clip=float(vcdd_cfg.residual_clip),
+        topk=int(vcdd_cfg.topk),
+        topk_source=str(vcdd_cfg.topk_source),
+        detach_attention=bool(vcdd_cfg.detach_attention),
+    ).to(device)
+    vcdd.load_state_dict(payload["vcdd"])
+    vcdd.eval()
+    return vcdd
 
 
 def fuse_xattn_logits(
@@ -188,6 +233,7 @@ class CleanOfficialEvalModel(nn.Module):
         class_clip,
         class_base,
         cpa=None,
+        vcdd=None,
         xattn_delta_scale=0.5,
         xattn_logit_alpha=0.5,
         xattn_uncertainty_gate_enabled=True,
@@ -198,6 +244,7 @@ class CleanOfficialEvalModel(nn.Module):
         self.frozen = frozen
         self.bridge = bridge
         self.cpa = cpa
+        self.vcdd = vcdd
         self.register_buffer("class_clip", class_clip.float())
         self.register_buffer("class_base", class_base.float())
         self.xattn_delta_scale = float(xattn_delta_scale)
@@ -212,6 +259,12 @@ class CleanOfficialEvalModel(nn.Module):
         }
         self._cpa_residual_abs_max = 0.0
         self._cpa_count = 0
+        self._vcdd_sum = {
+            "vcdd_dense_residual_abs_mean": 0.0,
+            "vcdd_modified_fraction": 0.0,
+        }
+        self._vcdd_residual_abs_max = 0.0
+        self._vcdd_count = 0
 
     def cpa_summary(self):
         count = max(1, self._cpa_count)
@@ -219,6 +272,16 @@ class CleanOfficialEvalModel(nn.Module):
             "cpa_residual_abs_mean": self._cpa_sum["cpa_residual_abs_mean"] / count,
             "cpa_residual_abs_max": self._cpa_residual_abs_max,
             "cpa_modified_fraction": self._cpa_sum["cpa_modified_fraction"] / count,
+        }
+
+    def vcdd_summary(self):
+        if self.vcdd is None:
+            return None
+        count = max(1, self._vcdd_count)
+        return {
+            "vcdd_dense_residual_abs_mean": self._vcdd_sum["vcdd_dense_residual_abs_mean"] / count,
+            "vcdd_dense_residual_abs_max": self._vcdd_residual_abs_max,
+            "vcdd_modified_fraction": self._vcdd_sum["vcdd_modified_fraction"] / count,
         }
 
     def __getattr__(self, name):
@@ -320,6 +383,28 @@ class CleanOfficialEvalModel(nn.Module):
                 residual_scale=self.cpa.residual_scale,
                 residual_clip=self.cpa.residual_clip,
             )
+            if self.vcdd is not None:
+                attention_lift = self_attn_maps.float().clamp_min(0)
+                attention_lift = attention_lift / attention_lift.sum(dim=1, keepdim=True).clamp_min(1e-6)
+                final_dense_logits, vcdd_stats = self.vcdd(
+                    semantic_features,
+                    mapped_text,
+                    attention_lift,
+                    simmap.flatten(2),
+                    dense_base_logits=base_simmap.flatten(2),
+                )
+                simmap = final_dense_logits.reshape_as(simmap)
+                self._vcdd_sum["vcdd_dense_residual_abs_mean"] += float(
+                    vcdd_stats["vcdd_dense_residual_abs_mean"].detach().cpu()
+                )
+                self._vcdd_sum["vcdd_modified_fraction"] += float(
+                    vcdd_stats["vcdd_modified_fraction"].detach().cpu()
+                )
+                self._vcdd_residual_abs_max = max(
+                    self._vcdd_residual_abs_max,
+                    float(vcdd_stats["vcdd_dense_residual_abs_max"].detach().cpu()),
+                )
+                self._vcdd_count += 1
             self._cpa_sum["cpa_residual_abs_mean"] += float(
                 cpa_stats["cpa_residual_abs_mean"].detach().cpu()
             )
@@ -379,15 +464,20 @@ def official_parity_eval(args, cfg, device):
     )
     bridge, payload = load_bridge_from_checkpoint(args.checkpoint, cfg, device)
     cpa_enabled = bool(cfg.evaluate.get("cpa_enabled", cfg.cpa.get("enabled", False)))
+    vcdd_enabled = bool(cfg.evaluate.get("vcdd_enabled", cfg.get("vcdd", {}).get("enabled", False)))
     if cpa_enabled and bool(cfg.evaluate.pamr):
         raise ValueError("CPA evaluation requires evaluate.pamr=false")
+    if vcdd_enabled and not cpa_enabled:
+        raise ValueError("VCDD evaluation requires CPA-v1 evaluation to be enabled")
     cpa = load_cpa_from_payload(cfg, payload, device, cpa_enabled)
+    vcdd = load_vcdd_from_payload(cfg, payload, device, vcdd_enabled)
     wrapped = CleanOfficialEvalModel(
         frozen,
         bridge,
         class_clip,
         class_base,
         cpa=cpa,
+        vcdd=vcdd,
         xattn_delta_scale=float(cfg.evaluate.get("xattn_delta_scale", 0.5)),
         xattn_logit_alpha=float(cfg.evaluate.get("xattn_logit_alpha", 0.5)),
         xattn_uncertainty_gate_enabled=bool(
@@ -428,7 +518,8 @@ def official_parity_eval(args, cfg, device):
     metric = dataset.evaluate(results, logger=None)
     miou = float(metric["mIoU"] * 100)
     cpa_summary = wrapped.cpa_summary() if cpa is not None else None
-    return miou, payload, cpa_summary
+    vcdd_summary = wrapped.vcdd_summary()
+    return miou, payload, cpa_summary, vcdd_summary, len(eval_classnames)
 
 
 def init_eval_logger(cfg, out):
@@ -460,7 +551,7 @@ def main():
     if not args.cached_fast_eval:
         print("Eval mode: official Talk2DINO slide-inference parity", flush=True)
         print("Cached eval features are not used for prediction in this mode.", flush=True)
-        miou, payload, cpa_summary = official_parity_eval(args, cfg, device)
+        miou, payload, cpa_summary, vcdd_summary, vocab_size = official_parity_eval(args, cfg, device)
         print("=" * 64, flush=True)
         print("EVALUATION RESULTS", flush=True)
         print("=" * 64, flush=True)
@@ -468,6 +559,10 @@ def main():
         print(f"coco_stuff mIoU      : {miou:.2f}%", flush=True)
         print(f"PAMR enabled         : {bool(cfg.evaluate.pamr)}", flush=True)
         print("CCR enabled          : false", flush=True)
+        print("CPA-Router enabled   : false", flush=True)
+        print("USRC enabled         : false", flush=True)
+        print(f"VCDD enabled         : {vcdd_summary is not None}", flush=True)
+        print(f"VCDD vocab size      : {vocab_size}", flush=True)
         if cpa_summary is not None:
             print(
                 "CPA eval stats        : "
@@ -479,6 +574,14 @@ def main():
                 f"mean_residual={cpa_summary['cpa_residual_abs_mean']:.6f} "
                 f"max_residual={cpa_summary['cpa_residual_abs_max']:.6f} "
                 f"modified_fraction={cpa_summary['cpa_modified_fraction']:.4f}",
+                flush=True,
+            )
+        if vcdd_summary is not None:
+            print(
+                "VCDD eval stats       : "
+                f"mean_dense_residual={vcdd_summary['vcdd_dense_residual_abs_mean']:.6f} "
+                f"max_dense_residual={vcdd_summary['vcdd_dense_residual_abs_max']:.6f} "
+                f"modified_fraction={vcdd_summary['vcdd_modified_fraction']:.4f}",
                 flush=True,
             )
         with open(out / "summary.json", "w") as f:
@@ -493,6 +596,12 @@ def main():
                 "coco_stuff_miou": miou,
                 "cpa_enabled": cpa_summary is not None,
                 "cpa_stats": cpa_summary,
+                "vcdd_enabled": vcdd_summary is not None,
+                "vcdd_vocab_size": vocab_size,
+                "vcdd_stats": vcdd_summary,
+                "ccr_enabled": False,
+                "cpa_router_enabled": False,
+                "usrc_enabled": False,
             }, f, indent=2)
         return
 
