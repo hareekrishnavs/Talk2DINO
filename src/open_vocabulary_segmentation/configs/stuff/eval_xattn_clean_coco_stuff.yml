@@ -4,11 +4,6 @@ method_name: Talk2DINO_XAttnBridge_Clean
 
 evaluate:
   pamr: false
-  cpa_enabled: true
-  vcdd_enabled: true
-  cpa_router_enabled: false
-  usrc_enabled: false
-  ccr_enabled: false
   template: sub_imagenet_template
   task:
     - coco_stuff
