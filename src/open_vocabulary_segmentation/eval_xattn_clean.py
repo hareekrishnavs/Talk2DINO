@@ -25,7 +25,6 @@ from class_prototype_alignment import (
     apply_topk_prototype_residual,
     compute_prototype_logits,
 )
-from rcc_cpa import RankCalibratedCPA, validate_rcc_compatibility
 
 
 def parse_args():
@@ -141,28 +140,6 @@ def load_cpa_from_payload(cfg, payload, device, enabled):
     return cpa
 
 
-def method_enabled(cfg, name):
-    if name == "rcc":
-        return bool(cfg.evaluate.get("rcc_enabled", False))
-    root_cfg = cfg.get(name, {})
-    root_enabled = bool(root_cfg.get("enabled", False))
-    eval_enabled = bool(cfg.evaluate.get(f"{name}_enabled", False))
-    return root_enabled or eval_enabled
-
-
-def build_rcc_from_config(cfg, enabled):
-    if not enabled:
-        return None
-    if "rcc" not in cfg:
-        raise ValueError("RCC enabled but the config has no `rcc` section")
-    kwargs = OmegaConf.to_container(cfg.rcc, resolve=True)
-    kwargs.pop("enabled", None)
-    rcc = RankCalibratedCPA(**kwargs)
-    if list(rcc.parameters()) or rcc.state_dict():
-        raise AssertionError("RCC must not contain parameters or checkpoint state")
-    return rcc
-
-
 def fuse_xattn_logits(
     base_logits,
     xattn_logits,
@@ -211,7 +188,6 @@ class CleanOfficialEvalModel(nn.Module):
         class_clip,
         class_base,
         cpa=None,
-        rcc=None,
         xattn_delta_scale=0.5,
         xattn_logit_alpha=0.5,
         xattn_uncertainty_gate_enabled=True,
@@ -222,7 +198,6 @@ class CleanOfficialEvalModel(nn.Module):
         self.frozen = frozen
         self.bridge = bridge
         self.cpa = cpa
-        self.rcc = rcc
         self.register_buffer("class_clip", class_clip.float())
         self.register_buffer("class_base", class_base.float())
         self.xattn_delta_scale = float(xattn_delta_scale)
@@ -237,23 +212,6 @@ class CleanOfficialEvalModel(nn.Module):
         }
         self._cpa_residual_abs_max = 0.0
         self._cpa_count = 0
-        self._rcc_sum = {
-            "rcc_changed_fraction": 0.0,
-            "rcc_residual_abs_mean": 0.0,
-            "rcc_non_topk_changed_fraction": 0.0,
-        }
-        self._rcc_residual_abs_max = 0.0
-        self._rcc_uniform_max_abs_diff = 0.0
-        self._rcc_uniform_parity_applicable = bool(
-            self.rcc is not None
-            and self.cpa is not None
-            and self.rcc.schedule == "uniform"
-            and self.rcc.topk_source == "base"
-            and self.rcc.topk == self.cpa.topk
-            and self.rcc.residual_clip == self.cpa.residual_clip
-            and self.rcc.uniform_scale == self.cpa.residual_scale
-        )
-        self._rcc_count = 0
 
     def cpa_summary(self):
         count = max(1, self._cpa_count)
@@ -261,35 +219,6 @@ class CleanOfficialEvalModel(nn.Module):
             "cpa_residual_abs_mean": self._cpa_sum["cpa_residual_abs_mean"] / count,
             "cpa_residual_abs_max": self._cpa_residual_abs_max,
             "cpa_modified_fraction": self._cpa_sum["cpa_modified_fraction"] / count,
-        }
-
-    def rcc_summary(self):
-        if self.rcc is None:
-            return None
-        count = max(1, self._rcc_count)
-        scales = self.rcc.rank_scale_tensor(
-            device=torch.device("cpu"),
-            dtype=torch.float32,
-        )
-        return {
-            "rcc_topk": self.rcc.topk,
-            "rcc_schedule": self.rcc.schedule,
-            "rcc_topk_source": self.rcc.topk_source,
-            "rcc_uniform_scale": self.rcc.uniform_scale,
-            "rcc_scale_min": float(scales.min()),
-            "rcc_scale_max": float(scales.max()),
-            "rcc_scale_mean": float(scales.mean()),
-            "rcc_changed_fraction": self._rcc_sum["rcc_changed_fraction"] / count,
-            "rcc_residual_abs_mean": self._rcc_sum["rcc_residual_abs_mean"] / count,
-            "rcc_residual_abs_max": self._rcc_residual_abs_max,
-            "rcc_non_topk_changed_fraction": (
-                self._rcc_sum["rcc_non_topk_changed_fraction"] / count
-            ),
-            "rcc_uniform_max_abs_diff": (
-                self._rcc_uniform_max_abs_diff
-                if self._rcc_uniform_parity_applicable
-                else None
-            ),
         }
 
     def __getattr__(self, name):
@@ -384,65 +313,22 @@ class CleanOfficialEvalModel(nn.Module):
                 temperature=self.cpa.prototype_temperature,
                 aggregation=self.cpa.prototype_aggregation,
             ).reshape_as(base_simmap)
-            if self.rcc is not None:
-                simmap, rcc_stats = self.rcc(base_simmap, prototype_logits)
-                if self._rcc_uniform_parity_applicable:
-                    fixed_simmap, _ = apply_topk_prototype_residual(
-                        base_simmap,
-                        prototype_logits,
-                        topk=self.cpa.topk,
-                        residual_scale=self.cpa.residual_scale,
-                        residual_clip=self.cpa.residual_clip,
-                    )
-                    uniform_diff = float(
-                        (simmap - fixed_simmap).abs().max().detach().cpu()
-                    )
-                    self._rcc_uniform_max_abs_diff = max(
-                        self._rcc_uniform_max_abs_diff,
-                        uniform_diff,
-                    )
-                    if uniform_diff > 1e-7:
-                        raise AssertionError(
-                            "Uniform RCC did not reproduce fixed CPA-v1: "
-                            f"max_abs_diff={uniform_diff:.9g}"
-                        )
-                self._rcc_sum["rcc_changed_fraction"] += float(
-                    rcc_stats["rcc_changed_fraction"].detach().cpu()
-                )
-                self._rcc_sum["rcc_residual_abs_mean"] += float(
-                    rcc_stats["rcc_residual_abs_mean"].detach().cpu()
-                )
-                self._rcc_sum["rcc_non_topk_changed_fraction"] += float(
-                    rcc_stats["rcc_non_topk_changed_fraction"].detach().cpu()
-                )
-                self._rcc_residual_abs_max = max(
-                    self._rcc_residual_abs_max,
-                    float(rcc_stats["rcc_residual_abs_max"].detach().cpu()),
-                )
-                self._rcc_count += 1
-                cpa_residual_abs_mean = rcc_stats["rcc_residual_abs_mean"]
-                cpa_residual_abs_max = rcc_stats["rcc_residual_abs_max"]
-                cpa_modified_fraction = rcc_stats["rcc_topk_mask"].float().mean()
-            else:
-                simmap, cpa_stats = apply_topk_prototype_residual(
-                    base_simmap,
-                    prototype_logits,
-                    topk=self.cpa.topk,
-                    residual_scale=self.cpa.residual_scale,
-                    residual_clip=self.cpa.residual_clip,
-                )
-                cpa_residual_abs_mean = cpa_stats["cpa_residual_abs_mean"]
-                cpa_residual_abs_max = cpa_stats["cpa_residual_abs_max"]
-                cpa_modified_fraction = cpa_stats["cpa_modified_fraction"]
+            simmap, cpa_stats = apply_topk_prototype_residual(
+                base_simmap,
+                prototype_logits,
+                topk=self.cpa.topk,
+                residual_scale=self.cpa.residual_scale,
+                residual_clip=self.cpa.residual_clip,
+            )
             self._cpa_sum["cpa_residual_abs_mean"] += float(
-                cpa_residual_abs_mean.detach().cpu()
+                cpa_stats["cpa_residual_abs_mean"].detach().cpu()
             )
             self._cpa_sum["cpa_modified_fraction"] += float(
-                cpa_modified_fraction.detach().cpu()
+                cpa_stats["cpa_modified_fraction"].detach().cpu()
             )
             self._cpa_residual_abs_max = max(
                 self._cpa_residual_abs_max,
-                float(cpa_residual_abs_max.detach().cpu()),
+                float(cpa_stats["cpa_residual_abs_max"].detach().cpu()),
             )
             self._cpa_count += 1
         else:
@@ -493,42 +379,15 @@ def official_parity_eval(args, cfg, device):
     )
     bridge, payload = load_bridge_from_checkpoint(args.checkpoint, cfg, device)
     cpa_enabled = bool(cfg.evaluate.get("cpa_enabled", cfg.cpa.get("enabled", False)))
-    rcc_enabled = method_enabled(cfg, "rcc")
-    cars_enabled = method_enabled(cfg, "cars")
-    vpa_enabled = method_enabled(cfg, "vpa")
-    if rcc_enabled and not bool(cfg.rcc.get("enabled", False)):
-        raise ValueError(
-            "evaluate.rcc_enabled=true requires rcc.enabled=true"
-        )
-    validate_rcc_compatibility(
-        rcc_enabled,
-        cpa_enabled and bool(cfg.cpa.get("enabled", False)),
-        cars_enabled=cars_enabled,
-        vpa_enabled=vpa_enabled,
-        vab_enabled=method_enabled(cfg, "vab"),
-        opc_enabled=method_enabled(cfg, "opc"),
-        cpa_router_enabled=method_enabled(cfg, "cpa_router"),
-        usrc_enabled=method_enabled(cfg, "usrc"),
-        ccr_enabled=method_enabled(cfg, "ccr"),
-        dcd_enabled=method_enabled(cfg, "dcd"),
-        vcdd_enabled=method_enabled(cfg, "vcdd"),
-    )
     if cpa_enabled and bool(cfg.evaluate.pamr):
         raise ValueError("CPA evaluation requires evaluate.pamr=false")
     cpa = load_cpa_from_payload(cfg, payload, device, cpa_enabled)
-    rcc = build_rcc_from_config(cfg, rcc_enabled)
-    print(
-        f"RCC enabled={rcc_enabled} CARS enabled={cars_enabled} "
-        f"VPA enabled={vpa_enabled}",
-        flush=True,
-    )
     wrapped = CleanOfficialEvalModel(
         frozen,
         bridge,
         class_clip,
         class_base,
         cpa=cpa,
-        rcc=rcc,
         xattn_delta_scale=float(cfg.evaluate.get("xattn_delta_scale", 0.5)),
         xattn_logit_alpha=float(cfg.evaluate.get("xattn_logit_alpha", 0.5)),
         xattn_uncertainty_gate_enabled=bool(
@@ -569,8 +428,7 @@ def official_parity_eval(args, cfg, device):
     metric = dataset.evaluate(results, logger=None)
     miou = float(metric["mIoU"] * 100)
     cpa_summary = wrapped.cpa_summary() if cpa is not None else None
-    rcc_summary = wrapped.rcc_summary()
-    return miou, payload, cpa_summary, rcc_summary
+    return miou, payload, cpa_summary
 
 
 def init_eval_logger(cfg, out):
@@ -588,29 +446,6 @@ def main():
     cfg = load_clean_config(args.config, args.opts)
     if bool(cfg.evaluate.get("ccr_enabled", False)) or bool(cfg.get("ccr", {}).get("enabled", False)):
         raise ValueError("CCR is disabled for CPA evaluation")
-    rcc_enabled = method_enabled(cfg, "rcc")
-    cpa_enabled = bool(
-        cfg.evaluate.get("cpa_enabled", cfg.cpa.get("enabled", False))
-    )
-    if rcc_enabled and not bool(cfg.rcc.get("enabled", False)):
-        raise ValueError(
-            "evaluate.rcc_enabled=true requires rcc.enabled=true"
-        )
-    validate_rcc_compatibility(
-        rcc_enabled,
-        cpa_enabled and bool(cfg.cpa.get("enabled", False)),
-        cars_enabled=method_enabled(cfg, "cars"),
-        vpa_enabled=method_enabled(cfg, "vpa"),
-        vab_enabled=method_enabled(cfg, "vab"),
-        opc_enabled=method_enabled(cfg, "opc"),
-        cpa_router_enabled=method_enabled(cfg, "cpa_router"),
-        usrc_enabled=method_enabled(cfg, "usrc"),
-        ccr_enabled=method_enabled(cfg, "ccr"),
-        dcd_enabled=method_enabled(cfg, "dcd"),
-        vcdd_enabled=method_enabled(cfg, "vcdd"),
-    )
-    if rcc_enabled and args.cached_fast_eval:
-        raise ValueError("RCC is supported only by official CPA slide evaluation")
     if bool(cfg.evaluate.get("cpa_enabled", cfg.cpa.get("enabled", False))) and args.cached_fast_eval:
         raise ValueError("CPA official semantic evaluation does not use cached patch-token inputs")
     if args.cached_fast_eval and not args.features:
@@ -625,9 +460,7 @@ def main():
     if not args.cached_fast_eval:
         print("Eval mode: official Talk2DINO slide-inference parity", flush=True)
         print("Cached eval features are not used for prediction in this mode.", flush=True)
-        miou, payload, cpa_summary, rcc_summary = official_parity_eval(
-            args, cfg, device
-        )
+        miou, payload, cpa_summary = official_parity_eval(args, cfg, device)
         print("=" * 64, flush=True)
         print("EVALUATION RESULTS", flush=True)
         print("=" * 64, flush=True)
@@ -635,13 +468,6 @@ def main():
         print(f"coco_stuff mIoU      : {miou:.2f}%", flush=True)
         print(f"PAMR enabled         : {bool(cfg.evaluate.pamr)}", flush=True)
         print("CCR enabled          : false", flush=True)
-        print(
-            "XAttnBridge_Clean=true "
-            f"CPA-v1={cpa_summary is not None} RCC={rcc_summary is not None} "
-            "PAMR=false DCD=false VCDD=false VAB=false OPC=false "
-            "CARS=false VPA=false Router=false USRC=false CCR=false",
-            flush=True,
-        )
         if cpa_summary is not None:
             print(
                 "CPA eval stats        : "
@@ -653,28 +479,6 @@ def main():
                 f"mean_residual={cpa_summary['cpa_residual_abs_mean']:.6f} "
                 f"max_residual={cpa_summary['cpa_residual_abs_max']:.6f} "
                 f"modified_fraction={cpa_summary['cpa_modified_fraction']:.4f}",
-                flush=True,
-            )
-        if rcc_summary is not None:
-            uniform_diff = rcc_summary["rcc_uniform_max_abs_diff"]
-            uniform_text = (
-                "n/a" if uniform_diff is None else f"{uniform_diff:.9g}"
-            )
-            print(
-                "RCC eval stats        : "
-                f"topk={rcc_summary['rcc_topk']} "
-                f"schedule={rcc_summary['rcc_schedule']} "
-                f"topk_source={rcc_summary['rcc_topk_source']} "
-                f"uniform_scale={rcc_summary['rcc_uniform_scale']:.3f} "
-                f"scale_min={rcc_summary['rcc_scale_min']:.3f} "
-                f"scale_max={rcc_summary['rcc_scale_max']:.3f} "
-                f"scale_mean={rcc_summary['rcc_scale_mean']:.3f} "
-                f"changed_fraction={rcc_summary['rcc_changed_fraction']:.6f} "
-                f"residual_abs_mean={rcc_summary['rcc_residual_abs_mean']:.6f} "
-                f"residual_abs_max={rcc_summary['rcc_residual_abs_max']:.6f} "
-                "non_topk_changed_fraction="
-                f"{rcc_summary['rcc_non_topk_changed_fraction']:.9g} "
-                f"uniform_max_abs_diff={uniform_text}",
                 flush=True,
             )
         with open(out / "summary.json", "w") as f:
@@ -689,8 +493,6 @@ def main():
                 "coco_stuff_miou": miou,
                 "cpa_enabled": cpa_summary is not None,
                 "cpa_stats": cpa_summary,
-                "rcc_enabled": rcc_summary is not None,
-                "rcc_stats": rcc_summary,
             }, f, indent=2)
         return
 

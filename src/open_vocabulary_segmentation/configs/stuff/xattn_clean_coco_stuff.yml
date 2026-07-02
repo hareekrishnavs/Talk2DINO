@@ -77,17 +77,6 @@ cpa:
   residual_scale: 0.25
   residual_clip: 0.5
 
-rcc:
-  enabled: false
-  topk: 15
-  residual_clip: 0.50
-  topk_source: base
-  schedule: uniform
-  uniform_scale: 0.50
-  rank_scales: null
-  scale_start: 0.50
-  scale_end: 0.50
-
 cpa_loss:
   enabled: true
   prototype_infonce_weight: 0.20
@@ -123,15 +112,6 @@ evaluate:
   pamr: false
   ccr_enabled: false
   cpa_enabled: true
-  rcc_enabled: false
-  cars_enabled: false
-  vpa_enabled: false
-  vab_enabled: false
-  opc_enabled: false
-  cpa_router_enabled: false
-  usrc_enabled: false
-  dcd_enabled: false
-  vcdd_enabled: false
   template: sub_imagenet_template
   xattn_delta_scale: 0.5
   xattn_logit_alpha: 0.5
