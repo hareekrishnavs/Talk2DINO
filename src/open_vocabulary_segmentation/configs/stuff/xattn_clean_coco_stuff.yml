@@ -87,33 +87,6 @@ cpa_loss:
   diversity_margin: 0.90
   residual_l1_weight: 0.001
 
-cars:
-  enabled: false
-  train_only_cars: true
-  freeze_existing: true
-  hidden_dim: 64
-  dropout: 0.0
-  base_scale: 0.25
-  delta_scale_max: 0.10
-  alpha_min: 0.05
-  alpha_max: 0.50
-  init_zero: true
-  allow_missing_init: false
-  force_fixed_alpha: false
-  fixed_alpha: 0.25
-
-cars_loss:
-  enabled: false
-  alpha_l2_weight: 0.001
-  alpha_center_weight: 0.01
-  alpha_center: 0.25
-  alpha_std_weight: 0.0
-  preserve_weight: 0.01
-  preserve_temperature: 1.0
-
-vpa:
-  enabled: false
-
 extract:
   batch_size: 64
   shard_size: 500
@@ -139,8 +112,6 @@ evaluate:
   pamr: false
   ccr_enabled: false
   cpa_enabled: true
-  cars_enabled: false
-  vpa_enabled: false
   template: sub_imagenet_template
   xattn_delta_scale: 0.5
   xattn_logit_alpha: 0.5

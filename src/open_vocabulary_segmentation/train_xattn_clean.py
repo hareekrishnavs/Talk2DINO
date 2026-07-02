@@ -33,7 +33,6 @@ from class_prototype_alignment import (
     compute_prototype_logits,
     prototype_diversity_loss,
 )
-from cars_cpa import ClassAdaptiveResidualScaler
 from eval_xattn_clean import (
     bridge_class_embeddings,
     build_class_embeddings,
@@ -49,11 +48,6 @@ def parse_args():
     parser.add_argument("--config", required=True)
     parser.add_argument("--train_features", required=True)
     parser.add_argument("--eval_features", required=True)
-    parser.add_argument(
-        "--init_checkpoint",
-        default=None,
-        help="Initialize model weights only; optimizer and epoch state are not resumed.",
-    )
     parser.add_argument("--output", required=True)
     parser.add_argument("--opts", nargs="+", default=None)
     return parser.parse_args()
@@ -130,72 +124,6 @@ def get_cpa_loss_cfg(cfg):
         "residual_l1_weight": 0.001,
     })
     return OmegaConf.merge(defaults, cfg.get("cpa_loss", {}))
-
-
-def get_cars_cfg(cfg):
-    defaults = OmegaConf.create({
-        "enabled": False,
-        "train_only_cars": True,
-        "freeze_existing": True,
-        "hidden_dim": 64,
-        "dropout": 0.0,
-        "base_scale": 0.25,
-        "delta_scale_max": 0.10,
-        "alpha_min": 0.05,
-        "alpha_max": 0.50,
-        "init_zero": True,
-        "allow_missing_init": False,
-        "force_fixed_alpha": False,
-        "fixed_alpha": 0.25,
-    })
-    return OmegaConf.merge(defaults, cfg.get("cars", {}))
-
-
-def get_cars_loss_cfg(cfg):
-    defaults = OmegaConf.create({
-        "enabled": False,
-        "alpha_l2_weight": 0.001,
-        "alpha_center_weight": 0.01,
-        "alpha_center": 0.25,
-        "alpha_std_weight": 0.0,
-        "preserve_weight": 0.01,
-        "preserve_temperature": 1.0,
-    })
-    return OmegaConf.merge(defaults, cfg.get("cars_loss", {}))
-
-
-def cars_constructor_kwargs(cars_cfg, dino_dim):
-    kwargs = OmegaConf.to_container(cars_cfg, resolve=True)
-    for key in ("enabled", "train_only_cars", "freeze_existing"):
-        kwargs.pop(key, None)
-    kwargs["dino_dim"] = int(dino_dim)
-    return kwargs
-
-
-def configure_trainable_modules(frozen, bridge, cpa, cars, cars_cfg):
-    if cars is not None and bool(cars_cfg.train_only_cars):
-        if not bool(cars_cfg.freeze_existing):
-            raise ValueError("cars.train_only_cars=true requires cars.freeze_existing=true")
-        for module in (frozen, bridge, cpa):
-            for parameter in module.parameters():
-                parameter.requires_grad_(False)
-        for parameter in cars.parameters():
-            parameter.requires_grad_(True)
-    elif cars is not None and bool(cars_cfg.freeze_existing):
-        for module in (frozen, bridge, cpa):
-            for parameter in module.parameters():
-                parameter.requires_grad_(False)
-
-    named_trainable_parameters = []
-    for module_name, module in (("bridge", bridge), ("cpa", cpa), ("cars", cars)):
-        if module is None:
-            continue
-        named_trainable_parameters.extend(
-            (f"{module_name}.{name}", parameter)
-            for name, parameter in module.named_parameters()
-            if parameter.requires_grad
-        )
-    return named_trainable_parameters
 
 
 def validate_cpa_semantic_setup(cfg, feature_path, sample):
@@ -296,19 +224,6 @@ def zero_cpa_losses(reference):
         "cpa_proto_pairwise_cos_mean": zero,
         "cpa_proto_pairwise_cos_max": zero,
         "cpa_topk": zero,
-        "loss_cars_alpha_l2": zero,
-        "loss_cars_alpha_center": zero,
-        "loss_cars_alpha_std": zero,
-        "loss_cars_preserve": zero,
-        "cars_alpha_mean": zero,
-        "cars_alpha_min": zero,
-        "cars_alpha_max": zero,
-        "cars_alpha_std": zero,
-        "cars_delta_abs_mean": zero,
-        "cars_delta_abs_max": zero,
-        "cars_changed_fraction": zero,
-        "cars_trainable_params": zero,
-        "cars_enabled": zero,
     }
 
 
@@ -320,8 +235,6 @@ def cpa_auxiliary_losses(
     base_patch_logits,
     loss_cfg,
     contrastive_temperature,
-    cars=None,
-    cars_loss_cfg=None,
 ):
     prototypes = cpa(mapped_text)
     prototype_dense_scores = compute_prototype_logits(
@@ -344,116 +257,13 @@ def cpa_auxiliary_losses(
         temperature=cpa.prototype_temperature,
         aggregation=cpa.prototype_aggregation,
     )
-    teacher_patch_logits, teacher_cpa_stats = apply_topk_prototype_residual(
+    final_patch_logits, cpa_stats = apply_topk_prototype_residual(
         base_patch_logits,
         prototype_patch_logits,
         topk=cpa.topk,
         residual_scale=cpa.residual_scale,
         residual_clip=cpa.residual_clip,
     )
-    if cars is not None:
-        final_patch_logits, alpha, cars_stats = cars(
-            mapped_text,
-            base_patch_logits,
-            prototype_patch_logits,
-            teacher_cpa_stats["cpa_topk_mask"],
-            residual_clip=cpa.residual_clip,
-        )
-        if not getattr(cars, "_parity_checked", False):
-            parity_diff = (
-                final_patch_logits.float() - teacher_patch_logits.float()
-            ).abs().max()
-            if float(parity_diff.detach().cpu()) > 1e-7:
-                raise RuntimeError(
-                    "CARS zero-init CPA-v1 parity failed: "
-                    f"max_abs_diff={float(parity_diff.detach()):.10f}"
-                )
-            print(
-                "CARS zero-init CPA-v1 parity passed: "
-                f"max_abs_diff={float(parity_diff.detach()):.10f}",
-                flush=True,
-            )
-            cars._parity_checked = True
-        applied_residual = cars_stats["cars_scaled_residual"]
-        selected_applied = applied_residual.masked_select(
-            teacher_cpa_stats["cpa_topk_mask"]
-        )
-        cpa_stats = dict(teacher_cpa_stats)
-        cpa_stats["cpa_residual"] = applied_residual
-        cpa_stats["cpa_residual_abs_mean"] = selected_applied.abs().mean().detach()
-        cpa_stats["cpa_residual_abs_max"] = selected_applied.abs().max().detach()
-
-        cars_loss_cfg = cars_loss_cfg or OmegaConf.create({})
-        if bool(cars_loss_cfg.get("enabled", False)):
-            loss_cars_alpha_l2 = (alpha - cars.base_scale).pow(2).mean()
-            loss_cars_alpha_center = (
-                alpha - float(cars_loss_cfg.get("alpha_center", cars.base_scale))
-            ).pow(2).mean()
-            loss_cars_alpha_std = alpha.new_tensor(0.0)
-            preserve_temperature = max(
-                float(cars_loss_cfg.get("preserve_temperature", 1.0)),
-                1e-6,
-            )
-            teacher_prob = F.softmax(
-                teacher_patch_logits.detach() / preserve_temperature,
-                dim=1,
-            )
-            student_log_prob = F.log_softmax(
-                final_patch_logits.float() / preserve_temperature,
-                dim=1,
-            )
-            loss_cars_preserve = F.kl_div(
-                student_log_prob,
-                teacher_prob,
-                reduction="none",
-            ).sum(dim=1).mean()
-        else:
-            loss_cars_alpha_l2 = alpha.new_tensor(0.0)
-            loss_cars_alpha_center = alpha.new_tensor(0.0)
-            loss_cars_alpha_std = alpha.new_tensor(0.0)
-            loss_cars_preserve = alpha.new_tensor(0.0)
-        cars_outputs = {
-            "loss_cars_alpha_l2": loss_cars_alpha_l2,
-            "loss_cars_alpha_center": loss_cars_alpha_center,
-            "loss_cars_alpha_std": loss_cars_alpha_std,
-            "loss_cars_preserve": loss_cars_preserve,
-            "cars_alpha_mean": cars_stats["cars_alpha_mean"],
-            "cars_alpha_min": cars_stats["cars_alpha_min"],
-            "cars_alpha_max": cars_stats["cars_alpha_max"],
-            "cars_alpha_std": cars_stats["cars_alpha_std"],
-            "cars_delta_abs_mean": cars_stats["cars_delta_abs_mean"],
-            "cars_delta_abs_max": cars_stats["cars_delta_abs_max"],
-            "cars_changed_fraction": cars_stats["cars_changed_fraction"],
-            "cars_trainable_params": alpha.new_tensor(float(trainable_count(cars))),
-            "cars_enabled": cars_stats["cars_enabled"],
-        }
-    else:
-        final_patch_logits = teacher_patch_logits
-        cpa_stats = teacher_cpa_stats
-        cars_outputs = {
-            key: base_patch_logits.new_tensor(0.0)
-            for key in (
-                "loss_cars_alpha_l2",
-                "loss_cars_alpha_center",
-                "loss_cars_alpha_std",
-                "loss_cars_preserve",
-                "cars_alpha_mean",
-                "cars_alpha_min",
-                "cars_alpha_max",
-                "cars_alpha_std",
-                "cars_delta_abs_mean",
-                "cars_delta_abs_max",
-                "cars_changed_fraction",
-                "cars_trainable_params",
-                "cars_enabled",
-            )
-        }
-
-    if cars is not None:
-        cars_pairwise_scores = final_patch_logits.max(dim=-1).values
-        loss_proto_infonce = contrastive_loss(
-            cars_pairwise_scores / max(float(contrastive_temperature), 1e-6)
-        )
 
     base = base_patch_logits.float()
     final = final_patch_logits.float()
@@ -482,7 +292,7 @@ def cpa_auxiliary_losses(
         cpa_stats["cpa_topk_mask"]
     )
     loss_residual_l1 = selected_residual.abs().mean()
-    outputs = {
+    return {
         "loss_cpa_proto_infonce": loss_proto_infonce,
         "loss_cpa_preserve": loss_preserve,
         "loss_cpa_diversity": loss_diversity,
@@ -495,8 +305,6 @@ def cpa_auxiliary_losses(
         "cpa_proto_pairwise_cos_max": pair_cos_max,
         "cpa_topk": cpa_stats["cpa_topk"],
     }
-    outputs.update(cars_outputs)
-    return outputs
 
 
 def init_epoch_accumulators():
@@ -521,19 +329,6 @@ def init_epoch_accumulators():
         "cpa_proto_pairwise_cos_mean": 0.0,
         "cpa_proto_pairwise_cos_max": 0.0,
         "cpa_topk": 0.0,
-        "loss_cars_alpha_l2": 0.0,
-        "loss_cars_alpha_center": 0.0,
-        "loss_cars_alpha_std": 0.0,
-        "loss_cars_preserve": 0.0,
-        "cars_alpha_mean": 0.0,
-        "cars_alpha_min": 1.0,
-        "cars_alpha_max": 0.0,
-        "cars_alpha_std": 0.0,
-        "cars_delta_abs_mean": 0.0,
-        "cars_delta_abs_max": 0.0,
-        "cars_changed_fraction": 0.0,
-        "cars_trainable_params": 0.0,
-        "cars_enabled": 0.0,
         "base_norm_mean": 0.0,
         "delta_norm_mean": 0.0,
         "delta_base_ratio_mean": 0.0,
@@ -567,16 +362,6 @@ def update_epoch_accumulators(acc, loss_total, loss_infonce, losses, stats, cpa_
         "cpa_confident_patch_frac",
         "cpa_proto_pairwise_cos_mean",
         "cpa_topk",
-        "loss_cars_alpha_l2",
-        "loss_cars_alpha_center",
-        "loss_cars_alpha_std",
-        "loss_cars_preserve",
-        "cars_alpha_mean",
-        "cars_alpha_std",
-        "cars_delta_abs_mean",
-        "cars_changed_fraction",
-        "cars_trainable_params",
-        "cars_enabled",
     ):
         acc[key] += float(cpa_losses[key].detach().cpu())
     acc["cpa_residual_abs_max"] = max(
@@ -587,19 +372,6 @@ def update_epoch_accumulators(acc, loss_total, loss_infonce, losses, stats, cpa_
         acc["cpa_proto_pairwise_cos_max"],
         float(cpa_losses["cpa_proto_pairwise_cos_max"].detach().cpu()),
     )
-    if float(cpa_losses["cars_enabled"].detach().cpu()) > 0:
-        acc["cars_alpha_min"] = min(
-            acc["cars_alpha_min"],
-            float(cpa_losses["cars_alpha_min"].detach().cpu()),
-        )
-        acc["cars_alpha_max"] = max(
-            acc["cars_alpha_max"],
-            float(cpa_losses["cars_alpha_max"].detach().cpu()),
-        )
-        acc["cars_delta_abs_max"] = max(
-            acc["cars_delta_abs_max"],
-            float(cpa_losses["cars_delta_abs_max"].detach().cpu()),
-        )
     acc["base_norm_mean"] += float(stats["base_norm"].detach().float().mean().cpu())
     acc["delta_norm_mean"] += float(stats["delta_norm"].detach().float().mean().cpu())
     ratio = stats["delta_base_ratio"].detach().float()
@@ -637,16 +409,6 @@ def finalize_epoch_accumulators(acc, count):
         "cpa_confident_patch_frac",
         "cpa_proto_pairwise_cos_mean",
         "cpa_topk",
-        "loss_cars_alpha_l2",
-        "loss_cars_alpha_center",
-        "loss_cars_alpha_std",
-        "loss_cars_preserve",
-        "cars_alpha_mean",
-        "cars_alpha_std",
-        "cars_delta_abs_mean",
-        "cars_changed_fraction",
-        "cars_trainable_params",
-        "cars_enabled",
         "base_norm_mean",
         "delta_norm_mean",
         "delta_base_ratio_mean",
@@ -656,13 +418,10 @@ def finalize_epoch_accumulators(acc, count):
         "data_time",
         "compute_time",
     ]
-    metrics = {
+    return {
         key: (value / count if key in mean_keys else value)
         for key, value in acc.items()
     }
-    if metrics["cars_enabled"] == 0:
-        metrics["cars_alpha_min"] = 0.0
-    return metrics
 
 
 def print_epoch_progress(epoch, epochs, step, total_steps, acc, start_time, lr):
@@ -685,8 +444,6 @@ def print_epoch_progress(epoch, epochs, step, total_steps, acc, start_time, lr):
         f"patch={metrics['patch_preserve_kl']:.4f} "
         f"cpa={metrics['loss_cpa_proto_infonce']:.4f} "
         f"cpa|r|={metrics['cpa_residual_abs_mean']:.4f} "
-        f"cars_a={metrics['cars_alpha_mean']:.3f} "
-        f"cars_p={metrics['loss_cars_preserve']:.4f} "
         f"d/b={metrics['delta_base_ratio_mean']:.3f} "
         f"dmax={metrics['delta_base_ratio_max']:.4f} "
         f"cos={metrics['cosine_base_mapped_mean']:.4f} "
@@ -710,41 +467,7 @@ def projection_trainable_count(model):
     return sum(p.numel() for p in model.proj.parameters() if p.requires_grad)
 
 
-def initialize_model_weights(path, bridge, cpa, cars, device):
-    if path in {None, "", "null", "None"}:
-        return False
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(f"Init checkpoint does not exist: {path}")
-    payload = torch.load(path, map_location="cpu", weights_only=False)
-    bridge_state = payload.get("bridge", payload.get("model"))
-    if bridge_state is None:
-        raise RuntimeError("Init checkpoint has no bridge/model weights")
-    bridge_result = bridge.load_state_dict(bridge_state, strict=False)
-    if cpa is not None:
-        if payload.get("cpa") is None:
-            raise RuntimeError("CARS initialization requires CPA-v1 checkpoint weights")
-        cpa_result = cpa.load_state_dict(payload["cpa"], strict=False)
-    else:
-        cpa_result = None
-    cars_loaded = cars is not None and payload.get("cars") is not None
-    if cars_loaded:
-        cars.load_state_dict(payload["cars"], strict=False)
-    bridge._skip_zero_init_parity_check = True
-    bridge._parity_checked = True
-    print(
-        f"[{timestamp()}] Weight-only initialization loaded: {path} "
-        f"bridge_missing={len(bridge_result.missing_keys)} "
-        f"bridge_unexpected={len(bridge_result.unexpected_keys)} "
-        f"cpa_missing={len(cpa_result.missing_keys) if cpa_result else 0} "
-        f"cpa_unexpected={len(cpa_result.unexpected_keys) if cpa_result else 0} "
-        f"cars_loaded={cars_loaded}; optimizer/epoch state not loaded",
-        flush=True,
-    )
-    return cars_loaded
-
-
-def maybe_auto_resume(out, cfg, bridge, cpa, cars, optimizer, scheduler, scaler, device):
+def maybe_auto_resume(out, cfg, bridge, cpa, optimizer, scheduler, scaler, device):
     auto_resume = bool(cfg.train.get("auto_resume", True))
     resume_path = cfg.train.get("resume", None)
     if resume_path in {"", "null", "None"}:
@@ -769,14 +492,6 @@ def maybe_auto_resume(out, cfg, bridge, cpa, cars, optimizer, scheduler, scaler,
                 "Start from scratch or use a CPA checkpoint."
             )
         cpa.load_state_dict(payload["cpa"])
-    if cars is not None:
-        if payload.get("cars") is None:
-            raise RuntimeError(
-                "CARS enabled but resume checkpoint does not contain CARS weights. "
-                "Use --init_checkpoint for a CPA-v1 checkpoint."
-            )
-        cars.load_state_dict(payload["cars"])
-        cars._parity_checked = True
     bridge._skip_zero_init_parity_check = True
     bridge._parity_checked = True
     if payload.get("optimizer") is not None:
@@ -805,22 +520,8 @@ def maybe_auto_resume(out, cfg, bridge, cpa, cars, optimizer, scheduler, scaler,
 
 
 @torch.no_grad()
-def evaluate_baseline_val_loss(
-    bridge,
-    val_loader,
-    frozen,
-    device,
-    cpa=None,
-    cars=None,
-    cpa_loss_cfg=None,
-    cars_loss_cfg=None,
-    contrastive_temperature=0.07,
-):
+def evaluate_baseline_val_loss(bridge, val_loader, frozen, device):
     bridge.eval()
-    if cpa is not None:
-        cpa.eval()
-    if cars is not None:
-        cars.eval()
     losses = []
     for batch in val_loader:
         text_clip = batch["text_clip"].to(device, non_blocking=True).float()
@@ -828,56 +529,10 @@ def evaluate_baseline_val_loss(
             text_base = frozen._frozen_base_text_to_dino(text_clip).float()
         patches = batch["patch_tokens"].to(device, non_blocking=True).float()
         visual = batch["visual_embed"].to(device, non_blocking=True).float()
-        scores, stats = pairwise_scores(
-            bridge,
-            text_clip,
-            text_base,
-            patches,
-            visual,
-            return_stats=True,
-        )
+        scores = pairwise_scores(bridge, text_clip, text_base, patches, visual)
         loss = contrastive_loss(scores)
-        if cars is not None:
-            cpa_losses = cpa_auxiliary_losses(
-                cpa,
-                stats["mapped_text"],
-                visual,
-                patches,
-                stats["base_patch_logits"],
-                cpa_loss_cfg,
-                contrastive_temperature,
-                cars=cars,
-                cars_loss_cfg=cars_loss_cfg,
-            )
-            loss = (
-                loss
-                + float(cpa_loss_cfg.prototype_infonce_weight)
-                * cpa_losses["loss_cpa_proto_infonce"]
-                + float(cpa_loss_cfg.preserve_weight)
-                * cpa_losses["loss_cpa_preserve"]
-                + float(cpa_loss_cfg.diversity_weight)
-                * cpa_losses["loss_cpa_diversity"]
-                + float(cpa_loss_cfg.residual_l1_weight)
-                * cpa_losses["loss_cpa_residual_l1"]
-            )
-            if bool(cars_loss_cfg.enabled):
-                loss = (
-                    loss
-                    + float(cars_loss_cfg.alpha_l2_weight)
-                    * cpa_losses["loss_cars_alpha_l2"]
-                    + float(cars_loss_cfg.alpha_center_weight)
-                    * cpa_losses["loss_cars_alpha_center"]
-                    + float(cars_loss_cfg.alpha_std_weight)
-                    * cpa_losses["loss_cars_alpha_std"]
-                    + float(cars_loss_cfg.preserve_weight)
-                    * cpa_losses["loss_cars_preserve"]
-                )
         losses.append(float(loss.detach().cpu()))
-    bridge.train(trainable_count(bridge) > 0)
-    if cpa is not None:
-        cpa.train(trainable_count(cpa) > 0)
-    if cars is not None:
-        cars.train()
+    bridge.train()
     if not losses:
         return float("inf")
     return float(torch.tensor(losses).mean())
@@ -1030,64 +685,13 @@ def main():
     safety_cfg = get_safety_cfg(cfg)
     cpa_cfg = get_cpa_cfg(cfg)
     cpa_loss_cfg = get_cpa_loss_cfg(cfg)
-    cars_cfg = get_cars_cfg(cfg)
-    cars_loss_cfg = get_cars_loss_cfg(cfg)
     bridge = CleanXAttnBridge(**OmegaConf.to_container(cfg.bridge, resolve=True)).to(device)
     cpa_kwargs = OmegaConf.to_container(cpa_cfg, resolve=True)
     cpa_kwargs.pop("enabled", None)
-    cpa_version = str(cpa_kwargs.pop("version", "v1"))
-    if cpa_version != "v1":
-        raise ValueError("CARS supports CPA-v1 only")
     cpa = ClassPrototypeAlignmentHead(**cpa_kwargs).to(device) if bool(cpa_cfg.enabled) else None
-    if bool(cars_cfg.enabled) and cpa is None:
-        raise ValueError("cars.enabled=true requires cpa.enabled=true")
-    if bool(cars_cfg.enabled) and bool(cars_cfg.force_fixed_alpha):
-        raise ValueError("cars.force_fixed_alpha is an evaluation-only ablation")
-    if bool(cars_cfg.enabled) and not math.isclose(
-        float(cars_cfg.base_scale),
-        float(cpa_cfg.residual_scale),
-        rel_tol=0.0,
-        abs_tol=1e-12,
-    ):
-        raise ValueError(
-            "CARS zero-init parity requires cars.base_scale == cpa.residual_scale"
-        )
-    if bool(cars_cfg.enabled) and not math.isclose(
-        float(cpa_cfg.residual_scale),
-        0.25,
-        rel_tol=0.0,
-        abs_tol=1e-12,
-    ):
-        raise ValueError("CARS requires the CPA-v1 teacher residual_scale=0.25")
-    if bool(cars_cfg.enabled) and not bool(cpa_loss_cfg.enabled):
-        raise ValueError("CARS training requires cpa_loss.enabled=true")
-    cars = (
-        ClassAdaptiveResidualScaler(
-            **cars_constructor_kwargs(cars_cfg, cfg.bridge.dino_dim)
-        ).to(device)
-        if bool(cars_cfg.enabled)
-        else None
-    )
-    cars_loaded = initialize_model_weights(
-        args.init_checkpoint,
-        bridge,
-        cpa,
-        cars,
-        device,
-    )
-    if cars is not None:
-        cars._parity_checked = cars_loaded or not cars.init_zero
-
-    named_trainable_parameters = configure_trainable_modules(
-        frozen,
-        bridge,
-        cpa,
-        cars,
-        cars_cfg,
-    )
-    trainable_parameters = [parameter for _, parameter in named_trainable_parameters]
-    if not trainable_parameters:
-        raise RuntimeError("No trainable parameters remain after CARS freeze setup")
+    trainable_parameters = list(bridge.parameters())
+    if cpa is not None:
+        trainable_parameters.extend(cpa.parameters())
     optimizer = torch.optim.AdamW(
         trainable_parameters,
         lr=float(cfg.train.lr),
@@ -1102,12 +706,11 @@ def main():
     train_log_path = out / "train_log.jsonl"
 
     print("=" * 78, flush=True)
-    if cars is not None:
-        method_label = f"{METHOD_NAME} + CPA-v1 + CARS"
-    elif cpa is not None:
-        method_label = f"{METHOD_NAME} + Class Prototype Alignment Head"
-    else:
-        method_label = METHOD_NAME
+    method_label = (
+        f"{METHOD_NAME} + Class Prototype Alignment Head"
+        if cpa is not None
+        else METHOD_NAME
+    )
     print(f"[{timestamp()}] Starting {method_label} training", flush=True)
     print("=" * 78, flush=True)
     print(f"Output directory          : {out}", flush=True)
@@ -1127,11 +730,7 @@ def main():
     print(f"  Visual target           : same DINO region-aware feature `{cfg.data.get('features_name', 'disentangled_self_attn')}`", flush=True)
     print("  Base text projection    : frozen original Talk2DINO projection", flush=True)
     print("  Objective               : pairwise BxB InfoNCE over score(text_i, image_j)", flush=True)
-    print(
-        "  Trainable modules       : "
-        + ("CARS only" if cars is not None and bool(cars_cfg.train_only_cars) else "configured modules"),
-        flush=True,
-    )
+    print("  Trainable modules       : XAttnBridge_Clean and CPA only", flush=True)
     print(
         "  Bridge architecture     : "
         f"clip_dim={cfg.bridge.clip_dim}, dino_dim={cfg.bridge.dino_dim}, "
@@ -1175,24 +774,9 @@ def main():
         "Talk2DINO slide-inference parity.",
         flush=True,
     )
-    total_trainable = sum(parameter.numel() for parameter in trainable_parameters)
-    print(f"Trainable parameter count : {total_trainable}", flush=True)
-    print(
-        "Trainable parameter names : "
-        + ", ".join(name for name, _ in named_trainable_parameters),
-        flush=True,
-    )
-    print(f"Bridge trainable params   : {trainable_count(bridge)}", flush=True)
+    print(f"Trainable parameter count : {trainable_count(bridge)}", flush=True)
     print(f"CPA trainable params      : {trainable_count(cpa) if cpa is not None else 0}", flush=True)
-    print(f"CARS trainable params     : {trainable_count(cars) if cars is not None else 0}", flush=True)
-    print(
-        "Frozen state              : "
-        f"CLIP={trainable_count(frozen.clip_model) == 0} "
-        f"DINO={trainable_count(frozen.model) == 0} "
-        f"XAttn={trainable_count(bridge) == 0} "
-        f"CPA={cpa is None or trainable_count(cpa) == 0}",
-        flush=True,
-    )
+    print("CLIP/DINO remain frozen; only XAttnBridge_Clean and CPA are optimized.", flush=True)
     print(f"train_feature_source      : {train_feature_source}", flush=True)
     print(f"train_eval_mode           : {eval_mode}", flush=True)
     if train_feature_source == "baseline_pth_in_memory":
@@ -1248,40 +832,11 @@ def main():
         f"temperature={float(cpa_loss_cfg.temperature):.3f}",
         flush=True,
     )
-    print(
-        "CARS: "
-        f"enabled={cars is not None} "
-        f"train_only_cars={bool(cars_cfg.train_only_cars)} "
-        f"freeze_existing={bool(cars_cfg.freeze_existing)} "
-        f"hidden_dim={int(cars_cfg.hidden_dim)} "
-        f"base_scale={float(cars_cfg.base_scale):.3f} "
-        f"delta_scale_max={float(cars_cfg.delta_scale_max):.3f} "
-        f"alpha_min={float(cars_cfg.alpha_min):.3f} "
-        f"alpha_max={float(cars_cfg.alpha_max):.3f} "
-        f"force_fixed_alpha={bool(cars_cfg.force_fixed_alpha)} "
-        f"trainable_params={trainable_count(cars) if cars is not None else 0}",
-        flush=True,
-    )
-    print(
-        "CARS loss: "
-        f"enabled={bool(cars_loss_cfg.enabled)} "
-        f"alpha_l2_weight={float(cars_loss_cfg.alpha_l2_weight):.4g} "
-        f"alpha_center_weight={float(cars_loss_cfg.alpha_center_weight):.4g} "
-        f"alpha_std_weight={float(cars_loss_cfg.alpha_std_weight):.4g} "
-        f"preserve_weight={float(cars_loss_cfg.preserve_weight):.4g} "
-        f"preserve_temperature={float(cars_loss_cfg.preserve_temperature):.3f}",
-        flush=True,
-    )
-    print(
-        "Inactive methods          : VPA=false PAMR=false Router=false USRC=false "
-        "DCD=false VCDD=false VAB=false OPC=false CCR=false",
-        flush=True,
-    )
     print("CCR: enabled=false", flush=True)
     print("Main InfoNCE: mapped_text vs visual_embed; CPA affects main InfoNCE=false", flush=True)
 
     start_epoch, best_miou, best_epoch = maybe_auto_resume(
-        out, cfg, bridge, cpa, cars, optimizer, scheduler, scaler, device
+        out, cfg, bridge, cpa, optimizer, scheduler, scaler, device
     )
     if eval_mode == "baseline_pth_val_loss" and best_miou == -float("inf"):
         best_miou = float("inf")
@@ -1302,11 +857,9 @@ def main():
         return
     for epoch in range(start_epoch, epochs + 1):
         epoch_start = time.time()
-        bridge.train(trainable_count(bridge) > 0)
+        bridge.train()
         if cpa is not None:
-            cpa.train(trainable_count(cpa) > 0)
-        if cars is not None:
-            cars.train()
+            cpa.train()
         acc = init_epoch_accumulators()
         count = 0
         stop_training = False
@@ -1360,8 +913,6 @@ def main():
                         safety_stats["base_patch_logits"],
                         cpa_loss_cfg,
                         contrastive_temperature,
-                        cars=cars,
-                        cars_loss_cfg=cars_loss_cfg,
                     )
                 else:
                     cpa_losses = zero_cpa_losses(safety_stats["delta"])
@@ -1382,14 +933,6 @@ def main():
                         + float(cpa_loss_cfg.preserve_weight) * cpa_losses["loss_cpa_preserve"]
                         + float(cpa_loss_cfg.diversity_weight) * cpa_losses["loss_cpa_diversity"]
                         + float(cpa_loss_cfg.residual_l1_weight) * cpa_losses["loss_cpa_residual_l1"]
-                    )
-                if cars is not None and bool(cars_loss_cfg.enabled):
-                    loss = (
-                        loss
-                        + float(cars_loss_cfg.alpha_l2_weight) * cpa_losses["loss_cars_alpha_l2"]
-                        + float(cars_loss_cfg.alpha_center_weight) * cpa_losses["loss_cars_alpha_center"]
-                        + float(cars_loss_cfg.alpha_std_weight) * cpa_losses["loss_cars_alpha_std"]
-                        + float(cars_loss_cfg.preserve_weight) * cpa_losses["loss_cars_preserve"]
                     )
             if not torch.isfinite(loss):
                 print("WARNING: loss became NaN/Inf; saving checkpoint_last.pth and stopping cleanly.", flush=True)
@@ -1455,17 +998,6 @@ def main():
             f"cpa_proto_pairwise_cos_mean={epoch_metrics['cpa_proto_pairwise_cos_mean']:.4f} "
             f"cpa_proto_pairwise_cos_max={epoch_metrics['cpa_proto_pairwise_cos_max']:.4f} "
             f"cpa_topk={epoch_metrics['cpa_topk']:.0f} "
-            f"loss_cars_alpha_l2={epoch_metrics['loss_cars_alpha_l2']:.6f} "
-            f"loss_cars_alpha_center={epoch_metrics['loss_cars_alpha_center']:.6f} "
-            f"loss_cars_preserve={epoch_metrics['loss_cars_preserve']:.6f} "
-            f"cars_alpha_mean={epoch_metrics['cars_alpha_mean']:.6f} "
-            f"cars_alpha_min={epoch_metrics['cars_alpha_min']:.6f} "
-            f"cars_alpha_max={epoch_metrics['cars_alpha_max']:.6f} "
-            f"cars_alpha_std={epoch_metrics['cars_alpha_std']:.6f} "
-            f"cars_delta_abs_mean={epoch_metrics['cars_delta_abs_mean']:.6f} "
-            f"cars_delta_abs_max={epoch_metrics['cars_delta_abs_max']:.6f} "
-            f"cars_changed_fraction={epoch_metrics['cars_changed_fraction']:.4f} "
-            f"cars_trainable_params={epoch_metrics['cars_trainable_params']:.0f} "
             f"base_norm={epoch_metrics['base_norm_mean']:.4f} "
             f"delta_norm={epoch_metrics['delta_norm_mean']:.4f} "
             f"delta/base_mean={epoch_metrics['delta_base_ratio_mean']:.4f} "
@@ -1511,19 +1043,7 @@ def main():
         is_eval_epoch = epoch % int(cfg.train.save_every) == 0 or epoch == epochs
         if is_eval_epoch:
             if eval_mode == "baseline_pth_val_loss":
-                val_loss = evaluate_baseline_val_loss(
-                    bridge,
-                    val_loader,
-                    frozen,
-                    device,
-                    cpa=cpa,
-                    cars=cars,
-                    cpa_loss_cfg=cpa_loss_cfg,
-                    cars_loss_cfg=cars_loss_cfg,
-                    contrastive_temperature=float(
-                        cfg.train.get("contrastive_temperature", 0.07)
-                    ),
-                )
+                val_loss = evaluate_baseline_val_loss(bridge, val_loader, frozen, device)
                 print(
                     f"[{timestamp()}] Epoch {epoch:03d}/{epochs:03d} baseline val contrastive loss={val_loss:.6f}",
                     flush=True,
@@ -1595,8 +1115,6 @@ def main():
             "xattn_safety": OmegaConf.to_container(safety_cfg, resolve=True),
             "cpa_config": OmegaConf.to_container(cpa_cfg, resolve=True),
             "cpa_loss_config": OmegaConf.to_container(cpa_loss_cfg, resolve=True),
-            "cars_config": OmegaConf.to_container(cars_cfg, resolve=True),
-            "cars_loss_config": OmegaConf.to_container(cars_loss_cfg, resolve=True),
             "bridge_base_guidance": {
                 "base_guided_attention": bool(cfg.bridge.get("base_guided_attention", True)),
                 "base_guidance_beta": float(cfg.bridge.get("base_guidance_beta", 1.0)),
@@ -1618,21 +1136,6 @@ def main():
             "avg_xattn_step_time_sec": epoch_metrics["compute_time"],
             "epoch_it_s": epoch_it_s,
         }
-        for key in (
-            "loss_cars_alpha_l2",
-            "loss_cars_alpha_center",
-            "loss_cars_alpha_std",
-            "loss_cars_preserve",
-            "cars_alpha_mean",
-            "cars_alpha_min",
-            "cars_alpha_max",
-            "cars_alpha_std",
-            "cars_delta_abs_mean",
-            "cars_delta_abs_max",
-            "cars_changed_fraction",
-            "cars_trainable_params",
-        ):
-            checkpoint_metrics[key] = epoch_metrics[key]
         save_checkpoint_clean(
             out / "checkpoint_last.pth",
             epoch,
@@ -1644,7 +1147,6 @@ def main():
             checkpoint_metrics,
             scaler,
             cpa=cpa,
-            cars=cars,
         )
         last_checkpoint = out / "checkpoint_last.pth"
         best_checkpoint = out / "checkpoint_best.pth"
@@ -1701,21 +1203,6 @@ def main():
             "avg_xattn_step_time_sec": epoch_metrics["compute_time"],
             "epoch_it_s": epoch_it_s,
         }
-        for key in (
-            "loss_cars_alpha_l2",
-            "loss_cars_alpha_center",
-            "loss_cars_alpha_std",
-            "loss_cars_preserve",
-            "cars_alpha_mean",
-            "cars_alpha_min",
-            "cars_alpha_max",
-            "cars_alpha_std",
-            "cars_delta_abs_mean",
-            "cars_delta_abs_max",
-            "cars_changed_fraction",
-            "cars_trainable_params",
-        ):
-            log_row[key] = epoch_metrics[key]
         with open(train_log_path, "a") as f:
             f.write(json.dumps(log_row) + "\n")
         if is_best:
@@ -1730,7 +1217,6 @@ def main():
                 checkpoint_metrics,
                 scaler,
                 cpa=cpa,
-                cars=cars,
             )
             print(
                 f"[{timestamp()}] Saved best checkpoint: {best_checkpoint} "
@@ -1750,7 +1236,6 @@ def main():
                 checkpoint_metrics,
                 scaler,
                 cpa=cpa,
-                cars=cars,
             )
             saved_epoch_checkpoint = True
             print(

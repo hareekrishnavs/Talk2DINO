@@ -25,7 +25,6 @@ from class_prototype_alignment import (
     apply_topk_prototype_residual,
     compute_prototype_logits,
 )
-from cars_cpa import ClassAdaptiveResidualScaler
 
 
 def parse_args():
@@ -135,47 +134,10 @@ def load_cpa_from_payload(cfg, payload, device, enabled):
         raise RuntimeError("CPA enabled but checkpoint does not contain CPA weights.")
     kwargs = OmegaConf.to_container(cfg.cpa, resolve=True)
     kwargs.pop("enabled", None)
-    version = str(kwargs.pop("version", "v1"))
-    if version != "v1":
-        raise ValueError("CARS evaluation supports CPA-v1 only")
     cpa = ClassPrototypeAlignmentHead(**kwargs).to(device)
     cpa.load_state_dict(payload["cpa"])
     cpa.eval()
     return cpa
-
-
-def load_cars_from_payload(cfg, payload, device, enabled):
-    has_weights = payload.get("cars") is not None
-    print(
-        f"CARS enabled={bool(enabled)} checkpoint contains CARS weights "
-        f"{'yes' if has_weights else 'no'}",
-        flush=True,
-    )
-    if not enabled:
-        return None
-    kwargs = OmegaConf.to_container(cfg.cars, resolve=True)
-    for key in ("enabled", "train_only_cars", "freeze_existing"):
-        kwargs.pop(key, None)
-    kwargs["dino_dim"] = int(cfg.bridge.dino_dim)
-    cars = ClassAdaptiveResidualScaler(**kwargs).to(device)
-    if cars.force_fixed_alpha:
-        cars.mode = "fixed_alpha"
-    elif has_weights:
-        cars.load_state_dict(payload["cars"])
-        cars.mode = "learned"
-    elif cars.allow_missing_init:
-        if not cars.init_zero:
-            raise ValueError("cars.allow_missing_init=true requires cars.init_zero=true")
-        cars.mode = "zero_init_missing"
-    else:
-        raise RuntimeError(
-            "evaluate.cars_enabled=true but checkpoint does not contain CARS weights; "
-            "set cars.allow_missing_init=true only for a zero-init parity check"
-        )
-    cars._parity_checked = True
-    cars.eval()
-    print(f"cars_mode={cars.mode}", flush=True)
-    return cars
 
 
 def fuse_xattn_logits(
@@ -226,7 +188,6 @@ class CleanOfficialEvalModel(nn.Module):
         class_clip,
         class_base,
         cpa=None,
-        cars=None,
         xattn_delta_scale=0.5,
         xattn_logit_alpha=0.5,
         xattn_uncertainty_gate_enabled=True,
@@ -237,7 +198,6 @@ class CleanOfficialEvalModel(nn.Module):
         self.frozen = frozen
         self.bridge = bridge
         self.cpa = cpa
-        self.cars = cars
         self.register_buffer("class_clip", class_clip.float())
         self.register_buffer("class_base", class_base.float())
         self.xattn_delta_scale = float(xattn_delta_scale)
@@ -252,18 +212,6 @@ class CleanOfficialEvalModel(nn.Module):
         }
         self._cpa_residual_abs_max = 0.0
         self._cpa_count = 0
-        self._cars_sum = {
-            "cars_alpha_mean": 0.0,
-            "cars_alpha_std": 0.0,
-            "cars_delta_abs_mean": 0.0,
-            "cars_changed_fraction": 0.0,
-        }
-        self._cars_alpha_min = float("inf")
-        self._cars_alpha_max = float("-inf")
-        self._cars_delta_abs_max = 0.0
-        self._cars_zero_init_max_abs_diff = 0.0
-        self._cars_fixed_alpha025_max_abs_diff = 0.0
-        self._cars_count = 0
 
     def cpa_summary(self):
         count = max(1, self._cpa_count)
@@ -271,26 +219,6 @@ class CleanOfficialEvalModel(nn.Module):
             "cpa_residual_abs_mean": self._cpa_sum["cpa_residual_abs_mean"] / count,
             "cpa_residual_abs_max": self._cpa_residual_abs_max,
             "cpa_modified_fraction": self._cpa_sum["cpa_modified_fraction"] / count,
-        }
-
-    def cars_summary(self):
-        if self.cars is None:
-            return None
-        count = max(1, self._cars_count)
-        return {
-            "cars_alpha_mean": self._cars_sum["cars_alpha_mean"] / count,
-            "cars_alpha_min": 0.0 if self._cars_count == 0 else self._cars_alpha_min,
-            "cars_alpha_max": 0.0 if self._cars_count == 0 else self._cars_alpha_max,
-            "cars_alpha_std": self._cars_sum["cars_alpha_std"] / count,
-            "cars_delta_abs_mean": self._cars_sum["cars_delta_abs_mean"] / count,
-            "cars_delta_abs_max": self._cars_delta_abs_max,
-            "cars_changed_fraction": self._cars_sum["cars_changed_fraction"] / count,
-            "cars_enabled": True,
-            "cars_mode": self.cars.mode,
-            "cars_zero_init_max_abs_diff": self._cars_zero_init_max_abs_diff,
-            "cars_fixed_alpha025_max_abs_diff": (
-                self._cars_fixed_alpha025_max_abs_diff
-            ),
         }
 
     def __getattr__(self, name):
@@ -385,72 +313,13 @@ class CleanOfficialEvalModel(nn.Module):
                 temperature=self.cpa.prototype_temperature,
                 aggregation=self.cpa.prototype_aggregation,
             ).reshape_as(base_simmap)
-            fixed_cpa_simmap, cpa_stats = apply_topk_prototype_residual(
+            simmap, cpa_stats = apply_topk_prototype_residual(
                 base_simmap,
                 prototype_logits,
                 topk=self.cpa.topk,
                 residual_scale=self.cpa.residual_scale,
                 residual_clip=self.cpa.residual_clip,
             )
-            if self.cars is not None:
-                dense_shape = base_simmap.shape
-                dense_topk_mask = cpa_stats["cpa_topk_mask"].flatten(2)
-                dense_simmap, _, cars_stats = self.cars(
-                    mapped_text,
-                    base_simmap.flatten(2),
-                    prototype_logits.flatten(2),
-                    dense_topk_mask,
-                    residual_clip=self.cpa.residual_clip,
-                )
-                parity_diff = (
-                    dense_simmap.float() - fixed_cpa_simmap.flatten(2).float()
-                ).abs().max()
-                if self.cars.mode == "zero_init_missing":
-                    self._cars_zero_init_max_abs_diff = max(
-                        self._cars_zero_init_max_abs_diff,
-                        float(parity_diff.detach().cpu()),
-                    )
-                    if float(parity_diff.detach().cpu()) > 1e-7:
-                        raise RuntimeError(
-                            "CARS zero-init missing-weight parity failed: "
-                            f"max_abs_diff={float(parity_diff.detach()):.10f}"
-                        )
-                if (
-                    self.cars.mode == "fixed_alpha"
-                    and abs(self.cars.fixed_alpha - self.cpa.residual_scale) <= 1e-12
-                ):
-                    self._cars_fixed_alpha025_max_abs_diff = max(
-                        self._cars_fixed_alpha025_max_abs_diff,
-                        float(parity_diff.detach().cpu()),
-                    )
-                    if float(parity_diff.detach().cpu()) > 1e-7:
-                        raise RuntimeError(
-                            "CARS fixed-alpha CPA-v1 parity failed: "
-                            f"max_abs_diff={float(parity_diff.detach()):.10f}"
-                        )
-                simmap = dense_simmap.reshape(dense_shape)
-                selected_residual = cars_stats["cars_scaled_residual"].masked_select(
-                    dense_topk_mask
-                )
-                cpa_stats["cpa_residual_abs_mean"] = selected_residual.abs().mean()
-                cpa_stats["cpa_residual_abs_max"] = selected_residual.abs().max()
-                for key in self._cars_sum:
-                    self._cars_sum[key] += float(cars_stats[key].detach().cpu())
-                self._cars_alpha_min = min(
-                    self._cars_alpha_min,
-                    float(cars_stats["cars_alpha_min"].detach().cpu()),
-                )
-                self._cars_alpha_max = max(
-                    self._cars_alpha_max,
-                    float(cars_stats["cars_alpha_max"].detach().cpu()),
-                )
-                self._cars_delta_abs_max = max(
-                    self._cars_delta_abs_max,
-                    float(cars_stats["cars_delta_abs_max"].detach().cpu()),
-                )
-                self._cars_count += 1
-            else:
-                simmap = fixed_cpa_simmap
             self._cpa_sum["cpa_residual_abs_mean"] += float(
                 cpa_stats["cpa_residual_abs_mean"].detach().cpu()
             )
@@ -510,55 +379,15 @@ def official_parity_eval(args, cfg, device):
     )
     bridge, payload = load_bridge_from_checkpoint(args.checkpoint, cfg, device)
     cpa_enabled = bool(cfg.evaluate.get("cpa_enabled", cfg.cpa.get("enabled", False)))
-    evaluate_cars_enabled = bool(cfg.evaluate.get("cars_enabled", False))
-    config_cars_enabled = bool(cfg.get("cars", {}).get("enabled", False))
-    if evaluate_cars_enabled and not config_cars_enabled:
-        raise ValueError(
-            "evaluate.cars_enabled=true requires cars.enabled=true"
-        )
-    cars_enabled = evaluate_cars_enabled and config_cars_enabled
-    if cars_enabled and not cpa_enabled:
-        raise ValueError("CARS evaluation requires CPA-v1 to be enabled")
     if cpa_enabled and bool(cfg.evaluate.pamr):
         raise ValueError("CPA evaluation requires evaluate.pamr=false")
     cpa = load_cpa_from_payload(cfg, payload, device, cpa_enabled)
-    cars = load_cars_from_payload(cfg, payload, device, cars_enabled)
-    if cars is not None and abs(cars.base_scale - cpa.residual_scale) > 1e-12:
-        raise ValueError(
-            "CARS parity requires cars.base_scale == cpa.residual_scale"
-        )
-    if cars is not None and abs(cpa.residual_scale - 0.25) > 1e-12:
-        raise ValueError("CARS requires the CPA-v1 residual_scale=0.25 teacher")
-    print(
-        "Method: "
-        + (
-            f"{METHOD_NAME} + CPA-v1 + CARS"
-            if cars is not None
-            else f"{METHOD_NAME} + CPA-v1"
-        ),
-        flush=True,
-    )
-    if cars is not None:
-        print(
-            "CARS config: "
-            f"hidden_dim={int(cfg.cars.hidden_dim)} "
-            f"base_scale={cars.base_scale:.3f} "
-            f"delta_scale_max={cars.delta_scale_max:.3f} "
-            f"alpha_min={cars.alpha_min:.3f} "
-            f"alpha_max={cars.alpha_max:.3f} "
-            f"cars_mode={cars.mode} "
-            f"fixed_alpha={cars.fixed_alpha:.3f} "
-            "VPA=false PAMR=false Router=false USRC=false DCD=false "
-            "VCDD=false VAB=false OPC=false CCR=false",
-            flush=True,
-        )
     wrapped = CleanOfficialEvalModel(
         frozen,
         bridge,
         class_clip,
         class_base,
         cpa=cpa,
-        cars=cars,
         xattn_delta_scale=float(cfg.evaluate.get("xattn_delta_scale", 0.5)),
         xattn_logit_alpha=float(cfg.evaluate.get("xattn_logit_alpha", 0.5)),
         xattn_uncertainty_gate_enabled=bool(
@@ -599,8 +428,7 @@ def official_parity_eval(args, cfg, device):
     metric = dataset.evaluate(results, logger=None)
     miou = float(metric["mIoU"] * 100)
     cpa_summary = wrapped.cpa_summary() if cpa is not None else None
-    cars_summary = wrapped.cars_summary()
-    return miou, payload, cpa_summary, cars_summary
+    return miou, payload, cpa_summary
 
 
 def init_eval_logger(cfg, out):
@@ -616,16 +444,10 @@ def init_eval_logger(cfg, out):
 def main():
     args = parse_args()
     cfg = load_clean_config(args.config, args.opts)
-    if bool(cfg.evaluate.get("vpa_enabled", False)) or bool(
-        cfg.get("vpa", {}).get("enabled", False)
-    ):
-        raise ValueError("VPA is not part of the clean CPA-v1+CARS evaluation path")
     if bool(cfg.evaluate.get("ccr_enabled", False)) or bool(cfg.get("ccr", {}).get("enabled", False)):
         raise ValueError("CCR is disabled for CPA evaluation")
     if bool(cfg.evaluate.get("cpa_enabled", cfg.cpa.get("enabled", False))) and args.cached_fast_eval:
         raise ValueError("CPA official semantic evaluation does not use cached patch-token inputs")
-    if bool(cfg.evaluate.get("cars_enabled", False)) and args.cached_fast_eval:
-        raise ValueError("CARS requires official CPA-v1 dense evaluation")
     if args.cached_fast_eval and not args.features:
         raise ValueError("--features is required when --cached_fast_eval is used")
     if dist.is_available() and not dist.is_initialized():
@@ -638,7 +460,7 @@ def main():
     if not args.cached_fast_eval:
         print("Eval mode: official Talk2DINO slide-inference parity", flush=True)
         print("Cached eval features are not used for prediction in this mode.", flush=True)
-        miou, payload, cpa_summary, cars_summary = official_parity_eval(args, cfg, device)
+        miou, payload, cpa_summary = official_parity_eval(args, cfg, device)
         print("=" * 64, flush=True)
         print("EVALUATION RESULTS", flush=True)
         print("=" * 64, flush=True)
@@ -646,8 +468,6 @@ def main():
         print(f"coco_stuff mIoU      : {miou:.2f}%", flush=True)
         print(f"PAMR enabled         : {bool(cfg.evaluate.pamr)}", flush=True)
         print("CCR enabled          : false", flush=True)
-        print(f"CARS enabled         : {cars_summary is not None}", flush=True)
-        print("VPA enabled          : false", flush=True)
         if cpa_summary is not None:
             print(
                 "CPA eval stats        : "
@@ -659,23 +479,6 @@ def main():
                 f"mean_residual={cpa_summary['cpa_residual_abs_mean']:.6f} "
                 f"max_residual={cpa_summary['cpa_residual_abs_max']:.6f} "
                 f"modified_fraction={cpa_summary['cpa_modified_fraction']:.4f}",
-                flush=True,
-            )
-        if cars_summary is not None:
-            print(
-                "CARS eval stats       : "
-                f"cars_alpha_mean={cars_summary['cars_alpha_mean']:.6f} "
-                f"cars_alpha_min={cars_summary['cars_alpha_min']:.6f} "
-                f"cars_alpha_max={cars_summary['cars_alpha_max']:.6f} "
-                f"cars_alpha_std={cars_summary['cars_alpha_std']:.6f} "
-                f"cars_delta_abs_mean={cars_summary['cars_delta_abs_mean']:.6f} "
-                f"cars_delta_abs_max={cars_summary['cars_delta_abs_max']:.6f} "
-                f"cars_changed_fraction={cars_summary['cars_changed_fraction']:.4f} "
-                f"cars_mode={cars_summary['cars_mode']} "
-                "cars_zero_init_max_abs_diff="
-                f"{cars_summary['cars_zero_init_max_abs_diff']:.10f} "
-                "cars_fixed_alpha025_max_abs_diff="
-                f"{cars_summary['cars_fixed_alpha025_max_abs_diff']:.10f}",
                 flush=True,
             )
         with open(out / "summary.json", "w") as f:
@@ -690,9 +493,6 @@ def main():
                 "coco_stuff_miou": miou,
                 "cpa_enabled": cpa_summary is not None,
                 "cpa_stats": cpa_summary,
-                "cars_enabled": cars_summary is not None,
-                "cars_stats": cars_summary,
-                "vpa_enabled": False,
             }, f, indent=2)
         return
 
