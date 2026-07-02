@@ -67,7 +67,6 @@ ccr:
 
 cpa:
   enabled: true
-  version: v1
   num_prototypes: 4
   hidden_dim: 256
   prototype_scale: 0.10
@@ -87,28 +86,6 @@ cpa_loss:
   diversity_weight: 0.001
   diversity_margin: 0.90
   residual_l1_weight: 0.001
-
-opc:
-  enabled: false
-  train_only_opc: true
-  freeze_existing: true
-  hidden_dim: 64
-  dropout: 0.0
-  region_temperature: 0.07
-  bias_scale: 0.20
-  bias_clip: 0.35
-  init_zero: true
-  topk_stats: 3
-
-opc_loss:
-  enabled: false
-  rank_weight: 0.02
-  margin: 0.10
-  top_k_pos: 3
-  top_k_neg: 30
-  bias_l2_weight: 0.001
-  preserve_weight: 0.03
-  temperature: 1.0
 
 extract:
   batch_size: 64
@@ -135,7 +112,6 @@ evaluate:
   pamr: false
   ccr_enabled: false
   cpa_enabled: true
-  opc_enabled: false
   template: sub_imagenet_template
   xattn_delta_scale: 0.5
   xattn_logit_alpha: 0.5

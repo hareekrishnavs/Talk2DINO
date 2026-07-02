@@ -4,23 +4,10 @@ method_name: Talk2DINO_XAttnBridge_Clean
 
 evaluate:
   pamr: false
-  opc_enabled: false
   template: sub_imagenet_template
   task:
     - coco_stuff
   coco_stuff: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/stuff.py
-
-opc:
-  enabled: false
-  train_only_opc: true
-  freeze_existing: true
-  hidden_dim: 64
-  dropout: 0.0
-  region_temperature: 0.07
-  bias_scale: 0.20
-  bias_clip: 0.35
-  init_zero: true
-  topk_stats: 3
 
 postprocess:
   mode: none
