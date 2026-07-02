@@ -25,6 +25,7 @@ from class_prototype_alignment import (
     apply_topk_prototype_residual,
     compute_prototype_logits,
 )
+from visual_prototype_alignment import VisualPrototypeAlignment
 
 
 def parse_args():
@@ -134,10 +135,27 @@ def load_cpa_from_payload(cfg, payload, device, enabled):
         raise RuntimeError("CPA enabled but checkpoint does not contain CPA weights.")
     kwargs = OmegaConf.to_container(cfg.cpa, resolve=True)
     kwargs.pop("enabled", None)
+    version = str(kwargs.pop("version", "v1"))
+    if version != "v1":
+        raise ValueError("Only CPA-v1 is supported in this evaluation path")
     cpa = ClassPrototypeAlignmentHead(**kwargs).to(device)
     cpa.load_state_dict(payload["cpa"])
     cpa.eval()
     return cpa
+
+
+def build_vpa_from_config(cfg, device, enabled):
+    if not enabled:
+        return None
+    if cfg.get("vpa", None) is None:
+        raise ValueError("evaluate.vpa_enabled=true requires a vpa config section")
+    kwargs = OmegaConf.to_container(cfg.vpa, resolve=True)
+    kwargs.pop("enabled", None)
+    vpa = VisualPrototypeAlignment(**kwargs).to(device)
+    if any(parameter.requires_grad for parameter in vpa.parameters()):
+        raise RuntimeError("Eval-only VPA must not contain trainable parameters")
+    vpa.eval()
+    return vpa
 
 
 def fuse_xattn_logits(
@@ -188,6 +206,8 @@ class CleanOfficialEvalModel(nn.Module):
         class_clip,
         class_base,
         cpa=None,
+        vpa=None,
+        class_names=None,
         xattn_delta_scale=0.5,
         xattn_logit_alpha=0.5,
         xattn_uncertainty_gate_enabled=True,
@@ -198,6 +218,8 @@ class CleanOfficialEvalModel(nn.Module):
         self.frozen = frozen
         self.bridge = bridge
         self.cpa = cpa
+        self.vpa = vpa
+        self.class_names = list(class_names) if class_names is not None else None
         self.register_buffer("class_clip", class_clip.float())
         self.register_buffer("class_base", class_base.float())
         self.xattn_delta_scale = float(xattn_delta_scale)
@@ -206,12 +228,39 @@ class CleanOfficialEvalModel(nn.Module):
         self.xattn_margin_gate_enabled = bool(xattn_margin_gate_enabled)
         self.xattn_margin_threshold = float(xattn_margin_threshold)
         self._logged_xattn_eval_path = False
+        self._logged_vpa_input = False
         self._cpa_sum = {
             "cpa_residual_abs_mean": 0.0,
             "cpa_modified_fraction": 0.0,
         }
         self._cpa_residual_abs_max = 0.0
         self._cpa_count = 0
+        self._vpa_sum = {
+            "vpa_called_images": 0.0,
+            "vpa_valid_classes_mean": 0.0,
+            "vpa_class_score_mean": 0.0,
+            "vpa_correction_abs_mean": 0.0,
+            "vpa_correction_negative_fraction": 0.0,
+            "vpa_changed_fraction": 0.0,
+            "vpa_no_valid_prototype_images": 0.0,
+            "vpa_skip_low_prob_total": 0.0,
+            "vpa_skip_not_topk_total": 0.0,
+            "vpa_skip_too_few_pixels_total": 0.0,
+            "vpa_skip_bad_prototype_total": 0.0,
+        }
+        self._vpa_valid_classes_min = float("inf")
+        self._vpa_valid_classes_max = 0.0
+        self._vpa_seed_pixels_min = float("inf")
+        self._vpa_seed_pixels_max = 0.0
+        self._vpa_class_score_max = float("-inf")
+        self._vpa_seed_score_min = float("inf")
+        self._vpa_seed_score_max = float("-inf")
+        self._vpa_valid_classes_total = 0.0
+        self._vpa_seed_pixels_total = 0.0
+        self._vpa_seed_score_total = 0.0
+        self._vpa_correction_abs_max = 0.0
+        self._vpa_lambda_zero_max_abs_diff = 0.0
+        self._vpa_count = 0
 
     def cpa_summary(self):
         count = max(1, self._cpa_count)
@@ -220,6 +269,68 @@ class CleanOfficialEvalModel(nn.Module):
             "cpa_residual_abs_max": self._cpa_residual_abs_max,
             "cpa_modified_fraction": self._cpa_sum["cpa_modified_fraction"] / count,
         }
+
+    def vpa_summary(self):
+        if self.vpa is None:
+            return None
+        count = max(1, self._vpa_count)
+        total_keys = {
+            "vpa_called_images",
+            "vpa_no_valid_prototype_images",
+            "vpa_skip_low_prob_total",
+            "vpa_skip_not_topk_total",
+            "vpa_skip_too_few_pixels_total",
+            "vpa_skip_bad_prototype_total",
+        }
+        summary = {
+            key: (value if key in total_keys else value / count)
+            for key, value in self._vpa_sum.items()
+        }
+        summary["vpa_valid_classes_min"] = (
+            0.0 if self._vpa_count == 0 else self._vpa_valid_classes_min
+        )
+        summary["vpa_valid_classes_max"] = self._vpa_valid_classes_max
+        summary["vpa_seed_pixels_min"] = (
+            0.0
+            if self._vpa_valid_classes_total == 0
+            else self._vpa_seed_pixels_min
+        )
+        summary["vpa_seed_pixels_max"] = self._vpa_seed_pixels_max
+        summary["vpa_seed_pixels_mean"] = (
+            self._vpa_seed_pixels_total / self._vpa_valid_classes_total
+            if self._vpa_valid_classes_total > 0
+            else 0.0
+        )
+        summary["vpa_class_score_max"] = (
+            0.0 if self._vpa_count == 0 else self._vpa_class_score_max
+        )
+        summary["vpa_seed_score_min"] = (
+            0.0
+            if self._vpa_seed_pixels_total == 0
+            else self._vpa_seed_score_min
+        )
+        summary["vpa_seed_score_max"] = (
+            0.0
+            if self._vpa_seed_pixels_total == 0
+            else self._vpa_seed_score_max
+        )
+        summary["vpa_seed_score_mean"] = (
+            self._vpa_seed_score_total / self._vpa_seed_pixels_total
+            if self._vpa_seed_pixels_total > 0
+            else 0.0
+        )
+        summary["vpa_correction_abs_max"] = self._vpa_correction_abs_max
+        summary["vpa_lambda_zero_max_abs_diff"] = (
+            self._vpa_lambda_zero_max_abs_diff
+        )
+        summary["vpa_input_source"] = "cpa" if self.cpa is not None else "base"
+        summary["vpa_positive_only"] = self.vpa.positive_only
+        summary["vpa_correction_mode"] = self.vpa.correction_mode
+        summary["vpa_seed_selection"] = self.vpa.seed_selection
+        summary["vpa_use_min_seed_prob"] = self.vpa.use_min_seed_prob
+        summary["vpa_require_patch_topk"] = self.vpa.require_patch_topk
+        summary["vpa_use_margin_filter"] = self.vpa.use_margin_filter
+        return summary
 
     def __getattr__(self, name):
         try:
@@ -283,6 +394,7 @@ class CleanOfficialEvalModel(nn.Module):
                 "raw_patch_tokens_as_xattn_kv=false, "
                 f"class_base={tuple(self.class_base.shape)}, "
                 f"mapped_text={tuple(mapped_text.shape)}, "
+                f"vpa_enabled={self.vpa is not None}, "
                 "base_guided_attention="
                 f"{bool(getattr(self.bridge, 'base_guided_attention', False))}, "
                 f"beta={float(getattr(self.bridge, 'base_guidance_beta', 0.0)):.3f}, "
@@ -304,9 +416,9 @@ class CleanOfficialEvalModel(nn.Module):
             if self.xattn_margin_gate_enabled
             else None
         )
+        spatial_features = image_feat.flatten(2).transpose(1, 2)
         if self.cpa is not None:
             prototypes = self.cpa(mapped_text)
-            spatial_features = image_feat.flatten(2).transpose(1, 2)
             prototype_logits = compute_prototype_logits(
                 spatial_features,
                 prototypes,
@@ -331,6 +443,8 @@ class CleanOfficialEvalModel(nn.Module):
                 float(cpa_stats["cpa_residual_abs_max"].detach().cpu()),
             )
             self._cpa_count += 1
+        elif self.vpa is not None:
+            simmap = base_simmap
         else:
             simmap = fuse_xattn_logits(
                 base_simmap,
@@ -339,6 +453,94 @@ class CleanOfficialEvalModel(nn.Module):
                 uncertainty_gate=self.xattn_uncertainty_gate_enabled,
                 margin_threshold=margin_threshold,
             )
+        if self.vpa is not None:
+            dense_shape = simmap.shape
+            dense_vpa_input = simmap.flatten(2)
+            if not self._logged_vpa_input:
+                from utils import get_logger
+
+                get_logger().info(
+                    "VPA input: "
+                    f"vpa_input_source={'cpa' if self.cpa is not None else 'base'} "
+                    f"vpa_input_shape={tuple(dense_vpa_input.shape)} "
+                    f"vpa_patch_feature_shape={tuple(spatial_features.shape)}"
+                )
+                self._logged_vpa_input = True
+            vpa_output, vpa_stats = self.vpa(
+                dense_vpa_input,
+                spatial_features,
+                class_names=self.class_names,
+            )
+            if self.vpa.fusion_lambda == 0.0:
+                lambda_zero_max_abs_diff = (
+                    vpa_output.float() - dense_vpa_input.float()
+                ).abs().max()
+                vpa_stats["vpa_lambda_zero_max_abs_diff"] = (
+                    lambda_zero_max_abs_diff.detach()
+                )
+                if float(lambda_zero_max_abs_diff.detach().cpu()) > 1e-7:
+                    raise RuntimeError(
+                        "VPA lambda-zero invariant failed at the official eval "
+                        "boundary: max_abs_diff="
+                        f"{float(lambda_zero_max_abs_diff):.10f}"
+                    )
+            simmap = vpa_output.reshape(dense_shape)
+            for key in self._vpa_sum:
+                self._vpa_sum[key] += float(vpa_stats[key].detach().cpu())
+            called_images = float(vpa_stats["vpa_called_images"].detach().cpu())
+            valid_classes = (
+                float(vpa_stats["vpa_valid_classes_mean"].detach().cpu())
+                * called_images
+            )
+            seed_pixels = (
+                float(vpa_stats["vpa_seed_pixels_mean"].detach().cpu())
+                * valid_classes
+            )
+            self._vpa_valid_classes_total += valid_classes
+            self._vpa_seed_pixels_total += seed_pixels
+            self._vpa_seed_score_total += (
+                float(vpa_stats["vpa_seed_score_mean"].detach().cpu())
+                * seed_pixels
+            )
+            self._vpa_valid_classes_min = min(
+                self._vpa_valid_classes_min,
+                float(vpa_stats["vpa_valid_classes_min"].detach().cpu()),
+            )
+            self._vpa_valid_classes_max = max(
+                self._vpa_valid_classes_max,
+                float(vpa_stats["vpa_valid_classes_max"].detach().cpu()),
+            )
+            if valid_classes > 0:
+                self._vpa_seed_pixels_min = min(
+                    self._vpa_seed_pixels_min,
+                    float(vpa_stats["vpa_seed_pixels_min"].detach().cpu()),
+                )
+                self._vpa_seed_pixels_max = max(
+                    self._vpa_seed_pixels_max,
+                    float(vpa_stats["vpa_seed_pixels_max"].detach().cpu()),
+                )
+            self._vpa_class_score_max = max(
+                self._vpa_class_score_max,
+                float(vpa_stats["vpa_class_score_max"].detach().cpu()),
+            )
+            if seed_pixels > 0:
+                self._vpa_seed_score_min = min(
+                    self._vpa_seed_score_min,
+                    float(vpa_stats["vpa_seed_score_min"].detach().cpu()),
+                )
+                self._vpa_seed_score_max = max(
+                    self._vpa_seed_score_max,
+                    float(vpa_stats["vpa_seed_score_max"].detach().cpu()),
+                )
+            self._vpa_correction_abs_max = max(
+                self._vpa_correction_abs_max,
+                float(vpa_stats["vpa_correction_abs_max"].detach().cpu()),
+            )
+            self._vpa_lambda_zero_max_abs_diff = max(
+                self._vpa_lambda_zero_max_abs_diff,
+                float(vpa_stats["vpa_lambda_zero_max_abs_diff"].detach().cpu()),
+            )
+            self._vpa_count += 1
         mask = torch.sigmoid(simmap)
         if getattr(self.frozen, "with_bg_clean", False):
             mask = self.frozen.similarity_assignment_weighted(
@@ -379,15 +581,49 @@ def official_parity_eval(args, cfg, device):
     )
     bridge, payload = load_bridge_from_checkpoint(args.checkpoint, cfg, device)
     cpa_enabled = bool(cfg.evaluate.get("cpa_enabled", cfg.cpa.get("enabled", False)))
-    if cpa_enabled and bool(cfg.evaluate.pamr):
-        raise ValueError("CPA evaluation requires evaluate.pamr=false")
+    evaluate_vpa_enabled = bool(cfg.evaluate.get("vpa_enabled", False))
+    config_vpa_enabled = bool(cfg.get("vpa", {}).get("enabled", False))
+    if evaluate_vpa_enabled and not config_vpa_enabled:
+        raise ValueError(
+            "evaluate.vpa_enabled=true requires vpa.enabled=true; VPA will not be silently bypassed"
+        )
+    vpa_active = evaluate_vpa_enabled and config_vpa_enabled
+    print(
+        f"VPA active: {str(vpa_active).lower()} "
+        f"evaluate.vpa_enabled={str(evaluate_vpa_enabled).lower()} "
+        f"vpa.enabled={str(config_vpa_enabled).lower()}",
+        flush=True,
+    )
+    if (cpa_enabled or vpa_active) and bool(cfg.evaluate.pamr):
+        raise ValueError("CPA/VPA evaluation requires evaluate.pamr=false")
     cpa = load_cpa_from_payload(cfg, payload, device, cpa_enabled)
+    vpa = build_vpa_from_config(cfg, device, vpa_active)
+    if vpa is None:
+        print("VPA enabled=False", flush=True)
+    else:
+        print(
+            "VPA enabled=True "
+            f"fusion_lambda={vpa.fusion_lambda:.3f} max_classes={vpa.max_classes} "
+            f"patch_topk={vpa.patch_topk} min_seed_prob={vpa.min_seed_prob:.3f} "
+            f"seed_percentile={vpa.seed_percentile:.1f} "
+            f"min_seed_pixels={vpa.min_seed_pixels} "
+            f"seed_selection={vpa.seed_selection} "
+            f"use_min_seed_prob={str(vpa.use_min_seed_prob).lower()} "
+            f"require_patch_topk={str(vpa.require_patch_topk).lower()} "
+            f"use_margin_filter={str(vpa.use_margin_filter).lower()} "
+            f"positive_only={str(vpa.positive_only).lower()} "
+            f"correction_mode={vpa.correction_mode} "
+            f"input_source={'cpa' if cpa is not None else 'base'}",
+            flush=True,
+        )
     wrapped = CleanOfficialEvalModel(
         frozen,
         bridge,
         class_clip,
         class_base,
         cpa=cpa,
+        vpa=vpa,
+        class_names=eval_classnames,
         xattn_delta_scale=float(cfg.evaluate.get("xattn_delta_scale", 0.5)),
         xattn_logit_alpha=float(cfg.evaluate.get("xattn_logit_alpha", 0.5)),
         xattn_uncertainty_gate_enabled=bool(
@@ -428,7 +664,35 @@ def official_parity_eval(args, cfg, device):
     metric = dataset.evaluate(results, logger=None)
     miou = float(metric["mIoU"] * 100)
     cpa_summary = wrapped.cpa_summary() if cpa is not None else None
-    return miou, payload, cpa_summary
+    vpa_summary = wrapped.vpa_summary()
+    if vpa_active:
+        if vpa_summary is None or vpa_summary["vpa_called_images"] <= 0:
+            raise RuntimeError("VPA was active but was never called during evaluation")
+        if (
+            vpa.fusion_lambda != 0.0
+            and vpa_summary["vpa_valid_classes_mean"] == 0
+        ):
+            print(
+                "WARNING: VPA produced no valid prototypes; check thresholds.",
+                flush=True,
+            )
+        if (
+            vpa.fusion_lambda == 0.0
+            and vpa_summary["vpa_lambda_zero_max_abs_diff"] > 1e-7
+        ):
+            raise RuntimeError(
+                "VPA lambda-zero invariant failed during official evaluation: "
+                f"max_abs_diff={vpa_summary['vpa_lambda_zero_max_abs_diff']:.10f}"
+            )
+        if vpa_summary["vpa_correction_negative_fraction"] != 0.0:
+            raise RuntimeError(
+                "VPA-v2 positive-only invariant failed during official evaluation"
+            )
+        if vpa.debug_assert_changes and vpa_summary["vpa_changed_fraction"] == 0:
+            raise RuntimeError(
+                "vpa.debug_assert_changes=true but VPA made no logit changes"
+            )
+    return miou, payload, cpa_summary, vpa_summary
 
 
 def init_eval_logger(cfg, out):
@@ -448,6 +712,8 @@ def main():
         raise ValueError("CCR is disabled for CPA evaluation")
     if bool(cfg.evaluate.get("cpa_enabled", cfg.cpa.get("enabled", False))) and args.cached_fast_eval:
         raise ValueError("CPA official semantic evaluation does not use cached patch-token inputs")
+    if bool(cfg.evaluate.get("vpa_enabled", False)) and args.cached_fast_eval:
+        raise ValueError("VPA requires official CPA-v1 dense evaluation")
     if args.cached_fast_eval and not args.features:
         raise ValueError("--features is required when --cached_fast_eval is used")
     if dist.is_available() and not dist.is_initialized():
@@ -460,7 +726,7 @@ def main():
     if not args.cached_fast_eval:
         print("Eval mode: official Talk2DINO slide-inference parity", flush=True)
         print("Cached eval features are not used for prediction in this mode.", flush=True)
-        miou, payload, cpa_summary = official_parity_eval(args, cfg, device)
+        miou, payload, cpa_summary, vpa_summary = official_parity_eval(args, cfg, device)
         print("=" * 64, flush=True)
         print("EVALUATION RESULTS", flush=True)
         print("=" * 64, flush=True)
@@ -468,6 +734,13 @@ def main():
         print(f"coco_stuff mIoU      : {miou:.2f}%", flush=True)
         print(f"PAMR enabled         : {bool(cfg.evaluate.pamr)}", flush=True)
         print("CCR enabled          : false", flush=True)
+        print(f"VPA enabled          : {vpa_summary is not None}", flush=True)
+        print(
+            "XAttnBridge_Clean=true CPA-v1="
+            f"{cpa_summary is not None} PAMR=false DCD=false VCDD=false "
+            "VAB=false OPC=false Router=false USRC=false CCR=false",
+            flush=True,
+        )
         if cpa_summary is not None:
             print(
                 "CPA eval stats        : "
@@ -479,6 +752,59 @@ def main():
                 f"mean_residual={cpa_summary['cpa_residual_abs_mean']:.6f} "
                 f"max_residual={cpa_summary['cpa_residual_abs_max']:.6f} "
                 f"modified_fraction={cpa_summary['cpa_modified_fraction']:.4f}",
+                flush=True,
+            )
+        if vpa_summary is not None:
+            print(
+                "VPA eval stats        : "
+                f"input_source={vpa_summary['vpa_input_source']} "
+                f"fusion_lambda={float(cfg.vpa.fusion_lambda):.3f} "
+                f"max_classes={int(cfg.vpa.max_classes)} "
+                f"patch_topk={int(cfg.vpa.patch_topk)} "
+                f"min_seed_prob={float(cfg.vpa.min_seed_prob):.3f} "
+                f"seed_percentile={float(cfg.vpa.seed_percentile):.1f} "
+                f"min_seed_pixels={int(cfg.vpa.min_seed_pixels)} "
+                f"vpa_seed_selection={vpa_summary['vpa_seed_selection']} "
+                "vpa_use_min_seed_prob="
+                f"{str(vpa_summary['vpa_use_min_seed_prob']).lower()} "
+                "vpa_require_patch_topk="
+                f"{str(vpa_summary['vpa_require_patch_topk']).lower()} "
+                "vpa_use_margin_filter="
+                f"{str(vpa_summary['vpa_use_margin_filter']).lower()} "
+                "vpa_positive_only="
+                f"{str(vpa_summary['vpa_positive_only']).lower()} "
+                f"vpa_correction_mode={vpa_summary['vpa_correction_mode']} "
+                f"vpa_called_images={vpa_summary['vpa_called_images']:.0f} "
+                f"vpa_valid_classes_mean={vpa_summary['vpa_valid_classes_mean']:.4f} "
+                f"vpa_valid_classes_min={vpa_summary['vpa_valid_classes_min']:.0f} "
+                f"vpa_valid_classes_max={vpa_summary['vpa_valid_classes_max']:.0f} "
+                f"vpa_seed_pixels_mean={vpa_summary['vpa_seed_pixels_mean']:.4f} "
+                f"vpa_seed_pixels_min={vpa_summary['vpa_seed_pixels_min']:.0f} "
+                f"vpa_seed_pixels_max={vpa_summary['vpa_seed_pixels_max']:.0f} "
+                f"vpa_class_score_mean={vpa_summary['vpa_class_score_mean']:.6f} "
+                f"vpa_class_score_max={vpa_summary['vpa_class_score_max']:.6f} "
+                f"vpa_seed_score_mean={vpa_summary['vpa_seed_score_mean']:.6f} "
+                f"vpa_seed_score_min={vpa_summary['vpa_seed_score_min']:.6f} "
+                f"vpa_seed_score_max={vpa_summary['vpa_seed_score_max']:.6f} "
+                "vpa_correction_abs_mean="
+                f"{vpa_summary['vpa_correction_abs_mean']:.6f} "
+                "vpa_correction_abs_max="
+                f"{vpa_summary['vpa_correction_abs_max']:.6f} "
+                "vpa_correction_negative_fraction="
+                f"{vpa_summary['vpa_correction_negative_fraction']:.6f} "
+                f"vpa_changed_fraction={vpa_summary['vpa_changed_fraction']:.6f} "
+                "vpa_no_valid_prototype_images="
+                f"{vpa_summary['vpa_no_valid_prototype_images']:.0f} "
+                "vpa_lambda_zero_max_abs_diff="
+                f"{vpa_summary['vpa_lambda_zero_max_abs_diff']:.10f} "
+                "vpa_skip_low_prob_total="
+                f"{vpa_summary['vpa_skip_low_prob_total']:.0f} "
+                "vpa_skip_not_topk_total="
+                f"{vpa_summary['vpa_skip_not_topk_total']:.0f} "
+                "vpa_skip_too_few_pixels_total="
+                f"{vpa_summary['vpa_skip_too_few_pixels_total']:.0f} "
+                "vpa_skip_bad_prototype_total="
+                f"{vpa_summary['vpa_skip_bad_prototype_total']:.0f}",
                 flush=True,
             )
         with open(out / "summary.json", "w") as f:
@@ -493,6 +819,13 @@ def main():
                 "coco_stuff_miou": miou,
                 "cpa_enabled": cpa_summary is not None,
                 "cpa_stats": cpa_summary,
+                "vpa_enabled": vpa_summary is not None,
+                "vpa_config": (
+                    OmegaConf.to_container(cfg.vpa, resolve=True)
+                    if vpa_summary is not None
+                    else None
+                ),
+                "vpa_stats": vpa_summary,
             }, f, indent=2)
         return
 

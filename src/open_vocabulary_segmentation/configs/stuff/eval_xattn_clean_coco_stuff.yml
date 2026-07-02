@@ -4,10 +4,34 @@ method_name: Talk2DINO_XAttnBridge_Clean
 
 evaluate:
   pamr: false
+  vpa_enabled: false
   template: sub_imagenet_template
   task:
     - coco_stuff
   coco_stuff: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/stuff.py
+
+vpa:
+  enabled: false
+  fusion_lambda: 0.03
+  seed_temperature: 1.0
+  class_topk_patches: 20
+  max_classes: 12
+  patch_topk: 3
+  seed_selection: rank_percentile
+  use_min_seed_prob: false
+  min_seed_prob: 0.0
+  seed_percentile: 90
+  min_seed_pixels: 8
+  max_seed_pixels: 64
+  prototype_temperature: 0.2
+  sim_clip: 1.0
+  positive_only: true
+  correction_mode: positive_quantile
+  require_patch_topk: true
+  min_margin: 0.0
+  use_margin_filter: false
+  debug_assert_changes: false
+  eps: 1.0e-6
 
 postprocess:
   mode: none
