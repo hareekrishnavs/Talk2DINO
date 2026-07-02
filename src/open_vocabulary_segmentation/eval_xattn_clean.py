@@ -25,6 +25,7 @@ from class_prototype_alignment import (
     apply_topk_prototype_residual,
     compute_prototype_logits,
 )
+from opc_calibrator import ObjectPresenceCalibrator
 
 
 def parse_args():
@@ -134,10 +135,36 @@ def load_cpa_from_payload(cfg, payload, device, enabled):
         raise RuntimeError("CPA enabled but checkpoint does not contain CPA weights.")
     kwargs = OmegaConf.to_container(cfg.cpa, resolve=True)
     kwargs.pop("enabled", None)
+    version = str(kwargs.pop("version", "v1"))
+    if version != "v1":
+        raise ValueError("Only CPA-v1 is supported in this evaluation path")
     cpa = ClassPrototypeAlignmentHead(**kwargs).to(device)
     cpa.load_state_dict(payload["cpa"])
     cpa.eval()
     return cpa
+
+
+def load_opc_from_payload(cfg, payload, device, enabled):
+    has_weights = payload.get("opc") is not None
+    print(
+        f"OPC enabled={bool(enabled)} checkpoint contains OPC weights "
+        f"{'yes' if has_weights else 'no'}",
+        flush=True,
+    )
+    if not enabled:
+        return None
+    if not has_weights:
+        raise RuntimeError(
+            "OPC evaluation is enabled but the checkpoint contains no OPC weights. "
+            "Set evaluate.opc_enabled=false for CPA-v1 parity evaluation."
+        )
+    kwargs = OmegaConf.to_container(cfg.opc, resolve=True)
+    for key in ("enabled", "train_only_opc", "freeze_existing"):
+        kwargs.pop(key, None)
+    opc = ObjectPresenceCalibrator(**kwargs).to(device)
+    opc.load_state_dict(payload["opc"])
+    opc.eval()
+    return opc
 
 
 def fuse_xattn_logits(
@@ -188,6 +215,7 @@ class CleanOfficialEvalModel(nn.Module):
         class_clip,
         class_base,
         cpa=None,
+        opc=None,
         xattn_delta_scale=0.5,
         xattn_logit_alpha=0.5,
         xattn_uncertainty_gate_enabled=True,
@@ -198,6 +226,7 @@ class CleanOfficialEvalModel(nn.Module):
         self.frozen = frozen
         self.bridge = bridge
         self.cpa = cpa
+        self.opc = opc
         self.register_buffer("class_clip", class_clip.float())
         self.register_buffer("class_base", class_base.float())
         self.xattn_delta_scale = float(xattn_delta_scale)
@@ -212,6 +241,16 @@ class CleanOfficialEvalModel(nn.Module):
         }
         self._cpa_residual_abs_max = 0.0
         self._cpa_count = 0
+        self._opc_sum = {
+            "opc_bias_mean": 0.0,
+            "opc_bias_abs_mean": 0.0,
+            "opc_bias_positive_frac": 0.0,
+            "opc_bias_negative_frac": 0.0,
+            "opc_feature_mean": 0.0,
+            "opc_feature_std": 0.0,
+        }
+        self._opc_bias_abs_max = 0.0
+        self._opc_count = 0
 
     def cpa_summary(self):
         count = max(1, self._cpa_count)
@@ -220,6 +259,17 @@ class CleanOfficialEvalModel(nn.Module):
             "cpa_residual_abs_max": self._cpa_residual_abs_max,
             "cpa_modified_fraction": self._cpa_sum["cpa_modified_fraction"] / count,
         }
+
+    def opc_summary(self):
+        if self.opc is None:
+            return None
+        count = max(1, self._opc_count)
+        summary = {key: value / count for key, value in self._opc_sum.items()}
+        summary["opc_bias_abs_max"] = self._opc_bias_abs_max
+        summary["opc_eval_class_dim"] = int(self.class_clip.shape[0])
+        summary["opc_vocab_size"] = int(self.class_clip.shape[0])
+        summary["opc_uses_eval_vocab"] = True
+        return summary
 
     def __getattr__(self, name):
         try:
@@ -283,6 +333,10 @@ class CleanOfficialEvalModel(nn.Module):
                 "raw_patch_tokens_as_xattn_kv=false, "
                 f"class_base={tuple(self.class_base.shape)}, "
                 f"mapped_text={tuple(mapped_text.shape)}, "
+                f"opc_enabled={self.opc is not None}, "
+                f"opc_eval_class_dim={mapped_text.shape[-2]}, "
+                f"opc_vocab_size={self.class_clip.shape[0]}, "
+                "opc_uses_eval_vocab=true, "
                 "base_guided_attention="
                 f"{bool(getattr(self.bridge, 'base_guided_attention', False))}, "
                 f"beta={float(getattr(self.bridge, 'base_guidance_beta', 0.0)):.3f}, "
@@ -320,6 +374,45 @@ class CleanOfficialEvalModel(nn.Module):
                 residual_scale=self.cpa.residual_scale,
                 residual_clip=self.cpa.residual_clip,
             )
+            if self.opc is not None:
+                semantic_norm = F.normalize(semantic_features.float(), dim=-1)
+                base_text_norm = F.normalize(base_text.float(), dim=-1)
+                region_base_logits = torch.einsum(
+                    "brd,cd->bcr",
+                    semantic_norm,
+                    base_text_norm,
+                )
+                region_prototype_logits = compute_prototype_logits(
+                    semantic_features,
+                    prototypes,
+                    temperature=self.cpa.prototype_temperature,
+                    aggregation=self.cpa.prototype_aggregation,
+                )
+                region_cpa_logits, _ = apply_topk_prototype_residual(
+                    region_base_logits,
+                    region_prototype_logits,
+                    topk=self.cpa.topk,
+                    residual_scale=self.cpa.residual_scale,
+                    residual_clip=self.cpa.residual_clip,
+                )
+                dense_shape = simmap.shape
+                dense_cpa_logits = simmap.flatten(2)
+                final_dense_logits, _, opc_stats = self.opc(
+                    region_base_logits,
+                    region_cpa_logits,
+                    mapped_text,
+                    dense_cpa_logits,
+                    semantic_region_features=semantic_features,
+                    return_stats=True,
+                )
+                simmap = final_dense_logits.reshape(dense_shape)
+                for key in self._opc_sum:
+                    self._opc_sum[key] += float(opc_stats[key].detach().cpu())
+                self._opc_bias_abs_max = max(
+                    self._opc_bias_abs_max,
+                    float(opc_stats["opc_bias_abs_max"].detach().cpu()),
+                )
+                self._opc_count += 1
             self._cpa_sum["cpa_residual_abs_mean"] += float(
                 cpa_stats["cpa_residual_abs_mean"].detach().cpu()
             )
@@ -382,12 +475,27 @@ def official_parity_eval(args, cfg, device):
     if cpa_enabled and bool(cfg.evaluate.pamr):
         raise ValueError("CPA evaluation requires evaluate.pamr=false")
     cpa = load_cpa_from_payload(cfg, payload, device, cpa_enabled)
+    opc_enabled = bool(cfg.evaluate.get("opc_enabled", False))
+    if opc_enabled and cpa is None:
+        raise ValueError("OPC evaluation requires CPA-v1")
+    if opc_enabled and len(eval_classnames) != 171:
+        raise RuntimeError(
+            f"COCO-Stuff OPC eval vocabulary must contain 171 classes, got {len(eval_classnames)}"
+        )
+    opc = load_opc_from_payload(cfg, payload, device, opc_enabled)
+    if opc_enabled:
+        print(
+            f"OPC eval vocabulary: opc_eval_class_dim={len(eval_classnames)} "
+            f"opc_vocab_size={len(eval_classnames)} opc_uses_eval_vocab=true",
+            flush=True,
+        )
     wrapped = CleanOfficialEvalModel(
         frozen,
         bridge,
         class_clip,
         class_base,
         cpa=cpa,
+        opc=opc,
         xattn_delta_scale=float(cfg.evaluate.get("xattn_delta_scale", 0.5)),
         xattn_logit_alpha=float(cfg.evaluate.get("xattn_logit_alpha", 0.5)),
         xattn_uncertainty_gate_enabled=bool(
@@ -428,7 +536,7 @@ def official_parity_eval(args, cfg, device):
     metric = dataset.evaluate(results, logger=None)
     miou = float(metric["mIoU"] * 100)
     cpa_summary = wrapped.cpa_summary() if cpa is not None else None
-    return miou, payload, cpa_summary
+    return miou, payload, cpa_summary, wrapped.opc_summary()
 
 
 def init_eval_logger(cfg, out):
@@ -448,6 +556,8 @@ def main():
         raise ValueError("CCR is disabled for CPA evaluation")
     if bool(cfg.evaluate.get("cpa_enabled", cfg.cpa.get("enabled", False))) and args.cached_fast_eval:
         raise ValueError("CPA official semantic evaluation does not use cached patch-token inputs")
+    if bool(cfg.evaluate.get("opc_enabled", False)) and args.cached_fast_eval:
+        raise ValueError("OPC evaluation requires official CPA-v1 dense inference")
     if args.cached_fast_eval and not args.features:
         raise ValueError("--features is required when --cached_fast_eval is used")
     if dist.is_available() and not dist.is_initialized():
@@ -460,7 +570,7 @@ def main():
     if not args.cached_fast_eval:
         print("Eval mode: official Talk2DINO slide-inference parity", flush=True)
         print("Cached eval features are not used for prediction in this mode.", flush=True)
-        miou, payload, cpa_summary = official_parity_eval(args, cfg, device)
+        miou, payload, cpa_summary, opc_summary = official_parity_eval(args, cfg, device)
         print("=" * 64, flush=True)
         print("EVALUATION RESULTS", flush=True)
         print("=" * 64, flush=True)
@@ -468,6 +578,7 @@ def main():
         print(f"coco_stuff mIoU      : {miou:.2f}%", flush=True)
         print(f"PAMR enabled         : {bool(cfg.evaluate.pamr)}", flush=True)
         print("CCR enabled          : false", flush=True)
+        print(f"OPC enabled          : {opc_summary is not None}", flush=True)
         if cpa_summary is not None:
             print(
                 "CPA eval stats        : "
@@ -479,6 +590,18 @@ def main():
                 f"mean_residual={cpa_summary['cpa_residual_abs_mean']:.6f} "
                 f"max_residual={cpa_summary['cpa_residual_abs_max']:.6f} "
                 f"modified_fraction={cpa_summary['cpa_modified_fraction']:.4f}",
+                flush=True,
+            )
+        if opc_summary is not None:
+            print(
+                "OPC eval stats        : "
+                f"bias_mean={opc_summary['opc_bias_mean']:.6f} "
+                f"bias_abs_mean={opc_summary['opc_bias_abs_mean']:.6f} "
+                f"bias_abs_max={opc_summary['opc_bias_abs_max']:.6f} "
+                f"positive_frac={opc_summary['opc_bias_positive_frac']:.4f} "
+                f"negative_frac={opc_summary['opc_bias_negative_frac']:.4f} "
+                f"feature_mean={opc_summary['opc_feature_mean']:.6f} "
+                f"feature_std={opc_summary['opc_feature_std']:.6f}",
                 flush=True,
             )
         with open(out / "summary.json", "w") as f:
@@ -493,6 +616,8 @@ def main():
                 "coco_stuff_miou": miou,
                 "cpa_enabled": cpa_summary is not None,
                 "cpa_stats": cpa_summary,
+                "opc_enabled": opc_summary is not None,
+                "opc_stats": opc_summary,
             }, f, indent=2)
         return
 
