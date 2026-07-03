@@ -262,11 +262,13 @@ class DINOTextSegInference(nn.Module):
             "evaluator_input_resolution": str(tuple(score_shape[-2:])),
         }
 
-    def encode_decode(self, img, img_metas):
+    def encode_decode(self, img, img_metas, return_cpa_components=False):
         """Encode images with backbone and decode into a semantic segmentation
         map of the same size as input.
         """
         assert img.shape[0] == 1, "batch size must be 1"
+        if return_cpa_components and self.sg_prediction_enabled:
+            raise RuntimeError("Post-slide component CPA is incompatible with SG-Gate")
 
         # masks [B, N, H, W]
         # simmap [B, N, H//4, W//4]
@@ -285,7 +287,7 @@ class DINOTextSegInference(nn.Module):
                 time.perf_counter() - talk_start
             )
         else:
-            masks, simmap = self.model.generate_masks(
+            generate_output = self.model.generate_masks(
                 img,
                 img_metas,
                 self.text_embedding,
@@ -296,7 +298,17 @@ class DINOTextSegInference(nn.Module):
                     else self.pamr
                 ),
                 # kp_w=self.kp_w,
+                **(
+                    {"return_cpa_components": True}
+                    if return_cpa_components
+                    else {}
+                ),
             )
+            if return_cpa_components:
+                if not isinstance(generate_output, dict):
+                    raise TypeError("Post-slide component CPA expected component tensors")
+                return generate_output
+            masks, simmap = generate_output
 
         raw_label_img = None
         if self.sg_prediction_enabled:
@@ -421,6 +433,53 @@ class DINOTextSegInference(nn.Module):
             "raw": raw_scores,
         }
 
+    def _load_original_rgb_for_rvs(self, img_meta):
+        meta = img_meta[0]
+        filename = meta.get("filename")
+        if not filename:
+            raise RuntimeError(
+                "Whole-image RVS requires img_meta[0]['filename'] for original RGB crops"
+            )
+        bgr_image = mmcv.imread(filename, flag="color")
+        if bgr_image is None:
+            raise RuntimeError(f"Failed to load original RGB image for RVS: {filename}")
+        rgb_image = bgr_image[:, :, ::-1].copy()
+        if bool(meta.get("flip", False)):
+            direction = meta.get("flip_direction")
+            if direction == "horizontal":
+                rgb_image = rgb_image[:, ::-1].copy()
+            elif direction == "vertical":
+                rgb_image = rgb_image[::-1].copy()
+            else:
+                raise ValueError(f"Unsupported RVS flip direction: {direction}")
+        if not getattr(self, "_logged_rvs_original_rgb", False):
+            get_logger().info(
+                "RVS original RGB active: "
+                f"shape={tuple(rgb_image.shape)} source={filename} "
+                "box_mapping=explicit_scale_factors mask_resize=nearest"
+            )
+            self._logged_rvs_original_rgb = True
+        return rgb_image
+
+    def _apply_whole_image_component_cpa(self, components, img_meta):
+        original_rgb = None
+        if bool(
+            getattr(self.model, "post_slide_component_cpa_requires_rgb", False)
+        ):
+            original_rgb = self._load_original_rgb_for_rvs(img_meta)
+        masks = self.model.apply_component_cpa_after_slide_aggregation(
+            components["base_logits"],
+            components["prototype_logits"],
+            original_rgb,
+        )
+        if self.with_bg:
+            background = masks.new_full(
+                (masks.shape[0], 1, *masks.shape[-2:]),
+                self.bg_thresh,
+            )
+            masks = torch.cat([background, masks], dim=1)
+        return masks
+
     def slide_inference(self, img, img_meta, rescale):
         img_meta = unwrap_datacontainer(img_meta)
         h_stride, w_stride = self.test_cfg.stride
@@ -428,7 +487,15 @@ class DINOTextSegInference(nn.Module):
         batch_size, _, h_img, w_img = img.size()
         h_grids = max(h_img - h_crop + h_stride - 1, 0) // h_stride + 1
         w_grids = max(w_img - w_crop + w_stride - 1, 0) // w_stride + 1
-        preds = img.new_zeros((batch_size, self.out_channels, h_img, w_img))
+        post_slide_component_cpa = bool(
+            getattr(self.model, "post_slide_component_cpa_enabled", False)
+        )
+        if post_slide_component_cpa and self.sg_prediction_enabled:
+            raise RuntimeError("Post-slide component CPA cannot run with SG-Gate")
+        preds = None if post_slide_component_cpa else img.new_zeros(
+            (batch_size, self.out_channels, h_img, w_img)
+        )
+        component_sums = None
         raw_preds = img.new_zeros((batch_size, self.out_channels, h_img, w_img)) \
             if self.sg_prediction_enabled else None
         ignore_preds = img.new_zeros((batch_size, 1, h_img, w_img)) \
@@ -457,22 +524,40 @@ class DINOTextSegInference(nn.Module):
                         "Slide inference debug: starting first crop "
                         f"shape={tuple(crop_img.shape)}"
                     )
-                crop_seg_logit = self.encode_decode(crop_img, img_meta)
+                crop_seg_logit = self.encode_decode(
+                    crop_img,
+                    img_meta,
+                    return_cpa_components=post_slide_component_cpa,
+                )
                 if log_first_crop and h_idx == 0 and w_idx == 0:
                     get_logger().info(
                         "Slide inference debug: first crop finished in "
                         f"{time.perf_counter() - crop_start:.2f}s"
                     )
                     self._logged_first_slide_debug = True
-                crop_preds = (
-                    crop_seg_logit["positive"]
-                    if self.sg_prediction_enabled
-                    else crop_seg_logit
+                padding = (
+                    int(x1),
+                    int(w_img - x2),
+                    int(y1),
+                    int(h_img - y2),
                 )
-                preds += F.pad(
-                    crop_preds,
-                    (int(x1), int(preds.shape[3] - x2), int(y1), int(preds.shape[2] - y2)),
-                )
+                if post_slide_component_cpa:
+                    if component_sums is None:
+                        component_sums = {
+                            key: value.new_zeros(
+                                (value.shape[0], value.shape[1], h_img, w_img)
+                            )
+                            for key, value in crop_seg_logit.items()
+                        }
+                    for key in component_sums:
+                        component_sums[key] += F.pad(crop_seg_logit[key], padding)
+                else:
+                    crop_preds = (
+                        crop_seg_logit["positive"]
+                        if self.sg_prediction_enabled
+                        else crop_seg_logit
+                    )
+                    preds += F.pad(crop_preds, padding)
                 if self.sg_prediction_enabled:
                     raw_preds += F.pad(
                         crop_seg_logit["raw"],
@@ -495,7 +580,19 @@ class DINOTextSegInference(nn.Module):
                 count_mat[:, :, y1:y2, x1:x2] += 1
 
         assert (count_mat == 0).sum() == 0
-        preds = preds / count_mat
+        if post_slide_component_cpa:
+            if component_sums is None:
+                raise RuntimeError("Post-slide component CPA received no slide crops")
+            resize_shape = img_meta[0]["img_shape"][:2]
+            components = {
+                key: (value / count_mat)[
+                    :, :, :resize_shape[0], :resize_shape[1]
+                ]
+                for key, value in component_sums.items()
+            }
+            preds = self._apply_whole_image_component_cpa(components, img_meta)
+        else:
+            preds = preds / count_mat
         if self.sg_prediction_enabled:
             raw_preds = raw_preds / count_mat
             ignore_preds = ignore_preds / count_mat
@@ -528,7 +625,23 @@ class DINOTextSegInference(nn.Module):
 
     def whole_inference(self, img, img_meta, rescale):
         img_meta = unwrap_datacontainer(img_meta)
-        seg_logit = self.encode_decode(img, img_meta)
+        post_slide_component_cpa = bool(
+            getattr(self.model, "post_slide_component_cpa_enabled", False)
+        )
+        if post_slide_component_cpa:
+            components = self.encode_decode(
+                img,
+                img_meta,
+                return_cpa_components=True,
+            )
+            resize_shape = img_meta[0]["img_shape"][:2]
+            components = {
+                key: value[:, :, :resize_shape[0], :resize_shape[1]]
+                for key, value in components.items()
+            }
+            seg_logit = self._apply_whole_image_component_cpa(components, img_meta)
+        else:
+            seg_logit = self.encode_decode(img, img_meta)
         if self.sg_prediction_enabled:
             positive = seg_logit["positive"]
             ignore = seg_logit["ignore"]
