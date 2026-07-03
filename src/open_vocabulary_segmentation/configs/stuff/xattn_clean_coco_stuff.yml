@@ -32,53 +32,6 @@ model:
   keep_cls: false
   keep_end_seq: false
 
-clip_image:
-  enabled: false
-  model_name: null
-  model_path: null
-  device: cuda
-  batch_size: 32
-  normalize: true
-  cache_features: false
-  cache_dir: null
-  crop_size: 224
-  crop_padding_ratio: 0.10
-  masked_crop: false
-  background: mean
-  min_crop_area_ratio: 0.001
-  max_crops_per_image: 32
-
-rvs:
-  enabled: false
-  mode: region_gate
-  region_source: tuned_cpa_argmax
-  topk: 15
-  residual_scale: 0.50
-  residual_clip: 0.50
-  min_region_area_ratio: 0.005
-  max_region_area_ratio: 0.80
-  max_regions_per_image: 20
-  min_region_confidence: 0.0
-  crop_padding_ratio: 0.10
-  masked_crop: false
-  background: mean
-  clip_batch_size: 32
-  text_source: clip_text
-  candidate_text_source: eval_class_names
-  text_templates:
-    - "{}"
-    - "a photo of {}"
-  compare_scope: candidate_topk
-  margin_type: top2
-  gate_type: margin_tanh
-  gate_strength: 0.10
-  margin_temperature: 0.05
-  gate_min: 0.90
-  gate_max: 1.10
-  apply_to: cpa_residual
-  region_fill: connected_component
-  fallback_gate: 1.0
-
 bridge:
   clip_dim: 512
   dino_dim: 768
@@ -110,21 +63,6 @@ xattn_safety:
   warn_if_ratio_above: 0.20
 
 ccr:
-  enabled: false
-
-cars:
-  enabled: false
-
-rcc:
-  enabled: false
-
-vpa:
-  enabled: false
-
-vab:
-  enabled: false
-
-opc:
   enabled: false
 
 cpa:
@@ -174,15 +112,6 @@ evaluate:
   pamr: false
   ccr_enabled: false
   cpa_enabled: true
-  component_cpa_enabled: false
-  rvs_enabled: false
-  cars_enabled: false
-  rcc_enabled: false
-  vpa_enabled: false
-  vab_enabled: false
-  opc_enabled: false
-  cpa_router_enabled: false
-  usrc_enabled: false
   template: sub_imagenet_template
   xattn_delta_scale: 0.5
   xattn_logit_alpha: 0.5

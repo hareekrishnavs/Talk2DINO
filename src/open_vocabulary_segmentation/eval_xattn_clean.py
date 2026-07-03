@@ -25,12 +25,6 @@ from class_prototype_alignment import (
     apply_topk_prototype_residual,
     compute_prototype_logits,
 )
-from clip_crop_encoder import ClipCropEncoder
-from rvs_cpa import (
-    RegionVisualSemanticCPA,
-    build_rvs_clip_text_features,
-    summarize_rvs_values,
-)
 
 
 def parse_args():
@@ -146,131 +140,6 @@ def load_cpa_from_payload(cfg, payload, device, enabled):
     return cpa
 
 
-def refinement_enabled(cfg, name):
-    return bool(cfg.get(name, {}).get("enabled", False)) or bool(
-        cfg.evaluate.get(f"{name}_enabled", False)
-    )
-
-
-def incompatible_refinements(cfg):
-    return [
-        name
-        for name in ("cars", "rcc", "vpa", "vab", "opc", "cpa_router", "usrc", "ccr")
-        if refinement_enabled(cfg, name)
-    ]
-
-
-def validate_component_cpa_eval_config(cfg):
-    enabled = bool(cfg.evaluate.get("component_cpa_enabled", False))
-    if not enabled:
-        return False
-    cpa_enabled = bool(cfg.evaluate.get("cpa_enabled", False)) and bool(
-        cfg.get("cpa", {}).get("enabled", False)
-    )
-    if not cpa_enabled:
-        raise ValueError("Component CPA requires CPA-v1 to be enabled")
-    if bool(cfg.evaluate.get("pamr", False)):
-        raise ValueError("Component CPA evaluation requires evaluate.pamr=false")
-    incompatible = incompatible_refinements(cfg)
-    if incompatible:
-        raise ValueError(
-            "Component CPA cannot be combined with other refinement modules: "
-            + ", ".join(incompatible)
-        )
-    return True
-
-
-def validate_rvs_eval_config(cfg):
-    enabled = bool(cfg.evaluate.get("rvs_enabled", False))
-    if enabled and not bool(cfg.get("rvs", {}).get("enabled", False)):
-        raise ValueError("evaluate.rvs_enabled=true requires rvs.enabled=true")
-    if not enabled:
-        return False
-    if not bool(cfg.evaluate.get("component_cpa_enabled", False)):
-        raise ValueError(
-            "RVS requires evaluate.component_cpa_enabled=true"
-        )
-    cpa_enabled = bool(cfg.evaluate.get("cpa_enabled", False)) and bool(
-        cfg.get("cpa", {}).get("enabled", False)
-    )
-    if not cpa_enabled:
-        raise ValueError("RVS requires CPA-v1 to be enabled")
-    if not bool(cfg.get("clip_image", {}).get("enabled", False)):
-        raise ValueError("RVS requires clip_image.enabled=true")
-    if bool(cfg.evaluate.get("pamr", False)):
-        raise ValueError("RVS evaluation requires evaluate.pamr=false")
-    incompatible = incompatible_refinements(cfg)
-    if incompatible:
-        raise ValueError(
-            "RVS cannot be combined with other refinement modules: "
-            + ", ".join(incompatible)
-        )
-    expected = {
-        "topk": int(cfg.cpa.topk),
-        "residual_scale": float(cfg.cpa.residual_scale),
-        "residual_clip": float(cfg.cpa.residual_clip),
-    }
-    actual = {
-        "topk": int(cfg.rvs.topk),
-        "residual_scale": float(cfg.rvs.residual_scale),
-        "residual_clip": float(cfg.rvs.residual_clip),
-    }
-    if actual != expected:
-        raise ValueError(
-            f"RVS must gate the configured CPA residual; got rvs={actual}, cpa={expected}"
-        )
-    return True
-
-
-@torch.no_grad()
-def build_rvs(cfg, frozen, classnames, device):
-    import clip
-
-    model_name = cfg.clip_image.get("model_name", None) or cfg.model.clip_model_name
-    model_path = cfg.clip_image.get("model_path", None) or cfg.model.clip_model_path
-    if str(model_name) != str(cfg.model.clip_model_name):
-        raise ValueError("RVS CLIP image model must match the Talk2DINO CLIP text model")
-    configured_image_path = cfg.clip_image.get("model_path", None)
-    configured_text_path = cfg.model.get("clip_model_path", None)
-    if configured_image_path and configured_text_path:
-        if Path(str(configured_image_path)).expanduser().resolve() != Path(
-            str(configured_text_path)
-        ).expanduser().resolve():
-            raise ValueError(
-                "RVS CLIP image checkpoint must match the Talk2DINO CLIP text checkpoint"
-            )
-    crop_encoder = ClipCropEncoder(
-        model_name=model_name,
-        model_path=model_path,
-        device=device,
-        batch_size=int(cfg.rvs.clip_batch_size),
-        normalize=bool(cfg.clip_image.normalize),
-        cache_features=bool(cfg.clip_image.cache_features),
-        cache_dir=cfg.clip_image.cache_dir,
-        crop_size=int(cfg.clip_image.crop_size),
-        crop_padding_ratio=float(cfg.rvs.crop_padding_ratio),
-        masked_crop=bool(cfg.rvs.masked_crop),
-        background=str(cfg.rvs.background),
-        min_crop_area_ratio=float(cfg.clip_image.min_crop_area_ratio),
-        max_crops_per_image=int(cfg.rvs.max_regions_per_image),
-        model=frozen.clip_model,
-    )
-    text_features = build_rvs_clip_text_features(
-        classnames,
-        cfg.rvs.text_templates,
-        frozen.encode_text,
-        clip.tokenize,
-        device,
-        batch_size=int(cfg.rvs.clip_batch_size),
-    )
-    return RegionVisualSemanticCPA(
-        crop_encoder,
-        text_features,
-        classnames,
-        cfg.rvs,
-    )
-
-
 def fuse_xattn_logits(
     base_logits,
     xattn_logits,
@@ -319,8 +188,6 @@ class CleanOfficialEvalModel(nn.Module):
         class_clip,
         class_base,
         cpa=None,
-        rvs=None,
-        component_cpa_enabled=False,
         xattn_delta_scale=0.5,
         xattn_logit_alpha=0.5,
         xattn_uncertainty_gate_enabled=True,
@@ -331,8 +198,6 @@ class CleanOfficialEvalModel(nn.Module):
         self.frozen = frozen
         self.bridge = bridge
         self.cpa = cpa
-        self.rvs = rvs
-        self.component_cpa_enabled = bool(component_cpa_enabled)
         self.register_buffer("class_clip", class_clip.float())
         self.register_buffer("class_base", class_base.float())
         self.xattn_delta_scale = float(xattn_delta_scale)
@@ -347,42 +212,6 @@ class CleanOfficialEvalModel(nn.Module):
         }
         self._cpa_residual_abs_max = 0.0
         self._cpa_count = 0
-        self._rvs_calls = 0
-        self._rvs_regions_total = 0
-        self._rvs_discovered_total = 0
-        self._rvs_gate_values = []
-        self._rvs_margin_values = []
-        self._rvs_region_areas = []
-        self._rvs_crop_norm_sum = 0.0
-        self._rvs_crop_norm_count = 0
-        self._rvs_text_norm = 0.0
-        self._rvs_changed_pixel_sum = 0.0
-        self._rvs_changed_residual_sum = 0.0
-        self._rvs_strength_zero_max_diff = 0.0
-        self._rvs_time_crop_encode = 0.0
-        self._rvs_time_total = 0.0
-        self._rvs_zero_strength_shortcut_used = False
-
-    @property
-    def post_slide_component_cpa_enabled(self):
-        return self.component_cpa_enabled
-
-    @property
-    def post_slide_component_cpa_requires_rgb(self):
-        return self.rvs is not None and float(self.rvs.cfg.gate_strength) != 0.0
-
-    def _update_cpa_stats(self, stats):
-        self._cpa_sum["cpa_residual_abs_mean"] += float(
-            stats["cpa_residual_abs_mean"].detach().cpu()
-        )
-        self._cpa_sum["cpa_modified_fraction"] += float(
-            stats["cpa_modified_fraction"].detach().cpu()
-        )
-        self._cpa_residual_abs_max = max(
-            self._cpa_residual_abs_max,
-            float(stats["cpa_residual_abs_max"].detach().cpu()),
-        )
-        self._cpa_count += 1
 
     def cpa_summary(self):
         count = max(1, self._cpa_count)
@@ -391,120 +220,6 @@ class CleanOfficialEvalModel(nn.Module):
             "cpa_residual_abs_max": self._cpa_residual_abs_max,
             "cpa_modified_fraction": self._cpa_sum["cpa_modified_fraction"] / count,
         }
-
-    def _update_rvs_stats(self, stats):
-        self._rvs_calls += 1
-        self._rvs_regions_total += int(stats["rvs_regions"])
-        self._rvs_discovered_total += int(stats["rvs_discovered_regions"])
-        self._rvs_gate_values.extend(stats["rvs_gate_values"])
-        self._rvs_margin_values.extend(stats["rvs_margin_values"])
-        self._rvs_region_areas.extend(stats["rvs_region_areas"])
-        if int(stats["rvs_regions"]) > 0:
-            self._rvs_crop_norm_sum += float(
-                stats["rvs_clip_crop_feature_norm_mean"]
-            )
-            self._rvs_crop_norm_count += 1
-        self._rvs_text_norm = float(stats["rvs_clip_text_feature_norm_mean"])
-        self._rvs_changed_pixel_sum += float(stats["rvs_changed_pixel_fraction"])
-        self._rvs_changed_residual_sum += float(
-            stats["rvs_changed_residual_fraction"]
-        )
-        self._rvs_strength_zero_max_diff = max(
-            self._rvs_strength_zero_max_diff,
-            float(stats["rvs_gate_strength_zero_max_abs_diff"]),
-        )
-        self._rvs_time_crop_encode += float(stats["rvs_time_crop_encode"])
-        self._rvs_time_total += float(stats["rvs_time_total"])
-        self._rvs_zero_strength_shortcut_used = (
-            self._rvs_zero_strength_shortcut_used
-            or bool(stats["rvs_zero_strength_shortcut_used"])
-        )
-
-    def rvs_summary(self):
-        if self.rvs is None:
-            return None
-        calls = max(1, self._rvs_calls)
-        gate_mean, gate_min, gate_max, gate_std = summarize_rvs_values(
-            self._rvs_gate_values,
-            fallback=1.0,
-        )
-        margin_mean, margin_min, margin_max, _ = summarize_rvs_values(
-            self._rvs_margin_values,
-            fallback=0.0,
-        )
-        area_mean, area_min, area_max, _ = summarize_rvs_values(
-            self._rvs_region_areas,
-            fallback=0.0,
-        )
-        return {
-            "rvs_enabled": True,
-            "rvs_scope": "whole_image_post_slide",
-            "rvs_num_regions_mean": self._rvs_regions_total / calls,
-            "rvs_num_regions_total": self._rvs_regions_total,
-            "rvs_valid_region_fraction": (
-                self._rvs_regions_total / max(1, self._rvs_discovered_total)
-            ),
-            "rvs_gate_mean": gate_mean,
-            "rvs_gate_min": gate_min,
-            "rvs_gate_max": gate_max,
-            "rvs_gate_std": gate_std,
-            "rvs_margin_mean": margin_mean,
-            "rvs_margin_min": margin_min,
-            "rvs_margin_max": margin_max,
-            "rvs_region_area_mean": area_mean,
-            "rvs_region_area_min": area_min,
-            "rvs_region_area_max": area_max,
-            "rvs_clip_crop_feature_norm_mean": (
-                self._rvs_crop_norm_sum / max(1, self._rvs_crop_norm_count)
-            ),
-            "rvs_clip_text_feature_norm_mean": self._rvs_text_norm,
-            "rvs_changed_pixel_fraction": self._rvs_changed_pixel_sum / calls,
-            "rvs_changed_residual_fraction": (
-                self._rvs_changed_residual_sum / calls
-            ),
-            "rvs_gate_strength_zero_max_abs_diff": self._rvs_strength_zero_max_diff,
-            "component_vs_rvs_zero_max_abs_diff": self._rvs_strength_zero_max_diff,
-            "legacy_vs_component_max_abs_diff": None,
-            "rvs_time_crop_encode": self._rvs_time_crop_encode,
-            "rvs_time_total": self._rvs_time_total,
-            "rvs_zero_strength_shortcut_used": (
-                self._rvs_zero_strength_shortcut_used
-            ),
-        }
-
-    @torch.no_grad()
-    def apply_component_cpa_after_slide_aggregation(
-        self,
-        base_logits_full,
-        prototype_logits_full,
-        original_rgb_image,
-    ):
-        if not self.component_cpa_enabled or self.cpa is None:
-            raise RuntimeError("Post-slide component CPA requires CPA-v1")
-        if base_logits_full.shape != prototype_logits_full.shape:
-            raise ValueError(
-                "Whole-image CPA base/prototype shapes differ: "
-                f"{tuple(base_logits_full.shape)} vs "
-                f"{tuple(prototype_logits_full.shape)}"
-            )
-        tuned_logits_full, cpa_stats = apply_topk_prototype_residual(
-            base_logits_full,
-            prototype_logits_full,
-            topk=self.cpa.topk,
-            residual_scale=self.cpa.residual_scale,
-            residual_clip=self.cpa.residual_clip,
-        )
-        self._update_cpa_stats(cpa_stats)
-        if self.rvs is None:
-            return torch.sigmoid(tuned_logits_full)
-        final_logits_full, rvs_stats = self.rvs(
-            base_logits_full,
-            tuned_logits_full,
-            cpa_stats,
-            original_rgb_image,
-        )
-        self._update_rvs_stats(rvs_stats)
-        return torch.sigmoid(final_logits_full)
 
     def __getattr__(self, name):
         try:
@@ -524,7 +239,6 @@ class CleanOfficialEvalModel(nn.Module):
         background_func="weighted_average_sigmoid",
         lambda_bg=0.2,
         return_sg_inputs=False,
-        return_cpa_components=False,
     ):
         H, W = image.shape[2:]
         pH, pW = image.shape[2:]
@@ -606,26 +320,17 @@ class CleanOfficialEvalModel(nn.Module):
                 residual_scale=self.cpa.residual_scale,
                 residual_clip=self.cpa.residual_clip,
             )
-            if return_cpa_components:
-                if not self.component_cpa_enabled:
-                    raise RuntimeError(
-                        "CPA component output requires component CPA mode"
-                    )
-                return {
-                    "base_logits": F.interpolate(
-                        base_simmap,
-                        (pH, pW),
-                        mode="bilinear",
-                        align_corners=True,
-                    ),
-                    "prototype_logits": F.interpolate(
-                        prototype_logits,
-                        (pH, pW),
-                        mode="bilinear",
-                        align_corners=True,
-                    ),
-                }
-            self._update_cpa_stats(cpa_stats)
+            self._cpa_sum["cpa_residual_abs_mean"] += float(
+                cpa_stats["cpa_residual_abs_mean"].detach().cpu()
+            )
+            self._cpa_sum["cpa_modified_fraction"] += float(
+                cpa_stats["cpa_modified_fraction"].detach().cpu()
+            )
+            self._cpa_residual_abs_max = max(
+                self._cpa_residual_abs_max,
+                float(cpa_stats["cpa_residual_abs_max"].detach().cpu()),
+            )
+            self._cpa_count += 1
         else:
             simmap = fuse_xattn_logits(
                 base_simmap,
@@ -674,34 +379,15 @@ def official_parity_eval(args, cfg, device):
     )
     bridge, payload = load_bridge_from_checkpoint(args.checkpoint, cfg, device)
     cpa_enabled = bool(cfg.evaluate.get("cpa_enabled", cfg.cpa.get("enabled", False)))
-    component_cpa_enabled = validate_component_cpa_eval_config(cfg)
-    rvs_enabled = validate_rvs_eval_config(cfg)
     if cpa_enabled and bool(cfg.evaluate.pamr):
         raise ValueError("CPA evaluation requires evaluate.pamr=false")
     cpa = load_cpa_from_payload(cfg, payload, device, cpa_enabled)
-    rvs = build_rvs(cfg, frozen, eval_classnames, device) if rvs_enabled else None
-    if component_cpa_enabled and rvs is None:
-        print(
-            "Component CPA enabled=True rvs_enabled=False "
-            "scope=whole_image_post_slide clip_image_encoder_loaded=False",
-            flush=True,
-        )
-    if rvs is not None:
-        print(
-            "RVS enabled=True shared_clip_model=True "
-            f"clip_model={cfg.model.clip_model_name} "
-            "rvs_scope=whole_image_post_slide "
-            f"masked_crop={bool(cfg.rvs.masked_crop)}",
-            flush=True,
-        )
     wrapped = CleanOfficialEvalModel(
         frozen,
         bridge,
         class_clip,
         class_base,
         cpa=cpa,
-        rvs=rvs,
-        component_cpa_enabled=component_cpa_enabled,
         xattn_delta_scale=float(cfg.evaluate.get("xattn_delta_scale", 0.5)),
         xattn_logit_alpha=float(cfg.evaluate.get("xattn_logit_alpha", 0.5)),
         xattn_uncertainty_gate_enabled=bool(
@@ -716,8 +402,6 @@ def official_parity_eval(args, cfg, device):
     ).to(device)
     seg_text_embedding = class_base.mean(dim=1) if class_base.dim() == 3 else class_base
     dset_cfg = mmcv.Config.fromfile(cfg.evaluate.coco_stuff)
-    if component_cpa_enabled and str(dset_cfg.test_cfg.mode) != "slide":
-        raise ValueError("Post-slide component CPA requires test_cfg.mode=slide")
     seg_model = DINOTextSegInference(
         wrapped,
         seg_text_embedding,
@@ -744,8 +428,7 @@ def official_parity_eval(args, cfg, device):
     metric = dataset.evaluate(results, logger=None)
     miou = float(metric["mIoU"] * 100)
     cpa_summary = wrapped.cpa_summary() if cpa is not None else None
-    rvs_summary = wrapped.rvs_summary()
-    return miou, payload, cpa_summary, rvs_summary, component_cpa_enabled
+    return miou, payload, cpa_summary
 
 
 def init_eval_logger(cfg, out):
@@ -761,14 +444,8 @@ def init_eval_logger(cfg, out):
 def main():
     args = parse_args()
     cfg = load_clean_config(args.config, args.opts)
-    component_cpa_enabled = validate_component_cpa_eval_config(cfg)
-    rvs_enabled = validate_rvs_eval_config(cfg)
     if bool(cfg.evaluate.get("ccr_enabled", False)) or bool(cfg.get("ccr", {}).get("enabled", False)):
         raise ValueError("CCR is disabled for CPA evaluation")
-    if component_cpa_enabled and args.cached_fast_eval:
-        raise ValueError(
-            "Component CPA and RVS are supported only by official slide evaluation"
-        )
     if bool(cfg.evaluate.get("cpa_enabled", cfg.cpa.get("enabled", False))) and args.cached_fast_eval:
         raise ValueError("CPA official semantic evaluation does not use cached patch-token inputs")
     if args.cached_fast_eval and not args.features:
@@ -783,16 +460,7 @@ def main():
     if not args.cached_fast_eval:
         print("Eval mode: official Talk2DINO slide-inference parity", flush=True)
         print("Cached eval features are not used for prediction in this mode.", flush=True)
-        miou, payload, cpa_summary, rvs_summary, component_cpa_enabled = official_parity_eval(
-            args, cfg, device
-        )
-        protocol = (
-            "rvs_component_cpa"
-            if rvs_summary is not None
-            else "component_cpa"
-            if component_cpa_enabled
-            else "legacy_cpa"
-        )
+        miou, payload, cpa_summary = official_parity_eval(args, cfg, device)
         print("=" * 64, flush=True)
         print("EVALUATION RESULTS", flush=True)
         print("=" * 64, flush=True)
@@ -800,15 +468,6 @@ def main():
         print(f"coco_stuff mIoU      : {miou:.2f}%", flush=True)
         print(f"PAMR enabled         : {bool(cfg.evaluate.pamr)}", flush=True)
         print("CCR enabled          : false", flush=True)
-        print(f"Evaluation protocol  : {protocol}", flush=True)
-        print(
-            "XAttnBridge_Clean=true "
-            f"CPA-v1={cpa_summary is not None} "
-            f"ComponentCPA={component_cpa_enabled} RVS={rvs_summary is not None} "
-            "PAMR=false CARS=false RCC=false VPA=false VAB=false OPC=false "
-            "Router=false USRC=false CCR=false",
-            flush=True,
-        )
         if cpa_summary is not None:
             print(
                 "CPA eval stats        : "
@@ -822,46 +481,10 @@ def main():
                 f"modified_fraction={cpa_summary['cpa_modified_fraction']:.4f}",
                 flush=True,
             )
-        if rvs_summary is not None:
-            print(
-                "RVS eval stats        : "
-                f"rvs_scope={rvs_summary['rvs_scope']} "
-                f"regions_mean={rvs_summary['rvs_num_regions_mean']:.3f} "
-                f"regions_total={rvs_summary['rvs_num_regions_total']} "
-                f"valid_fraction={rvs_summary['rvs_valid_region_fraction']:.6f} "
-                f"gate={rvs_summary['rvs_gate_mean']:.6f}/"
-                f"{rvs_summary['rvs_gate_min']:.6f}/"
-                f"{rvs_summary['rvs_gate_max']:.6f}/"
-                f"{rvs_summary['rvs_gate_std']:.6f} "
-                f"margin={rvs_summary['rvs_margin_mean']:.6f}/"
-                f"{rvs_summary['rvs_margin_min']:.6f}/"
-                f"{rvs_summary['rvs_margin_max']:.6f} "
-                f"area={rvs_summary['rvs_region_area_mean']:.6f}/"
-                f"{rvs_summary['rvs_region_area_min']:.6f}/"
-                f"{rvs_summary['rvs_region_area_max']:.6f} "
-                "crop_norm="
-                f"{rvs_summary['rvs_clip_crop_feature_norm_mean']:.6f} "
-                "text_norm="
-                f"{rvs_summary['rvs_clip_text_feature_norm_mean']:.6f} "
-                "changed_pixels="
-                f"{rvs_summary['rvs_changed_pixel_fraction']:.6f} "
-                "changed_residual="
-                f"{rvs_summary['rvs_changed_residual_fraction']:.6f} "
-                "strength0_diff="
-                f"{rvs_summary['rvs_gate_strength_zero_max_abs_diff']:.9g} "
-                "component_vs_rvs_zero_max_abs_diff="
-                f"{rvs_summary['component_vs_rvs_zero_max_abs_diff']:.9g} "
-                f"crop_time={rvs_summary['rvs_time_crop_encode']:.3f}s "
-                f"total_time={rvs_summary['rvs_time_total']:.3f}s "
-                "zero_strength_shortcut="
-                f"{rvs_summary['rvs_zero_strength_shortcut_used']}",
-                flush=True,
-            )
         with open(out / "summary.json", "w") as f:
             json.dump({
                 "method_name": METHOD_NAME,
                 "eval_mode": "official_talk2dino_slide_parity",
-                "evaluation_protocol": protocol,
                 "official_comparable_to_talk2dino_e0": True,
                 "cached_features_used_for_prediction": False,
                 "pamr": bool(cfg.evaluate.pamr),
@@ -869,20 +492,7 @@ def main():
                 "checkpoint_epoch": payload.get("epoch"),
                 "coco_stuff_miou": miou,
                 "cpa_enabled": cpa_summary is not None,
-                "component_cpa_enabled": component_cpa_enabled,
-                "legacy_cpa_miou": (
-                    miou if protocol == "legacy_cpa" else None
-                ),
-                "component_cpa_miou": (
-                    miou if protocol == "component_cpa" else None
-                ),
-                "rvs_miou": (
-                    miou if protocol == "rvs_component_cpa" else None
-                ),
-                "legacy_vs_component_max_abs_diff": None,
                 "cpa_stats": cpa_summary,
-                "rvs_enabled": rvs_summary is not None,
-                "rvs_stats": rvs_summary,
             }, f, indent=2)
         return
 
