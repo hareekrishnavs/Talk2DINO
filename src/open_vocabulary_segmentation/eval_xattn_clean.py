@@ -1,8 +1,6 @@
 import argparse
 import json
-import math
 import os
-import runpy
 import sys
 from pathlib import Path
 
@@ -148,108 +146,15 @@ def _refinement_enabled(cfg, name):
     )
 
 
-def _msa_base_image_scale(cfg):
-    payload = runpy.run_path(str(cfg.evaluate.coco_stuff))
-    transforms = payload["data"]["test"]["pipeline"]
-    augmentations = [
-        transform
-        for transform in transforms
-        if transform.get("type") == "MultiScaleFlipAug"
-    ]
-    if len(augmentations) != 1:
-        raise ValueError("MSA requires exactly one MultiScaleFlipAug transform")
-    image_scale = augmentations[0].get("img_scale")
-    if not isinstance(image_scale, tuple) or len(image_scale) != 2:
-        raise ValueError("MSA requires a two-dimensional base img_scale")
-    return tuple(int(value) for value in image_scale)
-
-
-def validate_msa_eval_config(cfg):
+def reject_msa_eval_config(cfg):
     evaluate_enabled = bool(cfg.evaluate.get("msa_enabled", False))
     msa_enabled = bool(cfg.get("msa", {}).get("enabled", False))
-    if evaluate_enabled != msa_enabled:
+    if evaluate_enabled or msa_enabled:
         raise ValueError(
-            "MSA requires evaluate.msa_enabled and msa.enabled to match"
+            "MSA/scale-aware inference has been removed from this method. "
+            "Run the normal single-scale eval path without evaluate.msa_enabled "
+            "or msa.enabled."
         )
-    if not evaluate_enabled:
-        return False
-    if not (
-        bool(cfg.evaluate.get("cpa_enabled", False))
-        and bool(cfg.get("cpa", {}).get("enabled", False))
-    ):
-        raise ValueError("MSA requires legacy CPA-v1 to be enabled")
-    if bool(cfg.evaluate.get("pamr", False)):
-        raise ValueError("MSA evaluation requires evaluate.pamr=false")
-    incompatible = [
-        name
-        for name in (
-            "rvs", "cars", "rcc", "vpa", "vab", "opc", "dcd", "vcdd",
-            "cpa_router", "usrc", "ccr",
-        )
-        if _refinement_enabled(cfg, name)
-    ]
-    if incompatible:
-        raise ValueError(
-            "MSA cannot be combined with refinement modules: "
-            + ", ".join(incompatible)
-        )
-    if str(cfg.msa.aggregation) != "mean":
-        raise ValueError("msa.aggregation must be mean")
-    if str(cfg.msa.resize_mode) != "bilinear" or bool(cfg.msa.align_corners):
-        raise ValueError(
-            "Legacy-compatible MSA requires bilinear resize and align_corners=false"
-        )
-    weighting = str(cfg.msa.scale_weighting)
-    if weighting not in {"uniform", "custom"}:
-        raise ValueError("msa.scale_weighting must be uniform or custom")
-
-    scales = [float(scale) for scale in cfg.msa.scales]
-    if not scales or any(
-        not math.isfinite(scale) or scale <= 0.0 for scale in scales
-    ):
-        raise ValueError("msa.scales must contain finite positive values")
-    if len(set(scales)) != len(scales):
-        raise ValueError("msa.scales must not contain duplicates")
-    weights = None if cfg.msa.weights is None else [float(v) for v in cfg.msa.weights]
-    if weighting == "uniform" and weights is not None:
-        raise ValueError("msa.weights must be null for uniform weighting")
-    if weighting == "custom":
-        if weights is None or len(weights) != len(scales):
-            raise ValueError("Custom msa.weights must match msa.scales")
-        if any(
-            not math.isfinite(weight) or weight <= 0.0 for weight in weights
-        ):
-            raise ValueError("Custom msa.weights must be finite and positive")
-
-    base_scale = _msa_base_image_scale(cfg)
-    min_size = int(cfg.msa.min_size)
-    max_size = cfg.msa.max_size
-    max_size = None if max_size is None else int(max_size)
-    if min_size < 1 or (max_size is not None and max_size < min_size):
-        raise ValueError("MSA size limits must satisfy 1 <= min_size <= max_size")
-    valid_scales = []
-    valid_weights = []
-    invalid_scales = []
-    for index, scale in enumerate(scales):
-        scaled_min = min(base_scale) * scale
-        scaled_max = max(base_scale) * scale
-        valid = scaled_min >= min_size and (
-            max_size is None or scaled_max <= max_size
-        )
-        if valid:
-            valid_scales.append(scale)
-            if weights is not None:
-                valid_weights.append(weights[index])
-        else:
-            invalid_scales.append(scale)
-    if invalid_scales and not bool(cfg.msa.skip_invalid_scales):
-        raise ValueError(f"Invalid MSA scales for configured size limits: {invalid_scales}")
-    if not valid_scales:
-        raise ValueError("No valid MSA scales remain")
-    cfg.msa.scales = valid_scales
-    if weights is not None:
-        cfg.msa.weights = valid_weights
-    return True
 
 
 def fuse_xattn_logits(
@@ -476,7 +381,7 @@ def official_parity_eval(args, cfg, device):
     import mmcv
     import us
 
-    msa_enabled = validate_msa_eval_config(cfg)
+    reject_msa_eval_config(cfg)
     frozen = build_frozen_talk2dino(cfg, device)
     dataset = build_coco_stuff_eval_dataset(cfg)
     loader = build_eval_loader(dataset, cfg)
@@ -495,13 +400,7 @@ def official_parity_eval(args, cfg, device):
     if cpa_enabled and bool(cfg.evaluate.pamr):
         raise ValueError("CPA evaluation requires evaluate.pamr=false")
     cpa = load_cpa_from_payload(cfg, payload, device, cpa_enabled)
-    if msa_enabled:
-        print(
-            "MSA enabled=True representation=softmax_probability_of_"
-            "slide_averaged_sigmoid_scores "
-            f"scales={list(cfg.msa.scales)} hflip={bool(cfg.msa.hflip)}",
-            flush=True,
-        )
+    print("Running single-scale inference; MSA disabled.", flush=True)
     wrapped = CleanOfficialEvalModel(
         frozen,
         bridge,
@@ -531,7 +430,6 @@ def official_parity_eval(args, cfg, device):
         pamr=bool(cfg.evaluate.pamr),
         bg_thresh=float(cfg.evaluate.get("bg_thresh", 0.4)),
         sg_gate={"enabled": False},
-        msa=(cfg.msa if msa_enabled else {"enabled": False}),
     ).to(device)
     seg_model.eval()
     results, _, _, _ = us.multi_gpu_test(
@@ -549,8 +447,7 @@ def official_parity_eval(args, cfg, device):
     metric = dataset.evaluate(results, logger=None)
     miou = float(metric["mIoU"] * 100)
     cpa_summary = wrapped.cpa_summary() if cpa is not None else None
-    msa_summary = seg_model.msa_summary()
-    return miou, payload, cpa_summary, msa_summary
+    return miou, payload, cpa_summary
 
 
 def init_eval_logger(cfg, out):
@@ -566,13 +463,11 @@ def init_eval_logger(cfg, out):
 def main():
     args = parse_args()
     cfg = load_clean_config(args.config, args.opts)
-    msa_enabled = validate_msa_eval_config(cfg)
+    reject_msa_eval_config(cfg)
     if bool(cfg.evaluate.get("ccr_enabled", False)) or bool(cfg.get("ccr", {}).get("enabled", False)):
         raise ValueError("CCR is disabled for CPA evaluation")
     if bool(cfg.evaluate.get("cpa_enabled", cfg.cpa.get("enabled", False))) and args.cached_fast_eval:
         raise ValueError("CPA official semantic evaluation does not use cached patch-token inputs")
-    if msa_enabled and args.cached_fast_eval:
-        raise ValueError("MSA is supported only by official slide evaluation")
     if args.cached_fast_eval and not args.features:
         raise ValueError("--features is required when --cached_fast_eval is used")
     if dist.is_available() and not dist.is_initialized():
@@ -585,7 +480,7 @@ def main():
     if not args.cached_fast_eval:
         print("Eval mode: official Talk2DINO slide-inference parity", flush=True)
         print("Cached eval features are not used for prediction in this mode.", flush=True)
-        miou, payload, cpa_summary, msa_summary = official_parity_eval(
+        miou, payload, cpa_summary = official_parity_eval(
             args,
             cfg,
             device,
@@ -599,7 +494,7 @@ def main():
         print("CCR enabled          : false", flush=True)
         print(
             "XAttnBridge_Clean=true "
-            f"CPA-v1={cpa_summary is not None} MSA={msa_summary is not None} "
+            f"CPA-v1={cpa_summary is not None} MSA=false "
             "PAMR=false RVS=false CARS=false RCC=false VPA=false VAB=false "
             "OPC=false Router=false USRC=false CCR=false",
             flush=True,
@@ -617,25 +512,6 @@ def main():
                 f"modified_fraction={cpa_summary['cpa_modified_fraction']:.4f}",
                 flush=True,
             )
-        if msa_summary is not None:
-            print(
-                "MSA eval stats        : "
-                f"scales={msa_summary['msa_scales']} "
-                f"hflip={msa_summary['msa_hflip']} "
-                "forward_passes_per_image="
-                f"{msa_summary['msa_num_forward_passes_per_image']} "
-                f"aggregation={msa_summary['msa_aggregation']} "
-                f"scale_weighting={msa_summary['msa_scale_weighting']} "
-                f"resize={msa_summary['msa_resize_mode']} "
-                f"align_corners={msa_summary['msa_align_corners']} "
-                "single_scale_max_abs_diff="
-                f"{msa_summary['msa_single_scale_max_abs_diff']:.9g} "
-                f"per_scale_mean={msa_summary['msa_per_scale_output_mean']} "
-                f"per_scale_std={msa_summary['msa_per_scale_output_std']} "
-                f"time_per_image={msa_summary['msa_time_per_image']:.4f}s "
-                f"time_total={msa_summary['msa_time_total']:.2f}s",
-                flush=True,
-            )
         with open(out / "summary.json", "w") as f:
             json.dump({
                 "method_name": METHOD_NAME,
@@ -648,8 +524,7 @@ def main():
                 "coco_stuff_miou": miou,
                 "cpa_enabled": cpa_summary is not None,
                 "cpa_stats": cpa_summary,
-                "msa_enabled": msa_summary is not None,
-                "msa_stats": msa_summary,
+                "msa_enabled": False,
             }, f, indent=2)
         return
 

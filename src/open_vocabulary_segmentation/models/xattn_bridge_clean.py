@@ -550,20 +550,6 @@ def build_coco_stuff_eval_dataset(cfg):
 
     register_float_image_pipeline()
     dset_cfg = mmcv.Config.fromfile(cfg.evaluate.coco_stuff)
-    if bool(cfg.evaluate.get("msa_enabled", False)):
-        augmentations = [
-            transform
-            for transform in dset_cfg.data.test.pipeline
-            if transform.get("type") == "MultiScaleFlipAug"
-        ]
-        if len(augmentations) != 1:
-            raise ValueError(
-                "MSA requires exactly one MultiScaleFlipAug test transform"
-            )
-        augmentation = augmentations[0]
-        augmentation["img_ratios"] = [float(scale) for scale in cfg.msa.scales]
-        augmentation["flip"] = bool(cfg.msa.hflip)
-        augmentation["flip_direction"] = "horizontal"
     dataset = build_dataset(dset_cfg.data.test)
     return dataset
 

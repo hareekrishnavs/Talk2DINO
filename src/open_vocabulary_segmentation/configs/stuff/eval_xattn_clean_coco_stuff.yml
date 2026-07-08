@@ -4,7 +4,6 @@ method_name: Talk2DINO_XAttnBridge_Clean
 
 evaluate:
   pamr: false
-  msa_enabled: false
   template: sub_imagenet_template
   task:
     - coco_stuff

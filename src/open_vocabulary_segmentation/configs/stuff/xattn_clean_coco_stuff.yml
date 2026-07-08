@@ -65,21 +65,6 @@ xattn_safety:
 ccr:
   enabled: false
 
-msa:
-  enabled: false
-  scales:
-    - 1.0
-  hflip: false
-  aggregation: mean
-  resize_mode: bilinear
-  align_corners: false
-  scale_weighting: uniform
-  weights: null
-  skip_invalid_scales: false
-  min_size: 224
-  max_size: null
-  log_per_scale_stats: true
-
 cpa:
   enabled: true
   num_prototypes: 4
@@ -127,7 +112,6 @@ evaluate:
   pamr: false
   ccr_enabled: false
   cpa_enabled: true
-  msa_enabled: false
   template: sub_imagenet_template
   xattn_delta_scale: 0.5
   xattn_logit_alpha: 0.5
