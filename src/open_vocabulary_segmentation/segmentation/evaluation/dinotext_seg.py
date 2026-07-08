@@ -12,6 +12,7 @@ from .sg_gate import (
     build_seed_overlap_cluster_prior,
     build_structural_clusters,
 )
+from .multiscale_eval import aggregate_legacy_probability_maps
 
 try:
     from mmcv.parallel import DataContainer
@@ -55,6 +56,7 @@ class DINOTextSegInference(nn.Module):
             bg_thresh=0.5,
             bg_strategy="base",
             sg_gate=None,
+            msa=None,
             # kp_w=0.3,
             **kwargs,
     ):
@@ -77,6 +79,24 @@ class DINOTextSegInference(nn.Module):
             self.ablation_mode == "true_pamr_dual_path_debug"
         )
         self.sg_prediction_enabled = self.sg_gate_enabled and not self.debug_force_raw_output
+        self.msa = to_mmcv_config(msa)
+        self.msa_enabled = bool(self.msa.get("enabled", False))
+        if self.msa_enabled and self.sg_gate_enabled:
+            raise ValueError("MSA is incompatible with SG-Gate")
+        self.msa_scales = [float(scale) for scale in self.msa.get("scales", [1.0])]
+        self.msa_hflip = bool(self.msa.get("hflip", False))
+        self.msa_log_per_scale_stats = bool(
+            self.msa.get("log_per_scale_stats", True)
+        )
+        self.msa_scale_weights = self.msa.get("weights", None)
+        if self.msa_scale_weights is not None:
+            self.msa_scale_weights = [float(value) for value in self.msa_scale_weights]
+        self._msa_images = 0
+        self._msa_forward_passes = 0
+        self._msa_time_total = 0.0
+        self._msa_single_scale_max_abs_diff = 0.0
+        self._msa_per_scale_mean = [0.0 for _ in self.msa_scales]
+        self._msa_per_scale_std = [0.0 for _ in self.msa_scales]
         # self.kp_w = kp_w
 
         self.model = model
@@ -100,6 +120,37 @@ class DINOTextSegInference(nn.Module):
             logger.info("SG-Gate runs online; no scratch tensor cache will be written")
         self._sg_timing = None
         self._sg_shuffle_index = 0
+
+    def msa_summary(self):
+        if not self.msa_enabled:
+            return None
+        images = max(1, self._msa_images)
+        return {
+            "msa_enabled": True,
+            "msa_output_representation": (
+                "softmax_probability_of_slide_averaged_sigmoid_scores"
+            ),
+            "msa_scales": list(self.msa_scales),
+            "msa_hflip": self.msa_hflip,
+            "msa_num_forward_passes_per_image": (
+                self._msa_forward_passes / images
+            ),
+            "msa_aggregation": str(self.msa.get("aggregation", "mean")),
+            "msa_scale_weighting": str(
+                self.msa.get("scale_weighting", "uniform")
+            ),
+            "msa_resize_mode": str(self.msa.get("resize_mode", "bilinear")),
+            "msa_align_corners": bool(self.msa.get("align_corners", False)),
+            "msa_single_scale_max_abs_diff": self._msa_single_scale_max_abs_diff,
+            "msa_per_scale_output_mean": [
+                value / images for value in self._msa_per_scale_mean
+            ],
+            "msa_per_scale_output_std": [
+                value / images for value in self._msa_per_scale_std
+            ],
+            "msa_time_per_image": self._msa_time_total / images,
+            "msa_time_total": self._msa_time_total,
+        }
 
     def reset_sg_timing(self):
         self._sg_timing = {
@@ -893,6 +944,72 @@ class DINOTextSegInference(nn.Module):
             for index in range(strict.shape[0])
         ]
 
+    def msa_test(self, imgs, img_metas, rescale=True):
+        if not rescale:
+            raise ValueError("MSA requires rescale=True")
+        started = time.perf_counter()
+        variants_per_scale = 2 if self.msa_hflip else 1
+        expected = len(self.msa_scales) * variants_per_scale
+        if len(imgs) != expected:
+            raise ValueError(f"MSA expected {expected} inputs, got {len(imgs)}")
+        if self.msa_scale_weights is None:
+            weights = [1.0 / len(self.msa_scales) for _ in self.msa_scales]
+        else:
+            weight_sum = sum(self.msa_scale_weights)
+            weights = [value / weight_sum for value in self.msa_scale_weights]
+
+        final = None
+        cursor = 0
+        for index, weight in enumerate(weights):
+            variants = []
+            for _ in range(variants_per_scale):
+                variants.append(
+                    self.inference(
+                        imgs[cursor],
+                        img_metas[cursor],
+                        rescale=True,
+                    )
+                )
+                cursor += 1
+            scale_output, _ = aggregate_legacy_probability_maps(
+                variants,
+                num_scales=1,
+                hflip=self.msa_hflip,
+            )
+            if len(self.msa_scales) == 1:
+                final = scale_output
+            elif final is None:
+                final = weight * scale_output
+            else:
+                final.add_(scale_output, alpha=weight)
+
+            if self.msa_scales == [1.0] and not self.msa_hflip:
+                difference = float(
+                    (final - variants[0]).abs().max().detach().cpu()
+                )
+                self._msa_single_scale_max_abs_diff = max(
+                    self._msa_single_scale_max_abs_diff,
+                    difference,
+                )
+                if difference > 1e-7:
+                    raise AssertionError(
+                        "MSA scales=[1.0] changed the legacy output map: "
+                        f"max_abs_diff={difference:.9g}"
+                    )
+            if self.msa_log_per_scale_stats:
+                values = scale_output.float()
+                self._msa_per_scale_mean[index] += float(
+                    values.mean().detach().cpu()
+                )
+                self._msa_per_scale_std[index] += float(
+                    values.std(unbiased=False).detach().cpu()
+                )
+        self._msa_images += int(final.shape[0])
+        self._msa_forward_passes += expected
+        self._msa_time_total += time.perf_counter() - started
+        prediction = final.argmax(dim=1)
+        return list(prediction.cpu().numpy())
+
     def aug_test(self, imgs, img_metas, rescale=True):
         assert rescale
         if self.sg_gate_enabled:
@@ -938,6 +1055,8 @@ class DINOTextSegInference(nn.Module):
             raise ValueError(
                 f'num of augmentations ({len(imgs)}) != num of image meta ({len(img_metas)})'
             )
+        if self.msa_enabled:
+            return self.msa_test(imgs, img_metas, **kwargs)
         if len(imgs) == 1:
             return self.simple_test(imgs[0], img_metas[0], **kwargs)
         return self.aug_test(imgs, img_metas, **kwargs)
