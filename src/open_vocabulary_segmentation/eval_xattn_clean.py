@@ -20,11 +20,6 @@ from xattn_bridge_clean import (
     load_bridge_from_checkpoint,
     load_clean_config,
 )
-from class_prototype_alignment import (
-    ClassPrototypeAlignmentHead,
-    apply_topk_prototype_residual,
-    compute_prototype_logits,
-)
 
 
 def parse_args():
@@ -121,31 +116,6 @@ def mean_template_embeddings(class_base):
     return F.normalize(class_base, dim=-1)
 
 
-def load_cpa_from_payload(cfg, payload, device, enabled):
-    has_weights = payload.get("cpa") is not None
-    print(
-        f"CPA enabled={bool(enabled)} checkpoint contains CPA weights "
-        f"{'yes' if has_weights else 'no'}",
-        flush=True,
-    )
-    if not enabled:
-        return None
-    if not has_weights:
-        raise RuntimeError("CPA enabled but checkpoint does not contain CPA weights.")
-    kwargs = OmegaConf.to_container(cfg.cpa, resolve=True)
-    kwargs.pop("enabled", None)
-    cpa = ClassPrototypeAlignmentHead(**kwargs).to(device)
-    cpa.load_state_dict(payload["cpa"])
-    cpa.eval()
-    return cpa
-
-
-def _refinement_enabled(cfg, name):
-    return bool(cfg.get(name, {}).get("enabled", False)) or bool(
-        cfg.evaluate.get(f"{name}_enabled", False)
-    )
-
-
 def reject_msa_eval_config(cfg):
     evaluate_enabled = bool(cfg.evaluate.get("msa_enabled", False))
     msa_enabled = bool(cfg.get("msa", {}).get("enabled", False))
@@ -204,7 +174,6 @@ class CleanOfficialEvalModel(nn.Module):
         bridge,
         class_clip,
         class_base,
-        cpa=None,
         xattn_delta_scale=0.5,
         xattn_logit_alpha=0.5,
         xattn_uncertainty_gate_enabled=True,
@@ -214,7 +183,6 @@ class CleanOfficialEvalModel(nn.Module):
         super().__init__()
         self.frozen = frozen
         self.bridge = bridge
-        self.cpa = cpa
         self.register_buffer("class_clip", class_clip.float())
         self.register_buffer("class_base", class_base.float())
         self.xattn_delta_scale = float(xattn_delta_scale)
@@ -223,20 +191,6 @@ class CleanOfficialEvalModel(nn.Module):
         self.xattn_margin_gate_enabled = bool(xattn_margin_gate_enabled)
         self.xattn_margin_threshold = float(xattn_margin_threshold)
         self._logged_xattn_eval_path = False
-        self._cpa_sum = {
-            "cpa_residual_abs_mean": 0.0,
-            "cpa_modified_fraction": 0.0,
-        }
-        self._cpa_residual_abs_max = 0.0
-        self._cpa_count = 0
-
-    def cpa_summary(self):
-        count = max(1, self._cpa_count)
-        return {
-            "cpa_residual_abs_mean": self._cpa_sum["cpa_residual_abs_mean"] / count,
-            "cpa_residual_abs_max": self._cpa_residual_abs_max,
-            "cpa_modified_fraction": self._cpa_sum["cpa_modified_fraction"] / count,
-        }
 
     def __getattr__(self, name):
         try:
@@ -321,41 +275,13 @@ class CleanOfficialEvalModel(nn.Module):
             if self.xattn_margin_gate_enabled
             else None
         )
-        if self.cpa is not None:
-            prototypes = self.cpa(mapped_text)
-            spatial_features = image_feat.flatten(2).transpose(1, 2)
-            prototype_logits = compute_prototype_logits(
-                spatial_features,
-                prototypes,
-                temperature=self.cpa.prototype_temperature,
-                aggregation=self.cpa.prototype_aggregation,
-            ).reshape_as(base_simmap)
-            simmap, cpa_stats = apply_topk_prototype_residual(
-                base_simmap,
-                prototype_logits,
-                topk=self.cpa.topk,
-                residual_scale=self.cpa.residual_scale,
-                residual_clip=self.cpa.residual_clip,
-            )
-            self._cpa_sum["cpa_residual_abs_mean"] += float(
-                cpa_stats["cpa_residual_abs_mean"].detach().cpu()
-            )
-            self._cpa_sum["cpa_modified_fraction"] += float(
-                cpa_stats["cpa_modified_fraction"].detach().cpu()
-            )
-            self._cpa_residual_abs_max = max(
-                self._cpa_residual_abs_max,
-                float(cpa_stats["cpa_residual_abs_max"].detach().cpu()),
-            )
-            self._cpa_count += 1
-        else:
-            simmap = fuse_xattn_logits(
-                base_simmap,
-                xattn_simmap,
-                alpha=self.xattn_logit_alpha,
-                uncertainty_gate=self.xattn_uncertainty_gate_enabled,
-                margin_threshold=margin_threshold,
-            )
+        simmap = fuse_xattn_logits(
+            base_simmap,
+            xattn_simmap,
+            alpha=self.xattn_logit_alpha,
+            uncertainty_gate=self.xattn_uncertainty_gate_enabled,
+            margin_threshold=margin_threshold,
+        )
         mask = torch.sigmoid(simmap)
         if getattr(self.frozen, "with_bg_clean", False):
             mask = self.frozen.similarity_assignment_weighted(
@@ -396,17 +322,17 @@ def official_parity_eval(args, cfg, device):
         keep_templates=True,
     )
     bridge, payload = load_bridge_from_checkpoint(args.checkpoint, cfg, device)
-    cpa_enabled = bool(cfg.evaluate.get("cpa_enabled", cfg.cpa.get("enabled", False)))
-    if cpa_enabled and bool(cfg.evaluate.pamr):
-        raise ValueError("CPA evaluation requires evaluate.pamr=false")
-    cpa = load_cpa_from_payload(cfg, payload, device, cpa_enabled)
+    if payload.get("cpa") is not None:
+        print(
+            "Ignoring legacy CPA weights in checkpoint; old MLP CPA is inactive.",
+            flush=True,
+        )
     print("Running single-scale inference; MSA disabled.", flush=True)
     wrapped = CleanOfficialEvalModel(
         frozen,
         bridge,
         class_clip,
         class_base,
-        cpa=cpa,
         xattn_delta_scale=float(cfg.evaluate.get("xattn_delta_scale", 0.5)),
         xattn_logit_alpha=float(cfg.evaluate.get("xattn_logit_alpha", 0.5)),
         xattn_uncertainty_gate_enabled=bool(
@@ -446,8 +372,7 @@ def official_parity_eval(args, cfg, device):
     )
     metric = dataset.evaluate(results, logger=None)
     miou = float(metric["mIoU"] * 100)
-    cpa_summary = wrapped.cpa_summary() if cpa is not None else None
-    return miou, payload, cpa_summary
+    return miou, payload
 
 
 def init_eval_logger(cfg, out):
@@ -465,9 +390,7 @@ def main():
     cfg = load_clean_config(args.config, args.opts)
     reject_msa_eval_config(cfg)
     if bool(cfg.evaluate.get("ccr_enabled", False)) or bool(cfg.get("ccr", {}).get("enabled", False)):
-        raise ValueError("CCR is disabled for CPA evaluation")
-    if bool(cfg.evaluate.get("cpa_enabled", cfg.cpa.get("enabled", False))) and args.cached_fast_eval:
-        raise ValueError("CPA official semantic evaluation does not use cached patch-token inputs")
+        raise ValueError("CCR is disabled for clean XAttn evaluation")
     if args.cached_fast_eval and not args.features:
         raise ValueError("--features is required when --cached_fast_eval is used")
     if dist.is_available() and not dist.is_initialized():
@@ -480,7 +403,7 @@ def main():
     if not args.cached_fast_eval:
         print("Eval mode: official Talk2DINO slide-inference parity", flush=True)
         print("Cached eval features are not used for prediction in this mode.", flush=True)
-        miou, payload, cpa_summary = official_parity_eval(
+        miou, payload = official_parity_eval(
             args,
             cfg,
             device,
@@ -494,24 +417,11 @@ def main():
         print("CCR enabled          : false", flush=True)
         print(
             "XAttnBridge_Clean=true "
-            f"CPA-v1={cpa_summary is not None} MSA=false "
+            "CPA-v1=false MSA=false "
             "PAMR=false RVS=false CARS=false RCC=false VPA=false VAB=false "
             "OPC=false Router=false USRC=false CCR=false",
             flush=True,
         )
-        if cpa_summary is not None:
-            print(
-                "CPA eval stats        : "
-                f"num_prototypes={int(cfg.cpa.num_prototypes)} "
-                f"aggregation={cfg.cpa.prototype_aggregation} "
-                f"topk={int(cfg.cpa.topk)} "
-                f"residual_scale={float(cfg.cpa.residual_scale):.3f} "
-                f"residual_clip={float(cfg.cpa.residual_clip):.3f} "
-                f"mean_residual={cpa_summary['cpa_residual_abs_mean']:.6f} "
-                f"max_residual={cpa_summary['cpa_residual_abs_max']:.6f} "
-                f"modified_fraction={cpa_summary['cpa_modified_fraction']:.4f}",
-                flush=True,
-            )
         with open(out / "summary.json", "w") as f:
             json.dump({
                 "method_name": METHOD_NAME,
@@ -522,8 +432,7 @@ def main():
                 "checkpoint": args.checkpoint,
                 "checkpoint_epoch": payload.get("epoch"),
                 "coco_stuff_miou": miou,
-                "cpa_enabled": cpa_summary is not None,
-                "cpa_stats": cpa_summary,
+                "cpa_enabled": False,
                 "msa_enabled": False,
             }, f, indent=2)
         return
@@ -540,6 +449,11 @@ def main():
         keep_templates=True,
     )
     bridge, payload = load_bridge_from_checkpoint(args.checkpoint, cfg, device)
+    if payload.get("cpa") is not None:
+        print(
+            "Ignoring legacy CPA weights in checkpoint; old MLP CPA is inactive.",
+            flush=True,
+        )
     manifest, samples = load_all_eval_samples(args.features)
     base_text = mean_template_embeddings(base_cls.to(device))
 

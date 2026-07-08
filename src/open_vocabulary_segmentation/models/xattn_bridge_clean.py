@@ -509,7 +509,6 @@ def save_checkpoint_clean(
     cfg,
     extra_metrics=None,
     scaler=None,
-    cpa=None,
 ):
     extra_metrics = extra_metrics or {}
     payload = {
@@ -523,8 +522,6 @@ def save_checkpoint_clean(
         "best_miou": best_miou,
         "config": OmegaConf.to_container(cfg, resolve=True),
     }
-    if cpa is not None:
-        payload["cpa"] = cpa.state_dict()
     payload.update(extra_metrics)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

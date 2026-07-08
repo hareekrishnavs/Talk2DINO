@@ -65,28 +65,6 @@ xattn_safety:
 ccr:
   enabled: false
 
-cpa:
-  enabled: true
-  num_prototypes: 4
-  hidden_dim: 256
-  prototype_scale: 0.10
-  prototype_aggregation: logsumexp
-  prototype_temperature: 0.07
-  normalize: true
-  topk: 5
-  residual_scale: 0.25
-  residual_clip: 0.5
-
-cpa_loss:
-  enabled: true
-  prototype_infonce_weight: 0.20
-  preserve_weight: 0.01
-  temperature: 2.0
-  confident_margin: 0.20
-  diversity_weight: 0.001
-  diversity_margin: 0.90
-  residual_l1_weight: 0.001
-
 extract:
   batch_size: 64
   shard_size: 500
@@ -111,7 +89,6 @@ train:
 evaluate:
   pamr: false
   ccr_enabled: false
-  cpa_enabled: true
   template: sub_imagenet_template
   xattn_delta_scale: 0.5
   xattn_logit_alpha: 0.5
