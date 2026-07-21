@@ -27,6 +27,7 @@ from xattn_bridge_clean import (
     pairwise_scores,
     save_checkpoint_clean,
 )
+from ic_cpa import AttentionSlotDynamicPrototypeHead
 from eval_xattn_clean import (
     bridge_class_embeddings,
     build_class_embeddings,
@@ -42,6 +43,14 @@ def parse_args():
     parser.add_argument("--config", required=True)
     parser.add_argument("--train_features", required=True)
     parser.add_argument("--eval_features", required=True)
+    parser.add_argument(
+        "--init_checkpoint",
+        default=None,
+        help=(
+            "Optional checkpoint used only to initialize model weights before "
+            "training. Optimizer/scheduler/scaler state is not loaded."
+        ),
+    )
     parser.add_argument("--output", required=True)
     parser.add_argument("--opts", nargs="+", default=None)
     return parser.parse_args()
@@ -88,6 +97,56 @@ def get_safety_cfg(cfg):
         "warn_if_ratio_above": 0.20,
     })
     return OmegaConf.merge(defaults, cfg.get("xattn_safety", {}))
+
+
+def get_ic_cpa_cfg(cfg):
+    defaults = OmegaConf.create({
+        "enabled": False,
+        "dino_dim": 768,
+        "num_prototypes": 4,
+        "beta": 1.0,
+        "gamma": 0.010,
+        "temperature": 0.07,
+        "topk": 15,
+        "residual_scale": 0.05,
+        "residual_clip": 0.20,
+        "return_aux_during_train": True,
+        "out_proj_init": "identity",
+        "out_proj_init_scale": 0.01,
+    })
+    return OmegaConf.merge(defaults, cfg.get("ic_cpa", {}))
+
+
+def get_ic_cpa_loss_cfg(cfg):
+    user_cfg = cfg.get("ic_cpa_loss", {})
+    defaults = OmegaConf.create({
+        "enabled": True,
+        "proto_align_type": "soft_kl",
+        "proto_distill_weight": 0.02,
+        "distill_temperature": 2.0,
+        "distill_confidence_weighting": True,
+        "distill_confidence_min": 0.05,
+        "preserve_weight": 0.10,
+        "slot_diversity_weight": 0.005,
+        "slot_diversity_margin": 0.3,
+        "attention_diversity_weight": 0.005,
+        "attention_diversity_margin": 0.5,
+        "residual_l1_weight": 0.01,
+        "hard_ce_weight": 0.0,
+        "min_teacher_conf": 0.35,
+        "teacher_top_percent_fallback": 0.20,
+    })
+    merged = OmegaConf.merge(defaults, user_cfg)
+    if "proto_distill_weight" not in user_cfg and "proto_align_weight" in user_cfg:
+        merged.proto_distill_weight = float(user_cfg.proto_align_weight)
+    if (
+        str(merged.get("proto_align_type", "soft_kl")) == "hard_ce"
+        and "hard_ce_weight" not in user_cfg
+    ):
+        merged.hard_ce_weight = float(
+            user_cfg.get("proto_align_weight", merged.proto_distill_weight)
+        )
+    return merged
 
 
 def kl_rows(logits_log_probs, target_probs):
@@ -146,6 +205,216 @@ def bridge_safety_losses(stats, safety_cfg):
     }
 
 
+def fused_ic_cpa_base_logits(stats, cfg):
+    required = {"base_patch_logits", "xattn_patch_logits"}
+    missing = sorted(required - set(stats.keys()))
+    if missing:
+        raise KeyError(
+            "IC-CPA fused baseline requires bridge stats keys "
+            f"{missing}; enable base-guided/XAttn patch logits."
+        )
+    margin_threshold = (
+        float(cfg.evaluate.get("xattn_margin_threshold", 0.05))
+        if bool(cfg.evaluate.get("xattn_margin_gate_enabled", False))
+        else None
+    )
+    return fuse_xattn_logits(
+        stats["base_patch_logits"],
+        stats["xattn_patch_logits"],
+        alpha=float(cfg.evaluate.get("xattn_logit_alpha", 0.5)),
+        uncertainty_gate=bool(cfg.evaluate.get("xattn_uncertainty_gate_enabled", True)),
+        margin_threshold=margin_threshold,
+    )
+
+
+def zero_ic_cpa_losses(reference):
+    zero = reference.new_tensor(0.0)
+    return {
+        "loss_ic_proto_distill": zero,
+        "loss_ic_proto_hard_ce": zero,
+        "loss_ic_preserve": zero,
+        "loss_ic_slot_diversity": zero,
+        "loss_ic_attention_diversity": zero,
+        "loss_ic_residual_l1": zero,
+        "loss_ic_cpa_total": zero,
+        "raw_residual_abs_mean": zero.detach(),
+        "ic_residual_abs_mean": zero.detach(),
+        "ic_residual_abs_max": zero.detach(),
+        "applied_correction_abs_mean": zero.detach(),
+        "applied_correction_abs_max": zero.detach(),
+        "ic_raw_modified_fraction": zero.detach(),
+        "ic_applied_modified_fraction": zero.detach(),
+        "ic_slot_pairwise_cos_mean": zero.detach(),
+        "ic_attention_pairwise_cos_mean": zero.detach(),
+        "ic_modified_fraction": zero.detach(),
+    }
+
+
+def _pairwise_upper_values(sim):
+    num_slots = sim.shape[-1]
+    if num_slots < 2:
+        return sim.new_zeros((0,))
+    mask = torch.triu(
+        torch.ones(num_slots, num_slots, device=sim.device, dtype=torch.bool),
+        diagonal=1,
+    )
+    return sim[..., mask]
+
+
+def _slot_diversity_loss(prototypes, margin):
+    if prototypes.shape[-2] < 2:
+        zero = prototypes.new_tensor(0.0)
+        return zero, zero.detach()
+    proto = F.normalize(prototypes.float(), dim=-1, eps=1e-6)
+    sim = torch.einsum("bckd,bcld->bckl", proto, proto)
+    pairs = _pairwise_upper_values(sim)
+    if pairs.numel() == 0:
+        zero = prototypes.new_tensor(0.0)
+        return zero, zero.detach()
+    loss = F.relu(pairs - float(margin)).pow(2).mean()
+    return loss, pairs.mean().detach()
+
+
+def _attention_diversity_loss(attention_weights, margin):
+    if attention_weights.shape[-2] < 2:
+        zero = attention_weights.new_tensor(0.0)
+        return zero, zero.detach()
+    attn = F.normalize(attention_weights.float(), dim=-1, eps=1e-6)
+    sim = torch.einsum("bckr,bclr->bckl", attn, attn)
+    pairs = _pairwise_upper_values(sim)
+    if pairs.numel() == 0:
+        zero = attention_weights.new_tensor(0.0)
+        return zero, zero.detach()
+    loss = F.relu(pairs - float(margin)).pow(2).mean()
+    return loss, pairs.mean().detach()
+
+
+def _proto_hard_ce_loss(prototype_logits, base_logits, loss_cfg):
+    base_detached = base_logits.detach().float()
+    student = prototype_logits.float()
+    base_prob = F.softmax(base_detached, dim=1)
+    conf, labels = base_prob.max(dim=1)
+    selected = conf >= float(loss_cfg.min_teacher_conf)
+    fallback_fraction = float(loss_cfg.teacher_top_percent_fallback)
+    fallback_fraction = min(max(fallback_fraction, 0.0), 1.0)
+    if fallback_fraction > 0.0:
+        for batch_idx in range(selected.shape[0]):
+            if bool(selected[batch_idx].any()):
+                continue
+            num_regions = selected.shape[1]
+            fallback_k = max(1, int(math.ceil(num_regions * fallback_fraction)))
+            indices = conf[batch_idx].topk(min(fallback_k, num_regions)).indices
+            selected[batch_idx, indices] = True
+    if not bool(selected.any()):
+        return student.new_tensor(0.0)
+    logits_for_ce = student.permute(0, 2, 1)[selected]
+    labels_for_ce = labels[selected].detach()
+    return F.cross_entropy(logits_for_ce, labels_for_ce)
+
+
+def _proto_distill_loss(prototype_logits, base_logits, loss_cfg):
+    teacher_logits = base_logits.detach().float()
+    student_logits = prototype_logits.float()
+    temperature = max(float(loss_cfg.distill_temperature), 1e-6)
+    student_log_probs = F.log_softmax(student_logits / temperature, dim=1)
+    teacher_probs = F.softmax(teacher_logits / temperature, dim=1)
+    per_region_kl = F.kl_div(
+        student_log_probs,
+        teacher_probs,
+        reduction="none",
+    ).sum(dim=1)
+    per_region_kl = per_region_kl * (temperature * temperature)
+    if bool(loss_cfg.get("distill_confidence_weighting", True)):
+        conf = F.softmax(teacher_logits, dim=1).max(dim=1).values
+        weights = conf.clamp(
+            min=float(loss_cfg.get("distill_confidence_min", 0.05)),
+            max=1.0,
+        )
+        return (per_region_kl * weights).sum() / weights.sum().clamp_min(1e-6)
+    return per_region_kl.mean()
+
+
+def ic_cpa_losses(aux, loss_cfg):
+    if not bool(loss_cfg.enabled):
+        return zero_ic_cpa_losses(aux["prototype_logits"])
+    prototype_logits = aux["prototype_logits"]
+    base_logits = aux["base_logits"]
+    final_logits = aux.get("final_logits", base_logits)
+    residual = aux["residual"]
+    clipped_residual = aux.get("clipped_residual", residual)
+    topk_mask = aux.get(
+        "topk_mask",
+        torch.ones_like(base_logits, dtype=torch.bool),
+    )
+    proto_align_type = str(loss_cfg.get("proto_align_type", "soft_kl"))
+    if proto_align_type == "soft_kl":
+        loss_proto_distill = _proto_distill_loss(prototype_logits, base_logits, loss_cfg)
+        loss_proto_hard_ce = prototype_logits.new_tensor(0.0)
+    elif proto_align_type == "hard_ce":
+        loss_proto_distill = prototype_logits.new_tensor(0.0)
+        loss_proto_hard_ce = _proto_hard_ce_loss(prototype_logits, base_logits, loss_cfg)
+    else:
+        raise ValueError(
+            "ic_cpa_loss.proto_align_type must be 'soft_kl' or 'hard_ce', "
+            f"got {proto_align_type}"
+        )
+    correction = final_logits.float() - base_logits.detach().float()
+    raw_residual = prototype_logits.float() - base_logits.detach().float()
+    loss_preserve = correction.pow(2).mean()
+    loss_slot_div, slot_cos = _slot_diversity_loss(
+        aux["prototypes"],
+        float(loss_cfg.slot_diversity_margin),
+    )
+    loss_attn_div, attn_cos = _attention_diversity_loss(
+        aux["attention_weights"],
+        float(loss_cfg.attention_diversity_margin),
+    )
+    loss_residual_l1 = correction.abs().mean()
+    total = (
+        float(loss_cfg.get("proto_distill_weight", 0.02)) * loss_proto_distill
+        + float(loss_cfg.get("hard_ce_weight", 0.0)) * loss_proto_hard_ce
+        + float(loss_cfg.preserve_weight) * loss_preserve
+        + float(loss_cfg.slot_diversity_weight) * loss_slot_div
+        + float(loss_cfg.attention_diversity_weight) * loss_attn_div
+        + float(loss_cfg.residual_l1_weight) * loss_residual_l1
+    )
+    raw_residual_abs_mean = raw_residual.abs().mean()
+    applied_correction_abs_mean = correction.abs().mean()
+    applied_correction_abs_max = correction.abs().max()
+    selected_residual = clipped_residual.masked_select(topk_mask)
+    if selected_residual.numel() == 0:
+        residual_abs_mean = clipped_residual.new_tensor(0.0)
+        residual_abs_max = clipped_residual.new_tensor(0.0)
+    else:
+        residual_abs_mean = selected_residual.abs().mean()
+        residual_abs_max = selected_residual.abs().max()
+    raw_modified_fraction = (
+        topk_mask & (clipped_residual.abs() > 1e-6)
+    ).float().mean()
+    applied_modified_fraction = (
+        topk_mask & (correction.abs() > 1e-6)
+    ).float().mean()
+    return {
+        "loss_ic_proto_distill": loss_proto_distill,
+        "loss_ic_proto_hard_ce": loss_proto_hard_ce,
+        "loss_ic_preserve": loss_preserve,
+        "loss_ic_slot_diversity": loss_slot_div,
+        "loss_ic_attention_diversity": loss_attn_div,
+        "loss_ic_residual_l1": loss_residual_l1,
+        "loss_ic_cpa_total": total,
+        "raw_residual_abs_mean": raw_residual_abs_mean.detach(),
+        "ic_residual_abs_mean": residual_abs_mean.detach(),
+        "ic_residual_abs_max": residual_abs_max.detach(),
+        "applied_correction_abs_mean": applied_correction_abs_mean.detach(),
+        "applied_correction_abs_max": applied_correction_abs_max.detach(),
+        "ic_raw_modified_fraction": raw_modified_fraction.detach(),
+        "ic_applied_modified_fraction": applied_modified_fraction.detach(),
+        "ic_slot_pairwise_cos_mean": slot_cos.detach(),
+        "ic_attention_pairwise_cos_mean": attn_cos.detach(),
+        "ic_modified_fraction": applied_modified_fraction.detach(),
+    }
+
+
 def init_epoch_accumulators():
     return {
         "loss_total": 0.0,
@@ -155,8 +424,25 @@ def init_epoch_accumulators():
         "loss_cos": 0.0,
         "loss_attn_prior": 0.0,
         "loss_patch_preserve": 0.0,
+        "loss_ic_proto_distill": 0.0,
+        "loss_ic_proto_hard_ce": 0.0,
+        "loss_ic_preserve": 0.0,
+        "loss_ic_slot_diversity": 0.0,
+        "loss_ic_attention_diversity": 0.0,
+        "loss_ic_residual_l1": 0.0,
+        "loss_ic_cpa_total": 0.0,
         "attn_prior_kl": 0.0,
         "patch_preserve_kl": 0.0,
+        "raw_residual_abs_mean": 0.0,
+        "ic_residual_abs_mean": 0.0,
+        "ic_residual_abs_max": 0.0,
+        "applied_correction_abs_mean": 0.0,
+        "applied_correction_abs_max": 0.0,
+        "ic_raw_modified_fraction": 0.0,
+        "ic_applied_modified_fraction": 0.0,
+        "ic_slot_pairwise_cos_mean": 0.0,
+        "ic_attention_pairwise_cos_mean": 0.0,
+        "ic_modified_fraction": 0.0,
         "base_norm_mean": 0.0,
         "delta_norm_mean": 0.0,
         "delta_base_ratio_mean": 0.0,
@@ -170,7 +456,8 @@ def init_epoch_accumulators():
     }
 
 
-def update_epoch_accumulators(acc, loss_total, loss_infonce, losses, stats):
+def update_epoch_accumulators(acc, loss_total, loss_infonce, losses, stats, ic_losses=None):
+    ic_losses = ic_losses or zero_ic_cpa_losses(loss_total)
     acc["loss_total"] += float(loss_total.detach().cpu())
     acc["loss_infonce"] += float(loss_infonce.detach().cpu())
     acc["loss_delta_l2"] += float(losses["loss_delta_l2"].detach().cpu())
@@ -178,8 +465,41 @@ def update_epoch_accumulators(acc, loss_total, loss_infonce, losses, stats):
     acc["loss_cos"] += float(losses["loss_cos"].detach().cpu())
     acc["loss_attn_prior"] += float(losses["loss_attn_prior"].detach().cpu())
     acc["loss_patch_preserve"] += float(losses["loss_patch_preserve"].detach().cpu())
+    acc["loss_ic_proto_distill"] += float(ic_losses["loss_ic_proto_distill"].detach().cpu())
+    acc["loss_ic_proto_hard_ce"] += float(ic_losses["loss_ic_proto_hard_ce"].detach().cpu())
+    acc["loss_ic_preserve"] += float(ic_losses["loss_ic_preserve"].detach().cpu())
+    acc["loss_ic_slot_diversity"] += float(ic_losses["loss_ic_slot_diversity"].detach().cpu())
+    acc["loss_ic_attention_diversity"] += float(ic_losses["loss_ic_attention_diversity"].detach().cpu())
+    acc["loss_ic_residual_l1"] += float(ic_losses["loss_ic_residual_l1"].detach().cpu())
+    acc["loss_ic_cpa_total"] += float(ic_losses["loss_ic_cpa_total"].detach().cpu())
     acc["attn_prior_kl"] += float(losses["attn_prior_kl"].detach().cpu())
     acc["patch_preserve_kl"] += float(losses["patch_preserve_kl"].detach().cpu())
+    acc["raw_residual_abs_mean"] += float(ic_losses["raw_residual_abs_mean"].detach().cpu())
+    acc["ic_residual_abs_mean"] += float(ic_losses["ic_residual_abs_mean"].detach().cpu())
+    acc["ic_residual_abs_max"] = max(
+        acc["ic_residual_abs_max"],
+        float(ic_losses["ic_residual_abs_max"].detach().cpu()),
+    )
+    acc["applied_correction_abs_mean"] += float(
+        ic_losses["applied_correction_abs_mean"].detach().cpu()
+    )
+    acc["applied_correction_abs_max"] = max(
+        acc["applied_correction_abs_max"],
+        float(ic_losses["applied_correction_abs_max"].detach().cpu()),
+    )
+    acc["ic_raw_modified_fraction"] += float(
+        ic_losses["ic_raw_modified_fraction"].detach().cpu()
+    )
+    acc["ic_applied_modified_fraction"] += float(
+        ic_losses["ic_applied_modified_fraction"].detach().cpu()
+    )
+    acc["ic_slot_pairwise_cos_mean"] += float(
+        ic_losses["ic_slot_pairwise_cos_mean"].detach().cpu()
+    )
+    acc["ic_attention_pairwise_cos_mean"] += float(
+        ic_losses["ic_attention_pairwise_cos_mean"].detach().cpu()
+    )
+    acc["ic_modified_fraction"] += float(ic_losses["ic_modified_fraction"].detach().cpu())
     acc["base_norm_mean"] += float(stats["base_norm"].detach().float().mean().cpu())
     acc["delta_norm_mean"] += float(stats["delta_norm"].detach().float().mean().cpu())
     ratio = stats["delta_base_ratio"].detach().float()
@@ -206,8 +526,23 @@ def finalize_epoch_accumulators(acc, count):
         "loss_cos",
         "loss_attn_prior",
         "loss_patch_preserve",
+        "loss_ic_proto_distill",
+        "loss_ic_proto_hard_ce",
+        "loss_ic_preserve",
+        "loss_ic_slot_diversity",
+        "loss_ic_attention_diversity",
+        "loss_ic_residual_l1",
+        "loss_ic_cpa_total",
         "attn_prior_kl",
         "patch_preserve_kl",
+        "raw_residual_abs_mean",
+        "ic_residual_abs_mean",
+        "applied_correction_abs_mean",
+        "ic_raw_modified_fraction",
+        "ic_applied_modified_fraction",
+        "ic_slot_pairwise_cos_mean",
+        "ic_attention_pairwise_cos_mean",
+        "ic_modified_fraction",
         "base_norm_mean",
         "delta_norm_mean",
         "delta_base_ratio_mean",
@@ -239,6 +574,7 @@ def print_epoch_progress(epoch, epochs, step, total_steps, acc, start_time, lr):
         f"[{bar}] {step}/{total_steps} {percent:4.0f}% "
         f"L={metrics['loss_total']:.4f} "
         f"inf={metrics['loss_infonce']:.4f} "
+        f"ic={metrics['loss_ic_cpa_total']:.4f} "
         f"attn={metrics['attn_prior_kl']:.4f} "
         f"patch={metrics['patch_preserve_kl']:.4f} "
         f"d/b={metrics['delta_base_ratio_mean']:.3f} "
@@ -264,7 +600,99 @@ def projection_trainable_count(model):
     return sum(p.numel() for p in model.proj.parameters() if p.requires_grad)
 
 
-def maybe_auto_resume(out, cfg, bridge, optimizer, scheduler, scaler, device):
+def print_ic_cpa_parameter_norms(prefix, ic_cpa):
+    if ic_cpa is None:
+        return
+    norms = ic_cpa.parameter_norms()
+    print(
+        f"{prefix}: "
+        f"slot_mean={norms['prototype_slots_mean']:.6f} "
+        f"slot_std={norms['prototype_slots_std']:.6f} "
+        f"slot_norm={norms['prototype_slots_norm']:.6f} "
+        f"q={norms['q_proj_weight_norm']:.6f} "
+        f"k={norms['k_proj_weight_norm']:.6f} "
+        f"v={norms['v_proj_weight_norm']:.6f} "
+        f"out={norms['out_proj_weight_norm']:.6f}",
+        flush=True,
+    )
+
+
+def optimizer_ic_cpa_membership(optimizer, ic_cpa):
+    if ic_cpa is None:
+        return False, 0, 0
+    optimizer_param_ids = {
+        id(param)
+        for group in optimizer.param_groups
+        for param in group.get("params", [])
+    }
+    ic_params = list(ic_cpa.parameters())
+    included = sum(1 for param in ic_params if id(param) in optimizer_param_ids)
+    return included == len(ic_params), included, len(ic_params)
+
+
+def validate_ic_cpa_state_dict(ic_state):
+    required_keys = {
+        "prototype_slots",
+        "q_proj.weight",
+        "k_proj.weight",
+        "v_proj.weight",
+        "out_proj.weight",
+    }
+    if ic_state is None:
+        return False, sorted(required_keys)
+    state_keys = set(ic_state.keys())
+    missing = sorted(required_keys - state_keys)
+    return len(missing) == 0, missing
+
+
+def load_initial_checkpoint(init_checkpoint, bridge, ic_cpa, device):
+    if init_checkpoint in {None, "", "null", "None"}:
+        return
+    init_path = Path(init_checkpoint)
+    if not init_path.exists():
+        raise FileNotFoundError(f"Requested init checkpoint does not exist: {init_path}")
+    payload = torch.load(init_path, map_location=device, weights_only=False)
+    state = payload.get("bridge", payload.get("model"))
+    if state is None:
+        raise KeyError(f"Init checkpoint has no bridge/model state: {init_path}")
+    missing, unexpected = bridge.load_state_dict(state, strict=False)
+    print(
+        f"[{timestamp()}] Initialized bridge from checkpoint: {init_path} "
+        f"(missing={list(missing)}, unexpected={list(unexpected)})",
+        flush=True,
+    )
+    bridge._skip_zero_init_parity_check = True
+    bridge._parity_checked = True
+    if ic_cpa is None:
+        return
+    ic_state = payload.get("ic_cpa")
+    if ic_state is None:
+        print(
+            "Init checkpoint has no IC-CPA weights; IC-CPA starts from current initialization.",
+            flush=True,
+        )
+        return
+    ic_key_names = sorted(str(key) for key in ic_state.keys())
+    valid_ic_state, missing_required = validate_ic_cpa_state_dict(ic_state)
+    if not valid_ic_state:
+        raise ValueError(
+            "Init checkpoint contains config-shaped 'ic_cpa' instead of "
+            "IC-CPA weights. This checkpoint was saved before the checkpoint "
+            "overwrite fix. Retrain or use a fixed checkpoint. Missing "
+            f"required IC-CPA weight keys: {missing_required}. "
+            f"Found keys: {ic_key_names[:20]}"
+        )
+    missing, unexpected = ic_cpa.load_state_dict(ic_state, strict=False)
+    print(
+        "Initialized IC-CPA from checkpoint "
+        f"(num_ic_cpa_keys={len(ic_key_names)}, "
+        f"missing={list(missing)}, unexpected={list(unexpected)})",
+        flush=True,
+    )
+    print(f"IC-CPA init key sample: {ic_key_names[:8]}", flush=True)
+
+
+def maybe_auto_resume(out, cfg, bridge, optimizer, scheduler, scaler, device, ic_cpa=None):
     auto_resume = bool(cfg.train.get("auto_resume", True))
     resume_path = cfg.train.get("resume", None)
     if resume_path in {"", "null", "None"}:
@@ -282,6 +710,38 @@ def maybe_auto_resume(out, cfg, bridge, optimizer, scheduler, scaler, device):
     payload = torch.load(resume_path, map_location=device, weights_only=False)
     state = payload.get("bridge", payload.get("model"))
     bridge.load_state_dict(state)
+    if ic_cpa is not None:
+        if payload.get("ic_cpa") is not None:
+            ic_key_names = sorted(str(key) for key in payload["ic_cpa"].keys())
+            valid_ic_state, missing_required = validate_ic_cpa_state_dict(payload["ic_cpa"])
+            if not valid_ic_state:
+                raise ValueError(
+                    "Resumed checkpoint contains config-shaped 'ic_cpa' instead of "
+                    "IC-CPA weights. This checkpoint was saved before the checkpoint "
+                    "overwrite fix. Retrain or use a fixed checkpoint. Missing "
+                    f"required IC-CPA weight keys: {missing_required}. "
+                    f"Found keys: {ic_key_names[:20]}"
+                )
+            missing, unexpected = ic_cpa.load_state_dict(payload["ic_cpa"], strict=False)
+            print(
+                "Loaded IC-CPA resume weights "
+                f"(num_ic_cpa_keys={len(ic_key_names)}, "
+                f"missing={list(missing)}, unexpected={list(unexpected)})",
+                flush=True,
+            )
+            print(f"IC-CPA resume key sample: {ic_key_names[:8]}", flush=True)
+        else:
+            payload_ic_keys = [
+                key for key in payload.keys()
+                if "ic_cpa" in str(key) or "attention_slot" in str(key)
+            ]
+            raise ValueError(
+                "IC-CPA is enabled, but the resume checkpoint has no IC-CPA "
+                "weights. Use --init_checkpoint to initialize from a pre-IC-CPA "
+                "bridge checkpoint, or resume from a checkpoint saved after "
+                "IC-CPA training. "
+                f"checkpoint_ic_cpa_keys={len(payload_ic_keys)}"
+            )
     if payload.get("cpa") is not None:
         print(
             "Ignoring legacy CPA weights in resumed checkpoint; old CPA is inactive.",
@@ -290,7 +750,14 @@ def maybe_auto_resume(out, cfg, bridge, optimizer, scheduler, scaler, device):
     bridge._skip_zero_init_parity_check = True
     bridge._parity_checked = True
     if payload.get("optimizer") is not None:
-        optimizer.load_state_dict(payload["optimizer"])
+        try:
+            optimizer.load_state_dict(payload["optimizer"])
+        except ValueError as exc:
+            print(
+                "WARNING: optimizer state was not loaded because the trainable "
+                f"parameter set changed ({exc}). Continuing with a fresh optimizer.",
+                flush=True,
+            )
     if payload.get("scheduler") is not None and scheduler is not None:
         scheduler.load_state_dict(payload["scheduler"])
     if payload.get("scaler") is not None and scaler is not None:
@@ -315,19 +782,73 @@ def maybe_auto_resume(out, cfg, bridge, optimizer, scheduler, scaler, device):
 
 
 @torch.no_grad()
-def evaluate_baseline_val_loss(bridge, val_loader, frozen, device):
+def evaluate_baseline_val_loss(
+    bridge,
+    val_loader,
+    frozen,
+    device,
+    cfg,
+    safety_cfg,
+    ic_cpa=None,
+    ic_cpa_loss_cfg=None,
+    ic_cpa_loss_active=False,
+):
     bridge.eval()
+    if ic_cpa is not None:
+        ic_cpa.eval()
     losses = []
     for batch in val_loader:
         text_clip = batch["text_clip"].to(device, non_blocking=True).float()
-        with torch.no_grad():
-            text_base = frozen._frozen_base_text_to_dino(text_clip).float()
+        if "text_base" in batch:
+            text_base = batch["text_base"].to(device, non_blocking=True).float()
+        else:
+            with torch.no_grad():
+                text_base = frozen._frozen_base_text_to_dino(text_clip).float()
         patches = batch["patch_tokens"].to(device, non_blocking=True).float()
         visual = batch["visual_embed"].to(device, non_blocking=True).float()
-        scores = pairwise_scores(bridge, text_clip, text_base, patches, visual)
-        loss = contrastive_loss(scores)
+        scores, safety_stats = pairwise_scores(
+            bridge,
+            text_clip,
+            text_base,
+            patches,
+            visual,
+            return_stats=True,
+        )
+        contrastive_temperature = max(
+            float(cfg.train.get("contrastive_temperature", 0.07)),
+            1e-6,
+        )
+        loss = contrastive_loss(scores / contrastive_temperature)
+        safety_losses = bridge_safety_losses(safety_stats, safety_cfg)
+        if bool(safety_cfg.enabled):
+            loss = (
+                loss
+                + float(safety_cfg.delta_l2_weight) * safety_losses["loss_delta_l2"]
+                + float(safety_cfg.ratio_penalty_weight) * safety_losses["loss_ratio"]
+                + float(safety_cfg.cosine_penalty_weight) * safety_losses["loss_cos"]
+                + float(safety_cfg.attn_prior_weight) * safety_losses["loss_attn_prior"]
+                + float(safety_cfg.patch_preserve_weight) * safety_losses["loss_patch_preserve"]
+            )
+        if ic_cpa_loss_active:
+            required = {"mapped_text", "base_patch_logits", "xattn_patch_logits"}
+            missing = sorted(required - set(safety_stats.keys()))
+            if missing:
+                raise KeyError(
+                    "IC-CPA validation requires bridge stats keys "
+                    f"{missing}; enable base-guided/XAttn patch logits."
+                )
+            fused_base_logits = fused_ic_cpa_base_logits(safety_stats, cfg)
+            _, ic_aux = ic_cpa(
+                safety_stats["mapped_text"],
+                patches,
+                fused_base_logits,
+                return_aux=True,
+            )
+            loss = loss + ic_cpa_losses(ic_aux, ic_cpa_loss_cfg)["loss_ic_cpa_total"]
         losses.append(float(loss.detach().cpu()))
     bridge.train()
+    if ic_cpa is not None:
+        ic_cpa.train()
     if not losses:
         return float("inf")
     return float(torch.tensor(losses).mean())
@@ -346,8 +867,11 @@ def evaluate_cached_miou(
     xattn_logit_alpha=0.5,
     xattn_uncertainty_gate_enabled=True,
     xattn_margin_threshold=None,
+    ic_cpa=None,
 ):
     bridge.eval()
+    if ic_cpa is not None:
+        ic_cpa.eval()
     total_inter = torch.zeros(num_classes)
     total_union = torch.zeros(num_classes)
     base_text = mean_template_embeddings(class_base.to(device))
@@ -367,13 +891,17 @@ def evaluate_cached_miou(
             mapped,
         )
         base_logits = torch.einsum("bnd,cd->bcn", patch_norm, base_text)
-        logits = fuse_xattn_logits(
+        fused_base_logits = fuse_xattn_logits(
             base_logits,
             xattn_logits,
             alpha=xattn_logit_alpha,
             uncertainty_gate=xattn_uncertainty_gate_enabled,
             margin_threshold=xattn_margin_threshold,
         )
+        if ic_cpa is not None:
+            logits = ic_cpa(mapped, patches, fused_base_logits)
+        else:
+            logits = fused_base_logits
         n = logits.shape[-1]
         h = w = int(n ** 0.5)
         logits = logits[:, :, : h * w].reshape(1, num_classes, h, w)
@@ -389,6 +917,8 @@ def evaluate_cached_miou(
         total_inter += inter
         total_union += union
     bridge.train()
+    if ic_cpa is not None:
+        ic_cpa.train()
     return float(torch.nanmean(total_inter / total_union.clamp_min(1)) * 100.0)
 
 
@@ -476,14 +1006,61 @@ def main():
         val_loader = None
         eval_mode = "cached_seg_miou"
 
-    safety_cfg = get_safety_cfg(cfg)
     bridge = CleanXAttnBridge(**OmegaConf.to_container(cfg.bridge, resolve=True)).to(device)
-    trainable_parameters = list(bridge.parameters())
+    safety_cfg = get_safety_cfg(cfg)
+    ic_cpa_cfg = get_ic_cpa_cfg(cfg)
+    ic_cpa_loss_cfg = get_ic_cpa_loss_cfg(cfg)
+    ic_cpa = None
+    if bool(ic_cpa_cfg.enabled):
+        ic_kwargs = OmegaConf.to_container(ic_cpa_cfg, resolve=True)
+        ic_kwargs.pop("enabled", None)
+        ic_cpa = AttentionSlotDynamicPrototypeHead(**ic_kwargs).to(device)
+    load_initial_checkpoint(args.init_checkpoint, bridge, ic_cpa, device)
+
+    ic_cpa_train_only = bool(cfg.train.get("ic_cpa_train_only", False)) and ic_cpa is not None
+    ic_cpa_train_xattn = bool(cfg.train.get("ic_cpa_train_xattn", False)) and ic_cpa is not None
+    bridge.requires_grad_(True)
+    if ic_cpa is not None:
+        ic_cpa.requires_grad_(False)
+    trainable_modules = []
+    if ic_cpa_train_only:
+        bridge.requires_grad_(False)
+        ic_cpa.requires_grad_(True)
+        trainable_modules.append("IC-CPA")
+    elif ic_cpa_train_xattn:
+        bridge.requires_grad_(True)
+        ic_cpa.requires_grad_(True)
+        trainable_modules.extend(["XAttnBridge_Clean", "IC-CPA"])
+    else:
+        bridge.requires_grad_(True)
+        trainable_modules.append("XAttnBridge_Clean")
+        if ic_cpa is not None:
+            print(
+                "IC-CPA is enabled but frozen because train.ic_cpa_train_only=false "
+                "and train.ic_cpa_train_xattn=false.",
+                flush=True,
+            )
+    ic_cpa_loss_active = (
+        ic_cpa is not None
+        and bool(ic_cpa_loss_cfg.enabled)
+        and (ic_cpa_train_only or ic_cpa_train_xattn)
+    )
+    if ic_cpa_train_only and not bool(ic_cpa_loss_cfg.enabled):
+        raise ValueError("train.ic_cpa_train_only=true requires ic_cpa_loss.enabled=true.")
+    trainable_parameters = [
+        param for module in [bridge, ic_cpa] if module is not None
+        for param in module.parameters() if param.requires_grad
+    ]
+    if not trainable_parameters:
+        raise ValueError("No trainable parameters selected for this run.")
+    optimizer_lr = float(cfg.train.get("ic_cpa_lr", cfg.train.lr)) if ic_cpa_train_only else float(cfg.train.lr)
     optimizer = torch.optim.AdamW(
         trainable_parameters,
-        lr=float(cfg.train.lr),
+        lr=optimizer_lr,
         weight_decay=float(cfg.train.weight_decay),
     )
+    if ic_cpa_train_only:
+        print(f"IC-CPA optimizer lr      : {optimizer_lr:.3e}", flush=True)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
         T_max=max(1, int(cfg.train.epochs) * max(1, len(train_loader))),
@@ -505,6 +1082,11 @@ def main():
     print(f"contrastive_temperature   : {float(cfg.train.get('contrastive_temperature', 0.07)):.4f}", flush=True)
     print(f"Debug max_batches cap     : {cfg.train.get('max_batches', None)}", flush=True)
     print(f"Checkpoint policy         : last every epoch, epoch snapshot every {cfg.train.save_every}, best on eval improvement", flush=True)
+    print(
+        "Checkpoint best metric   : validation objective/cached metric, not official mIoU; "
+        "evaluate checkpoint_last.pth too for IC-CPA experiments.",
+        flush=True,
+    )
     print("-" * 78, flush=True)
     print("Method wiring", flush=True)
     print(f"  Text/Q source           : CLIP annotation feature `{cfg.data.get('text_features', 'ann_feats')}`", flush=True)
@@ -512,7 +1094,8 @@ def main():
     print(f"  Visual target           : same DINO region-aware feature `{cfg.data.get('features_name', 'disentangled_self_attn')}`", flush=True)
     print("  Base text projection    : frozen original Talk2DINO projection", flush=True)
     print("  Objective               : pairwise BxB InfoNCE over score(text_i, image_j)", flush=True)
-    print("  Trainable modules       : XAttnBridge_Clean only", flush=True)
+    print(f"  IC-CPA enabled          : {ic_cpa is not None}", flush=True)
+    print(f"  Trainable modules       : {', '.join(trainable_modules)}", flush=True)
     print(
         "  Bridge architecture     : "
         f"clip_dim={cfg.bridge.clip_dim}, dino_dim={cfg.bridge.dino_dim}, "
@@ -557,8 +1140,26 @@ def main():
         flush=True,
     )
     print(f"Trainable parameter count : {trainable_count(bridge)}", flush=True)
+    print(f"IC-CPA trainable params   : {trainable_count(ic_cpa) if ic_cpa is not None else 0}", flush=True)
+    print(
+        f"Total optimizer params    : {sum(p.numel() for p in trainable_parameters)}",
+        flush=True,
+    )
+    optimizer_has_ic_cpa, optimizer_ic_params, total_ic_params = optimizer_ic_cpa_membership(
+        optimizer,
+        ic_cpa,
+    )
+    print(
+        "Optimizer contains IC-CPA params: "
+        f"{optimizer_has_ic_cpa} "
+        f"({optimizer_ic_params}/{total_ic_params} parameter tensors)",
+        flush=True,
+    )
     print("Old CPA trainable params  : 0 (old MLP CPA inactive)", flush=True)
-    print("CLIP/DINO remain frozen; only XAttnBridge_Clean is optimized.", flush=True)
+    print(
+        "CLIP/DINO/Talk2DINO projection remain frozen; optimizer follows train.ic_cpa_* flags.",
+        flush=True,
+    )
     print(f"train_feature_source      : {train_feature_source}", flush=True)
     print(f"train_eval_mode           : {eval_mode}", flush=True)
     if train_feature_source == "baseline_pth_in_memory":
@@ -594,12 +1195,41 @@ def main():
         flush=True,
     )
     print("Old MLP CPA              : inactive/removed from train path", flush=True)
+    print(
+        "IC-CPA config           : "
+        f"enabled={ic_cpa is not None} "
+        f"K={int(ic_cpa_cfg.num_prototypes)} "
+        f"beta={float(ic_cpa_cfg.beta):.3f} "
+        f"gamma={float(ic_cpa_cfg.gamma):.3f} "
+        f"temperature={float(ic_cpa_cfg.temperature):.3f} "
+        f"topk={int(ic_cpa_cfg.topk)} "
+        f"residual_scale={float(ic_cpa_cfg.residual_scale):.3f} "
+        f"residual_clip={float(ic_cpa_cfg.residual_clip):.3f} "
+        f"loss_enabled={bool(ic_cpa_loss_cfg.enabled)} "
+        f"loss_active={ic_cpa_loss_active} "
+        f"proto_align_type={str(ic_cpa_loss_cfg.get('proto_align_type', 'soft_kl'))} "
+        f"proto_distill_weight={float(ic_cpa_loss_cfg.get('proto_distill_weight', 0.02)):.4g} "
+        f"distill_temperature={float(ic_cpa_loss_cfg.get('distill_temperature', 2.0)):.3f} "
+        f"preserve_weight={float(ic_cpa_loss_cfg.preserve_weight):.4g} "
+        f"residual_l1_weight={float(ic_cpa_loss_cfg.residual_l1_weight):.4g} "
+        f"train_only={ic_cpa_train_only} "
+        f"train_xattn={ic_cpa_train_xattn}",
+        flush=True,
+    )
+    if ic_cpa is not None:
+        print(
+            "IC-CPA initialization  : small near-zero out_proj for base-parity; "
+            "random prototype slot init for attention-slot specialization",
+            flush=True,
+        )
+        print_ic_cpa_parameter_norms("IC-CPA parameter norms", ic_cpa)
     print("CCR: enabled=false", flush=True)
     print("Main InfoNCE: mapped_text vs visual_embed", flush=True)
 
     start_epoch, best_miou, best_epoch = maybe_auto_resume(
-        out, cfg, bridge, optimizer, scheduler, scaler, device
+        out, cfg, bridge, optimizer, scheduler, scaler, device, ic_cpa=ic_cpa
     )
+    print_ic_cpa_parameter_norms("IC-CPA parameter norms after resume/init", ic_cpa)
     if eval_mode == "baseline_pth_val_loss" and best_miou == -float("inf"):
         best_miou = float("inf")
     start = time.time()
@@ -620,6 +1250,8 @@ def main():
     for epoch in range(start_epoch, epochs + 1):
         epoch_start = time.time()
         bridge.train()
+        if ic_cpa is not None:
+            ic_cpa.train()
         acc = init_epoch_accumulators()
         count = 0
         stop_training = False
@@ -670,20 +1302,72 @@ def main():
                         + float(safety_cfg.attn_prior_weight) * safety_losses["loss_attn_prior"]
                         + float(safety_cfg.patch_preserve_weight) * safety_losses["loss_patch_preserve"]
                     )
+                ic_losses = zero_ic_cpa_losses(loss)
+                if ic_cpa_loss_active:
+                    required = {"mapped_text", "base_patch_logits", "xattn_patch_logits"}
+                    missing = sorted(required - set(safety_stats.keys()))
+                    if missing:
+                        raise KeyError(
+                            "IC-CPA training requires bridge stats keys "
+                            f"{missing}; enable base-guided/XAttn patch logits."
+                        )
+                    fused_base_logits = fused_ic_cpa_base_logits(safety_stats, cfg)
+                    _, ic_aux = ic_cpa(
+                        safety_stats["mapped_text"],
+                        patches,
+                        fused_base_logits,
+                        return_aux=True,
+                    )
+                    ic_losses = ic_cpa_losses(ic_aux, ic_cpa_loss_cfg)
+                    loss = loss + ic_losses["loss_ic_cpa_total"]
             if not torch.isfinite(loss):
                 print("WARNING: loss became NaN/Inf; saving checkpoint_last.pth and stopping cleanly.", flush=True)
                 stop_training = True
                 break
             scaler.scale(loss).backward()
+            step_index = count + 1
+            ic_grad_norms = None
+            ic_norms_before_step = None
+            log_ic_grad_debug = False
+            if ic_cpa_loss_active:
+                scaler.unscale_(optimizer)
+                ic_grad_norms = ic_cpa.gradient_norms()
+                ic_norms_before_step = ic_cpa.parameter_norms()
+                log_ic_grad_debug = step_index == 1 or step_index % progress_interval == 0
             scaler.step(optimizer)
             scaler.update()
             scheduler.step()
+            if ic_cpa_loss_active and log_ic_grad_debug:
+                ic_norms_after_step = ic_cpa.parameter_norms()
+                print(
+                    "\n"
+                    f"IC-CPA grad/update debug step={step_index}: "
+                    f"grad_slot={ic_grad_norms['prototype_slots_grad_norm']:.6e} "
+                    f"grad_q={ic_grad_norms['q_proj_grad_norm']:.6e} "
+                    f"grad_k={ic_grad_norms['k_proj_grad_norm']:.6e} "
+                    f"grad_v={ic_grad_norms['v_proj_grad_norm']:.6e} "
+                    f"grad_out={ic_grad_norms['out_proj_grad_norm']:.6e} "
+                    f"slot_norm_before={ic_norms_before_step['prototype_slots_norm']:.6f} "
+                    f"slot_norm_after={ic_norms_after_step['prototype_slots_norm']:.6f} "
+                    f"out_norm_before={ic_norms_before_step['out_proj_weight_norm']:.6f} "
+                    f"out_norm_after={ic_norms_after_step['out_proj_weight_norm']:.6f} "
+                    f"loss_ic={ic_losses['loss_ic_cpa_total'].detach().float().item():.6f} "
+                    f"distill={ic_losses['loss_ic_proto_distill'].detach().float().item():.6f} "
+                    f"hard_ce={ic_losses['loss_ic_proto_hard_ce'].detach().float().item():.6f} "
+                    f"preserve={ic_losses['loss_ic_preserve'].detach().float().item():.6f} "
+                    f"slot_div={ic_losses['loss_ic_slot_diversity'].detach().float().item():.6f} "
+                    f"attn_div={ic_losses['loss_ic_attention_diversity'].detach().float().item():.6f} "
+                    f"res_l1={ic_losses['loss_ic_residual_l1'].detach().float().item():.6f} "
+                    f"applied={ic_losses['applied_correction_abs_mean'].detach().float().item():.6f}",
+                    flush=True,
+                )
             update_epoch_accumulators(
                 acc,
                 loss,
                 loss_infonce,
                 safety_losses,
                 safety_stats,
+                ic_losses,
             )
             acc["data_time"] += data_time
             acc["compute_time"] += time.time() - compute_start
@@ -710,7 +1394,6 @@ def main():
         lr = optimizer.param_groups[0]["lr"]
         epoch_metrics = finalize_epoch_accumulators(acc, count)
         epoch_it_s = count / max(epoch_time, 1e-6)
-        projected_hours = avg_epoch * epochs / 3600.0
         print(
             f"[{timestamp()}] Epoch {epoch:03d}/{epochs:03d} summary "
             f"loss_total={epoch_metrics['loss_total']:.6f} "
@@ -720,17 +1403,34 @@ def main():
             f"loss_cos={epoch_metrics['loss_cos']:.6f} "
             f"loss_attn_prior={epoch_metrics['loss_attn_prior']:.6f} "
             f"loss_patch_preserve={epoch_metrics['loss_patch_preserve']:.6f} "
+            f"loss_ic_proto_distill={epoch_metrics['loss_ic_proto_distill']:.6f} "
+            f"loss_ic_proto_hard_ce={epoch_metrics['loss_ic_proto_hard_ce']:.6f} "
+            f"loss_ic_preserve={epoch_metrics['loss_ic_preserve']:.6f} "
+            f"loss_ic_slot_diversity={epoch_metrics['loss_ic_slot_diversity']:.6f} "
+            f"loss_ic_attention_diversity={epoch_metrics['loss_ic_attention_diversity']:.6f} "
+            f"loss_ic_residual_l1={epoch_metrics['loss_ic_residual_l1']:.6f} "
+            f"loss_ic_cpa_total={epoch_metrics['loss_ic_cpa_total']:.6f} "
             f"attn_prior_kl={epoch_metrics['attn_prior_kl']:.6f} "
             f"patch_preserve_kl={epoch_metrics['patch_preserve_kl']:.6f} "
+            f"raw_residual_abs_mean={epoch_metrics['raw_residual_abs_mean']:.6f} "
+            f"ic_residual_abs_mean={epoch_metrics['ic_residual_abs_mean']:.6f} "
+            f"ic_residual_abs_max={epoch_metrics['ic_residual_abs_max']:.6f} "
+            f"applied_correction_abs_mean={epoch_metrics['applied_correction_abs_mean']:.6f} "
+            f"applied_correction_abs_max={epoch_metrics['applied_correction_abs_max']:.6f} "
+            f"ic_raw_modified_fraction={epoch_metrics['ic_raw_modified_fraction']:.4f} "
+            f"ic_applied_modified_fraction={epoch_metrics['ic_applied_modified_fraction']:.4f} "
+            f"ic_slot_cos={epoch_metrics['ic_slot_pairwise_cos_mean']:.4f} "
+            f"ic_attn_cos={epoch_metrics['ic_attention_pairwise_cos_mean']:.4f} "
+            f"ic_modified_fraction={epoch_metrics['ic_modified_fraction']:.4f} "
             f"base_norm={epoch_metrics['base_norm_mean']:.4f} "
             f"delta_norm={epoch_metrics['delta_norm_mean']:.4f} "
             f"delta/base_mean={epoch_metrics['delta_base_ratio_mean']:.4f} "
             f"delta/base_max={epoch_metrics['delta_base_ratio_max']:.4f} "
-        f"cos_base_mapped_mean={epoch_metrics['cosine_base_mapped_mean']:.4f} "
-        f"cos_min={epoch_metrics['cosine_base_mapped_min']:.4f} "
-        f"gamma={epoch_metrics['gamma']:.4f} "
-        f"base_guidance_beta={epoch_metrics['base_guidance_beta']:.4f} "
-        f"data/batch={epoch_metrics['data_time']:.3f}s "
+            f"cos_base_mapped_mean={epoch_metrics['cosine_base_mapped_mean']:.4f} "
+            f"cos_min={epoch_metrics['cosine_base_mapped_min']:.4f} "
+            f"gamma={epoch_metrics['gamma']:.4f} "
+            f"base_guidance_beta={epoch_metrics['base_guidance_beta']:.4f} "
+            f"data/batch={epoch_metrics['data_time']:.3f}s "
             f"xattn-step={epoch_metrics['compute_time']:.3f}s "
             f"lr={lr:.3e} epoch_time={format_seconds(epoch_time)} "
             f"it/s={epoch_it_s:.3f} elapsed={format_seconds(elapsed)} eta={format_seconds(eta)}",
@@ -755,21 +1455,25 @@ def main():
                 flush=True,
             )
             stop_training = True
-        if projected_hours > float(cfg.train.max_train_hours):
-            print(
-                f"WARNING projected {epochs} epochs = {projected_hours:.2f}h "
-                f"> train.max_train_hours={cfg.train.max_train_hours}",
-                flush=True,
-            )
 
         miou = None
         val_loss = None
         is_eval_epoch = epoch % int(cfg.train.save_every) == 0 or epoch == epochs
         if is_eval_epoch:
             if eval_mode == "baseline_pth_val_loss":
-                val_loss = evaluate_baseline_val_loss(bridge, val_loader, frozen, device)
+                val_loss = evaluate_baseline_val_loss(
+                    bridge,
+                    val_loader,
+                    frozen,
+                    device,
+                    cfg,
+                    safety_cfg,
+                    ic_cpa=ic_cpa,
+                    ic_cpa_loss_cfg=ic_cpa_loss_cfg,
+                    ic_cpa_loss_active=ic_cpa_loss_active,
+                )
                 print(
-                    f"[{timestamp()}] Epoch {epoch:03d}/{epochs:03d} baseline val contrastive loss={val_loss:.6f}",
+                    f"[{timestamp()}] Epoch {epoch:03d}/{epochs:03d} validation objective loss={val_loss:.6f}",
                     flush=True,
                 )
             else:
@@ -795,6 +1499,7 @@ def main():
                         if bool(cfg.evaluate.get("xattn_margin_gate_enabled", False))
                         else None
                     ),
+                    ic_cpa=ic_cpa,
                 )
                 print(f"[{timestamp()}] Epoch {epoch:03d}/{epochs:03d} cached eval coco_stuff mIoU={miou:.2f}%", flush=True)
         if eval_mode == "baseline_pth_val_loss":
@@ -818,8 +1523,25 @@ def main():
             "loss_cos": epoch_metrics["loss_cos"],
             "loss_attn_prior": epoch_metrics["loss_attn_prior"],
             "loss_patch_preserve": epoch_metrics["loss_patch_preserve"],
+            "loss_ic_proto_distill": epoch_metrics["loss_ic_proto_distill"],
+            "loss_ic_proto_hard_ce": epoch_metrics["loss_ic_proto_hard_ce"],
+            "loss_ic_preserve": epoch_metrics["loss_ic_preserve"],
+            "loss_ic_slot_diversity": epoch_metrics["loss_ic_slot_diversity"],
+            "loss_ic_attention_diversity": epoch_metrics["loss_ic_attention_diversity"],
+            "loss_ic_residual_l1": epoch_metrics["loss_ic_residual_l1"],
+            "loss_ic_cpa_total": epoch_metrics["loss_ic_cpa_total"],
             "attn_prior_kl": epoch_metrics["attn_prior_kl"],
             "patch_preserve_kl": epoch_metrics["patch_preserve_kl"],
+            "raw_residual_abs_mean": epoch_metrics["raw_residual_abs_mean"],
+            "ic_residual_abs_mean": epoch_metrics["ic_residual_abs_mean"],
+            "ic_residual_abs_max": epoch_metrics["ic_residual_abs_max"],
+            "applied_correction_abs_mean": epoch_metrics["applied_correction_abs_mean"],
+            "applied_correction_abs_max": epoch_metrics["applied_correction_abs_max"],
+            "ic_raw_modified_fraction": epoch_metrics["ic_raw_modified_fraction"],
+            "ic_applied_modified_fraction": epoch_metrics["ic_applied_modified_fraction"],
+            "ic_slot_pairwise_cos_mean": epoch_metrics["ic_slot_pairwise_cos_mean"],
+            "ic_attention_pairwise_cos_mean": epoch_metrics["ic_attention_pairwise_cos_mean"],
+            "ic_modified_fraction": epoch_metrics["ic_modified_fraction"],
             "miou": miou,
             "val_loss": val_loss,
             "eval_mode": eval_mode,
@@ -827,6 +1549,12 @@ def main():
             "contrastive_temperature": float(cfg.train.get("contrastive_temperature", 0.07)),
             "xattn_safety": OmegaConf.to_container(safety_cfg, resolve=True),
             "legacy_cpa_active": False,
+            "ic_cpa_enabled": ic_cpa is not None,
+            "ic_cpa_loss_active": ic_cpa_loss_active,
+            "ic_cpa_train_only": ic_cpa_train_only,
+            "ic_cpa_train_xattn": ic_cpa_train_xattn,
+            "ic_cpa_config": OmegaConf.to_container(ic_cpa_cfg, resolve=True),
+            "ic_cpa_loss": OmegaConf.to_container(ic_cpa_loss_cfg, resolve=True),
             "bridge_base_guidance": {
                 "base_guided_attention": bool(cfg.bridge.get("base_guided_attention", True)),
                 "base_guidance_beta": float(cfg.bridge.get("base_guidance_beta", 1.0)),
@@ -858,6 +1586,7 @@ def main():
             cfg,
             checkpoint_metrics,
             scaler,
+            ic_cpa=ic_cpa,
         )
         last_checkpoint = out / "checkpoint_last.pth"
         best_checkpoint = out / "checkpoint_best.pth"
@@ -881,8 +1610,25 @@ def main():
             "loss_cos": epoch_metrics["loss_cos"],
             "loss_attn_prior": epoch_metrics["loss_attn_prior"],
             "loss_patch_preserve": epoch_metrics["loss_patch_preserve"],
+            "loss_ic_proto_distill": epoch_metrics["loss_ic_proto_distill"],
+            "loss_ic_proto_hard_ce": epoch_metrics["loss_ic_proto_hard_ce"],
+            "loss_ic_preserve": epoch_metrics["loss_ic_preserve"],
+            "loss_ic_slot_diversity": epoch_metrics["loss_ic_slot_diversity"],
+            "loss_ic_attention_diversity": epoch_metrics["loss_ic_attention_diversity"],
+            "loss_ic_residual_l1": epoch_metrics["loss_ic_residual_l1"],
+            "loss_ic_cpa_total": epoch_metrics["loss_ic_cpa_total"],
             "attn_prior_kl": epoch_metrics["attn_prior_kl"],
             "patch_preserve_kl": epoch_metrics["patch_preserve_kl"],
+            "raw_residual_abs_mean": epoch_metrics["raw_residual_abs_mean"],
+            "ic_residual_abs_mean": epoch_metrics["ic_residual_abs_mean"],
+            "ic_residual_abs_max": epoch_metrics["ic_residual_abs_max"],
+            "applied_correction_abs_mean": epoch_metrics["applied_correction_abs_mean"],
+            "applied_correction_abs_max": epoch_metrics["applied_correction_abs_max"],
+            "ic_raw_modified_fraction": epoch_metrics["ic_raw_modified_fraction"],
+            "ic_applied_modified_fraction": epoch_metrics["ic_applied_modified_fraction"],
+            "ic_slot_pairwise_cos_mean": epoch_metrics["ic_slot_pairwise_cos_mean"],
+            "ic_attention_pairwise_cos_mean": epoch_metrics["ic_attention_pairwise_cos_mean"],
+            "ic_modified_fraction": epoch_metrics["ic_modified_fraction"],
             "base_norm_mean": epoch_metrics["base_norm_mean"],
             "delta_norm_mean": epoch_metrics["delta_norm_mean"],
             "delta_base_ratio_mean": epoch_metrics["delta_base_ratio_mean"],
@@ -895,6 +1641,10 @@ def main():
             "val_loss": val_loss,
             "eval_mode": eval_mode,
             "lr": lr,
+            "ic_cpa_enabled": ic_cpa is not None,
+            "ic_cpa_loss_active": ic_cpa_loss_active,
+            "ic_cpa_train_only": ic_cpa_train_only,
+            "ic_cpa_train_xattn": ic_cpa_train_xattn,
             "epoch_time_sec": epoch_time,
             "eta_sec": eta,
             "data_time": epoch_metrics["data_time"],
@@ -916,6 +1666,7 @@ def main():
                 cfg,
                 checkpoint_metrics,
                 scaler,
+                ic_cpa=ic_cpa,
             )
             print(
                 f"[{timestamp()}] Saved best checkpoint: {best_checkpoint} "
@@ -934,6 +1685,7 @@ def main():
                 cfg,
                 checkpoint_metrics,
                 scaler,
+                ic_cpa=ic_cpa,
             )
             saved_epoch_checkpoint = True
             print(

@@ -509,19 +509,54 @@ def save_checkpoint_clean(
     cfg,
     extra_metrics=None,
     scaler=None,
+    ic_cpa=None,
 ):
     extra_metrics = extra_metrics or {}
+    reserved_keys = {
+        "epoch",
+        "method_name",
+        "model",
+        "bridge",
+        "optimizer",
+        "scheduler",
+        "scaler",
+        "best_miou",
+        "config",
+        "ic_cpa",
+    }
+    colliding_keys = sorted(reserved_keys.intersection(extra_metrics.keys()))
+    if colliding_keys:
+        raise KeyError(
+            "extra_metrics must not contain reserved checkpoint keys "
+            f"{colliding_keys}. Use non-reserved names such as 'ic_cpa_config' "
+            "for metadata."
+        )
     payload = {
         "epoch": epoch,
         "method_name": METHOD_NAME,
         "model": bridge.state_dict(),
         "bridge": bridge.state_dict(),
+        "ic_cpa": ic_cpa.state_dict() if ic_cpa is not None else None,
         "optimizer": optimizer.state_dict(),
         "scheduler": scheduler.state_dict() if scheduler is not None else None,
         "scaler": scaler.state_dict() if scaler is not None else None,
         "best_miou": best_miou,
         "config": OmegaConf.to_container(cfg, resolve=True),
     }
+    if ic_cpa is not None:
+        required_ic_keys = {
+            "prototype_slots",
+            "q_proj.weight",
+            "k_proj.weight",
+            "v_proj.weight",
+            "out_proj.weight",
+        }
+        missing_ic_keys = sorted(required_ic_keys - set(payload["ic_cpa"].keys()))
+        if missing_ic_keys:
+            raise KeyError(
+                "IC-CPA checkpoint state_dict is missing required keys: "
+                f"{missing_ic_keys}"
+            )
     payload.update(extra_metrics)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

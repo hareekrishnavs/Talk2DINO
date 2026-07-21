@@ -2,8 +2,14 @@ _base_: xattn_clean_coco_stuff.yml
 
 method_name: Talk2DINO_XAttnBridge_Clean
 
+ic_cpa:
+  enabled: false
+
 evaluate:
   pamr: false
+  ic_cpa_enabled: false
+  ic_cpa_parity_check: false
+  ic_cpa_transition_diag: false
   template: sub_imagenet_template
   task:
     - coco_stuff

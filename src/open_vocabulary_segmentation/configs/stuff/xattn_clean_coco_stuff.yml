@@ -65,6 +65,37 @@ xattn_safety:
 ccr:
   enabled: false
 
+ic_cpa:
+  enabled: true
+  dino_dim: 768
+  num_prototypes: 4
+  beta: 1.0
+  gamma: 0.010
+  temperature: 0.07
+  topk: 15
+  residual_scale: 0.05
+  residual_clip: 0.20
+  return_aux_during_train: true
+  out_proj_init: identity
+  out_proj_init_scale: 0.01
+
+ic_cpa_loss:
+  enabled: true
+  proto_align_type: soft_kl
+  proto_distill_weight: 0.02
+  distill_temperature: 2.0
+  distill_confidence_weighting: true
+  distill_confidence_min: 0.05
+  preserve_weight: 0.10
+  slot_diversity_weight: 0.005
+  slot_diversity_margin: 0.3
+  attention_diversity_weight: 0.005
+  attention_diversity_margin: 0.5
+  residual_l1_weight: 0.01
+  hard_ce_weight: 0.0
+  min_teacher_conf: 0.35
+  teacher_top_percent_fallback: 0.20
+
 extract:
   batch_size: 64
   shard_size: 500
@@ -79,16 +110,21 @@ train:
   progress_interval: 10
   shuffle: true
   lr: 1.0e-4
+  ic_cpa_lr: 1.0e-4
   contrastive_temperature: 0.07
   min_lr: 1.0e-6
   weight_decay: 0.01
   fp16: true
   save_every: 10
-  max_train_hours: 8
+  ic_cpa_train_only: true
+  ic_cpa_train_xattn: false
 
 evaluate:
   pamr: false
   ccr_enabled: false
+  ic_cpa_enabled: false
+  ic_cpa_parity_check: false
+  ic_cpa_transition_diag: false
   template: sub_imagenet_template
   xattn_delta_scale: 0.5
   xattn_logit_alpha: 0.5
