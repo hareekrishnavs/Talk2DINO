@@ -2,10 +2,10 @@ import torch
 feats = {}
 def get_self_attention(module, input, output):
     feats['self_attn'] = output
-    
+
 def process_self_attention(output, batch_size, num_tokens, num_attn_heads, embed_dim, scale, num_global_tokens, ret_self_attn_maps=False):
     qkv = output.reshape(batch_size, num_tokens, 3, num_attn_heads, embed_dim // num_attn_heads).permute(2, 0, 3, 1, 4)
-    q, k, v = qkv[0] * scale, qkv[1], qkv[2]
+    q, k = qkv[0] * scale, qkv[1]
     attn = q @ k.transpose(-2, -1)
     self_attn_maps = attn[:, : , 0, num_global_tokens:]
     self_attn = self_attn_maps.mean(dim=1)
@@ -30,9 +30,6 @@ def get_clip_second_last_dense_out(model: torch.nn.Module, input: torch.Tensor, 
 def get_dinov1_patches(model: torch.nn.Module, input: torch.Tensor, output: torch.Tensor):
     feats['dinov1_patches'] = output
 
-def get_all_out_tokens(model: torch.nn.Module, input: torch.Tensor, output: torch.Tensor):
-    feats['clip_txt_out_tokens'] = output
-    
 def average_text_tokens(text_embeddings, mask, keep_cls=False, keep_end_seq=False):
     if not keep_end_seq:
         mask[torch.arange(mask.shape[0]), mask.sum(dim=1) - 1] = False # excluding end of sequence
@@ -47,6 +44,5 @@ def average_text_tokens(text_embeddings, mask, keep_cls=False, keep_end_seq=Fals
     valid_elements = mask.sum(dim=1, keepdim=True)  # shape: [BS, 1]
 
     mean_embeddings = sum_embeddings / valid_elements  # shape: [BS, 512]
-    
+
     return mean_embeddings
-    

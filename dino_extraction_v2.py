@@ -3,14 +3,12 @@ import json
 import math
 import os
 import requests
-import webdataset as wds
-import tarfile
 import timm
 import torch
 import torchvision.transforms as T
 
 from io import BytesIO
-from src.hooks import get_self_attention, process_self_attention, get_second_last_out, get_vit_out, get_dinov1_patches, feats
+from src.hooks import get_self_attention, process_self_attention, get_second_last_out, get_vit_out, feats
 from src.webdatasets_util import cc2coco_format, create_webdataset_tar, read_coco_format_wds
 from PIL import Image
 from tqdm import tqdm
@@ -21,9 +19,9 @@ from src.local_weights import (
     load_local_vision_backbone,
     load_state_dict_from_local_file,
     resolve_weight_path,
+    save_torch_artifact,
 )
 
-import sys
 # Initialize global variables
 # feats = {}
 # num_global_tokens = 1
@@ -204,7 +202,7 @@ def run_dinov2_extraction(model_name, data_dir, ann_path, batch_size, resize_dim
                 if 'http' in data['images'][j]['file_name']:
                     try:
                         pil_img = Image.open(BytesIO(requests.get(data['images'][j]['file_name']).content))
-                    except Exception as e:
+                    except Exception:
                         pil_img = Image.new("RGB", (224, 224)) # genererate dummy image
                         failed_ids.append(j)
                         n_errors += 1
@@ -307,7 +305,7 @@ def run_dinov2_extraction(model_name, data_dir, ann_path, batch_size, resize_dim
         if out_path is None:
             # we use as output path the ann_path but with the extension pth
             out_path = os.path.splitext(ann_path)[0] + '.pth' 
-        torch.save(data, out_path)
+        save_torch_artifact(data, out_path)
         print(f"Features saved at {out_path}")
 
 def main():

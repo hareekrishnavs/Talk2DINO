@@ -1,6 +1,5 @@
 import mmcv
 import torch
-import torch.nn.functional as F
 from mmseg.models import EncoderDecoder
 from utils import get_logger
 
@@ -56,9 +55,7 @@ class DINOTextSegInference(EncoderDecoder):
         # soft mask (logit-like) is required
         masks, simmap = self.model.generate_masks(
             img,
-            img_metas,
             self.text_embedding,
-            self.classnames,
             apply_pamr=self.pamr,
             # kp_w=self.kp_w,
         )

@@ -1,18 +1,14 @@
 import argparse
-import json
 import math
 
 import os
 import torch
-import torchvision.transforms as T
 
-from src.hooks import get_self_attention, process_self_attention, get_second_last_out, feats, get_clip_second_last_dense_out
-from PIL import Image
+from src.hooks import get_clip_second_last_dense_out
 from tqdm import tqdm
-from transformers import BertModel, AutoTokenizer
 from src.webdatasets_util import cc2coco_format, create_webdataset_tar
 from src.hooks import get_all_out_tokens, feats
-from src.local_weights import DEFAULT_WEIGHT_DIR, load_local_clip
+from src.local_weights import DEFAULT_WEIGHT_DIR, load_local_clip, save_torch_artifact
     
 
 def run_bert_extraction(model_name, ann_path, batch_size, out_path, extract_dense_out=False, extract_second_last_dense_out=False,
@@ -105,7 +101,7 @@ def run_bert_extraction(model_name, ann_path, batch_size, out_path, extract_dens
         if out_path is None:
             # we use as output path the ann_path but with the extension pth
             out_path = os.path.splitext(ann_path)[0] + '.pth' 
-        torch.save(data, out_path)
+        save_torch_artifact(data, out_path)
     print(f"Features saved at {out_path}")
 
 def main():

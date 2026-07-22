@@ -7,8 +7,6 @@
 import mmcv
 import torch
 from mmseg.datasets import build_dataloader, build_dataset
-from mmseg.datasets.pipelines import Compose
-from omegaconf import OmegaConf
 from datasets import get_template
 
 def build_dataset_class_tokens(text_transform, template_set, classnames):

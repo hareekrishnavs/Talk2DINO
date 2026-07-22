@@ -4,7 +4,7 @@
 from torch import optim as optim
 
 
-def set_weight_decay(named_parameters, config):
+def set_weight_decay(named_parameters):
     has_decay = []
     no_decay = []
 
@@ -19,7 +19,7 @@ def set_weight_decay(named_parameters, config):
 
 def build_optimizer(config, model):
     """Build optimizer, set weight decay of normalization to 0 by default."""
-    parameters = set_weight_decay(model.named_parameters(), config)
+    parameters = set_weight_decay(model.named_parameters())
 
     opt_name = config.optimizer.name
     if opt_name == "adamw":

@@ -1,10 +1,9 @@
-import clip
 import yaml
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.hooks import get_self_attention, process_self_attention, feats
+from src.hooks import get_self_attention
 from src.local_weights import DEFAULT_WEIGHT_DIR, load_local_clip, load_local_vision_backbone
 
 
@@ -572,7 +571,7 @@ class DoubleMLP(nn.Module):
 
     
 class CLIPLastLayer(nn.Module):
-    def __init__(self,  act=nn.Tanh(), hidden_layer=False, cosine=True, dino_embed_dim=1024, clip_embed_dim=512, weight_attn_heads=None, alignment_strategy='max_score', clip_model='ViT-B/16', text_input_mask=None, projection_weights=None, clip_model_path=None, weight_dir=DEFAULT_WEIGHT_DIR):
+    def __init__(self,  act=nn.Tanh(), hidden_layer=False, cosine=True, dino_embed_dim=1024, clip_embed_dim=512, weight_attn_heads=None, alignment_strategy='max_score', clip_model='ViT-B/16', projection_weights=None, clip_model_path=None, weight_dir=DEFAULT_WEIGHT_DIR):
         super().__init__()
         self.clip_model, _ = load_local_clip(clip_model, model_path=clip_model_path, weight_dir=weight_dir)
         self.clip_model.to(dtype=torch.float32)
@@ -731,7 +730,7 @@ class DinoText(nn.Module):
         
     def process_self_attention(self, output, batch_size, num_tokens, num_attn_heads, embed_dim, scale, num_global_tokens, ret_self_attn_maps=False):
         qkv = output.reshape(batch_size, num_tokens, 3, num_attn_heads, embed_dim // num_attn_heads).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv[0] * scale, qkv[1], qkv[2]
+        q, k = qkv[0] * scale, qkv[1]
         attn = q @ k.transpose(-2, -1)
         self_attn_maps = attn[:, : , 0, num_global_tokens:]
         self_attn = self_attn_maps.mean(dim=1)

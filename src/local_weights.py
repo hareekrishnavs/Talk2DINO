@@ -1,4 +1,5 @@
 import os
+import tempfile
 from math import sqrt
 
 import timm
@@ -46,6 +47,24 @@ def require_file(path, description, config_field=None):
             "Auto-download is disabled; put the file there or pass an explicit local path."
         )
     return path
+
+
+def save_torch_artifact(value, path):
+    """Atomically save a torch artifact, creating its parent directory."""
+    path = os.path.abspath(path)
+    output_dir = os.path.dirname(path)
+    os.makedirs(output_dir, exist_ok=True)
+    fd, temporary_path = tempfile.mkstemp(
+        prefix=f".{os.path.basename(path)}.", suffix=".tmp", dir=output_dir
+    )
+    os.close(fd)
+    try:
+        torch.save(value, temporary_path)
+        os.replace(temporary_path, path)
+    except Exception:
+        if os.path.exists(temporary_path):
+            os.unlink(temporary_path)
+        raise
 
 
 def _load_checkpoint(path):

@@ -6,10 +6,6 @@
 # ------------------------------------------------------------------------------
 import mmcv
 import torch
-from mmseg.datasets import build_dataloader, build_dataset
-from mmseg.datasets.pipelines import Compose
-from omegaconf import OmegaConf
-from datasets import get_template
 
 from .dinotext_seg import DINOTextSegInference
 

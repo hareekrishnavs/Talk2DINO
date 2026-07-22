@@ -2,13 +2,9 @@ from copy import deepcopy
 from torch.utils.data import DataLoader
 import torch
 import torch.optim as optim
-import torch.nn as nn
-from torch.nn import functional as F
 from tqdm import tqdm
-import matplotlib.pyplot as plt
 from src.loss import ContrastiveLoss
 import os
-import matplotlib.pyplot as plt
 import numpy as np
 import random
 import json
@@ -37,7 +33,7 @@ def assign_learning_rate(optimizer, new_lr):
 def _warmup_lr(base_lr, warmup_length, step):
     return base_lr * (step + 1) / warmup_length
 
-def const_lr(optimizer, base_lr, warmup_length, steps):
+def const_lr(optimizer, base_lr, warmup_length):
     def _lr_adjuster(step):
         if step < warmup_length:
             lr = _warmup_lr(base_lr, warmup_length, step)
@@ -157,7 +153,6 @@ def validate(model, val_dataloader, contrastive_loss, verbose=False):
     
 
 def do_train(model, train_dataset, val_dataset, train_cfg, seed=123, optimizer_name="Adam", weight_decay=0.05, scheduler_name='linear', warmup=0, save_head_attivations=None):
-    device = next(model.parameters()).device
     # setting manual seed
     # torch.manual_seed(seed)
     set_seed(seed)
@@ -185,7 +180,7 @@ def do_train(model, train_dataset, val_dataset, train_cfg, seed=123, optimizer_n
     if scheduler_name == 'linear' and warmup == 0:
         scheduler = None
     elif scheduler_name == 'linear' and warmup > 0:
-        scheduler = const_lr(optimizer, lr, warmup, total_steps)
+        scheduler = const_lr(optimizer, lr, warmup)
     elif scheduler_name == 'cosine':
         scheduler = cosine_lr(optimizer, lr, warmup, total_steps)
     

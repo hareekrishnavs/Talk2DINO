@@ -8,14 +8,11 @@ import argparse
 import datetime
 import json
 import os
-import os.path as osp
 import time
 from collections import defaultdict
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import torch
-import torch.nn.functional as F
 import torch.backends.cudnn as cudnn
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -25,33 +22,19 @@ import numpy as np
 from mmcv.parallel import MMDistributedDataParallel
 from mmcv.runner import get_dist_info, init_dist, set_random_seed
 from mmcv.utils import collect_env, get_git_hash
-from mmseg.apis import multi_gpu_test
 from torch.utils.data import Subset
 
 # from datasets import build_loader, build_text_transform
 from models import build_model
-from omegaconf import OmegaConf, read_write
+from omegaconf import OmegaConf
 
 from segmentation.evaluation import build_seg_dataloader, build_seg_dataset, build_dinotext_seg_inference
-from segmentation.evaluation import build_dinotext_seg_inference
 
 from timm.utils import AverageMeter
-from torchvision.utils import make_grid
-from utils import (
-    build_optimizer,
-    build_scheduler,
-    get_config,
-    get_grad_norm,
-    get_logger,
-    parse_losses,
-    load_config
-)
 import us
 from utils import (
-    build_optimizer,
     build_scheduler,
     get_config,
-    get_grad_norm,
     get_logger,
     load_checkpoint,
     parse_losses,
@@ -134,31 +117,7 @@ def train(cfg, args):
     if device == "cuda":
         dist.barrier()
 
-    # build datasets
-    # dataset_train, data_loader_train = build_loader(cfg.data) # TODO: Ripristinate something like this
-    # ___________________________________________
-    # TODO
-    # ___________________________________________
-    from torch.utils.data import DataLoader
-    import torchvision.transforms as T
-    import clip
-    import sys
-    sys.path.append("src")
-    from src.dataset import COCOCaptions
-
-    image_transforms = T.Compose([
-        T.Resize(448, interpolation=T.InterpolationMode.BICUBIC),
-        T.CenterCrop(448),
-        T.ToTensor(),
-        T.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
-    ])
-
-    # dataset_train = COCOCaptions('coco/train.json', 'coco/train2014', "train", image_transforms, clip.tokenize)
-    # data_loader_train = DataLoader(dataset_train, batch_size=cfg.data.batch_size, shuffle=True)
     data_loader_train = None
-    # ___________________________________________
-    # End TODO
-    # ___________________________________________
 
     # build validation loaders
     val_loaders = {}
@@ -277,11 +236,6 @@ def do_training(config, model, data_loader, optimizer, lr_scheduler, scaler, val
     ckpt_manager = CheckpointManager(config.checkpoint.save_topk, config.output)
 
     batch_size = config.data.batch_size
-    accum_freq = config.train.accum_freq
-
-    if accum_freq > 1:
-        accum_images, accum_texts, accum_features = [], [], {}
-
     # ust_check = True
     end = time.time()
     for step, samples in enumerate(cyclize(data_loader), config.train.start_step):

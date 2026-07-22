@@ -2,8 +2,6 @@ import argparse
 import numpy
 from tqdm import tqdm
 import torch
-import json
-import os
 
 from src.model import ProjectionLayer, CLIPLastLayer
 
@@ -131,7 +129,6 @@ def get_image_and_text_tensor(path, feature_name='dino_features', text_features=
                                                     imm['dino_features'].unsqueeze(0).to(device) if model.weight_attn_heads == 'conditioned' else None
                                                     ).squeeze(0).detach().cpu()
                                                     for imm in data['images']}
-    imm_paths = {imm['id']: imm['file_name'] for imm in data['images']}
     annotations = {}
     capts = {}
     

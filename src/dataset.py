@@ -1,7 +1,6 @@
 import webdataset as wds
 import os
 import torch
-from tqdm import tqdm
 
 from io import BytesIO
 from PIL import Image

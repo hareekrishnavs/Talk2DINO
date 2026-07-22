@@ -1,8 +1,5 @@
-import itertools
 import os
-import pickle
 from math import sqrt
-import re
 import yaml
 
 import numpy as np
@@ -10,7 +7,6 @@ import timm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchvision
 from einops import rearrange
 from transformers import BertModel, AutoTokenizer
 import torchvision.transforms as T
@@ -24,7 +20,6 @@ import us
 from datasets import get_template
 
 from src.model import ProjectionLayer, VisualProjectionLayer, CLIPLastLayer, DoubleMLP
-from src.loss import Contrastive
 from src.hooks import average_text_tokens, get_vit_out, feats
 from src.local_weights import DEFAULT_WEIGHT_DIR, load_local_clip, load_local_vision_backbone, load_state_dict_from_local_file, resolve_weight_path
 
@@ -45,8 +40,8 @@ class DINOText(nn.Module):
         self.feats['clip_txt_out_tokens'] = output
         
     def __init__(
-            self, model_name, resize_dim, clip_model_name, proj_class, proj_name, proj_model, avg_self_attn_token=False, disentangled_self_attn_token=True, loss=None, pre_trained=True,
-            unfreeze_last_text_layer=False, unfreeze_last_image_layer=False, is_eval=True, use_avg_text_token=False, keep_cls=False, keep_end_seq=False, with_bg_clean=False,
+            self, model_name, resize_dim, clip_model_name, proj_class, proj_name, proj_model, avg_self_attn_token=False, disentangled_self_attn_token=True, pre_trained=True,
+            unfreeze_last_text_layer=False, is_eval=True, use_avg_text_token=False, keep_cls=False, keep_end_seq=False, with_bg_clean=False,
             weight_dir=DEFAULT_WEIGHT_DIR, backbone_weights=None, clip_model_path=None, **kwargs
     ):
         super().__init__()
@@ -151,7 +146,7 @@ class DINOText(nn.Module):
     
     def process_self_attention(self, output, batch_size, num_tokens, num_attn_heads, embed_dim, scale, num_global_tokens, ret_self_attn_maps=False):
         qkv = output.reshape(batch_size, num_tokens, 3, num_attn_heads, embed_dim // num_attn_heads).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv[0] * scale, qkv[1], qkv[2]
+        q, k = qkv[0] * scale, qkv[1]
         attn = q @ k.transpose(-2, -1)
         self_attn_maps = attn[:, : , 0, num_global_tokens:]
         self_attn = self_attn_maps.mean(dim=1)
@@ -202,20 +197,6 @@ class DINOText(nn.Module):
 
         return txt_embed, img_embed
         
-    def compute_loss(self, image, text, cosine=True, ret_similarity_matrix=True):
-        ret = {}
-        if cosine:
-            img_embed = F.normalize(img_embed, p=2, dim=1)
-            txt_embed = F.normalize(txt_embed, p=2, dim=1)
-        sim = img_embed @ txt_embed.transpose(1, 0)
-        if not ret_similarity_matrix:
-            sim = sim[torch.eye(len(sim)) > 0.5] # only diagonal elements
-        
-        ret['contrastive_loss'] = self.contrastive_loss.compute_contrastive_loss(sim)
-        
-        return ret
-
-
     @torch.no_grad()
     def build_dataset_class_tokens(self, template_set, classnames):
         tokens = []
@@ -314,7 +295,7 @@ class DINOText(nn.Module):
     
     @torch.no_grad()
     def generate_masks(
-            self, image, img_metas, text_emb, classnames, text_is_token=False, apply_pamr=False, background_func="weighted_average_sigmoid", lambda_bg=0.2,
+            self, image, text_emb, apply_pamr=False, lambda_bg=0.2,
             # kp_w=0.3,
     ):
         """Generate masks for each text embeddings
@@ -330,7 +311,6 @@ class DINOText(nn.Module):
 
         # padded image size
         pH, pW = image.shape[2:]
-        num_classes = text_emb.shape[0]
         batch_size = image.shape[0]
 
         image = image[:, [2, 1, 0], :, :]  # BGR to RGB

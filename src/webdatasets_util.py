@@ -1,6 +1,5 @@
 import argparse
 import os
-import json
 import webdataset as wds
 import re
 import tarfile

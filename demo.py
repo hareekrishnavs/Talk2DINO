@@ -7,7 +7,6 @@ import sys
 import argparse
 
 sys.path.insert(0, "src/open_vocabulary_segmentation")
-from models.dinotext import DINOText
 from models import build_model
 
 device = "cuda"

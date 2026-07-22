@@ -1,7 +1,6 @@
 import argparse
 
 import matplotlib.pyplot as plt
-import numpy as np
 import os
 import pandas as pd
 import torch
@@ -12,13 +11,12 @@ import clip
 
 from src.dataset import DinoClipDataset, COCOCaptions
 from src.metrics import get_image_and_text_tensor, i2t, t2i
-from src.model import ProjectionLayer
 from src.train_util import do_train, set_seed
-from tqdm import tqdm
+from src.local_weights import save_torch_artifact
 
 device = 'cuda'
 
-def train_and_eval(config_file, train_dataset, val_dataset, texts=None, images=None, model_type='cls', test_set=None, optimizer="adam", weight_decay=0.05, scheduler='linear', warmup=0, name_pedix='', save_head_activations=None):
+def train_and_eval(config_file, train_dataset, val_dataset, texts=None, images=None, model_type='cls', optimizer="adam", weight_decay=0.05, scheduler='linear', warmup=0, name_pedix='', save_head_activations=None):
     set_seed(123)
     out_dir = 'weights'
     model_name = os.path.basename(config_file).split('.')[0]
@@ -44,7 +42,7 @@ def train_and_eval(config_file, train_dataset, val_dataset, texts=None, images=N
 
     # plot_losses(train_losses, val_losses)
 
-    torch.save(model.state_dict(), f"{out_path}.pth")
+    save_torch_artifact(model.state_dict(), f"{out_path}.pth")
     print(f"Saved model at {out_path}.pth\n")
     
     if model_type == 'patch_tokens':
@@ -142,7 +140,6 @@ if __name__ == '__main__':
                    val_dataset,
                    texts,
                    images,
-                   test_set=args.test_dataset,
                    model_type='',
                    optimizer=args.optimizer,
                    weight_decay=args.weight_decay,

@@ -3,18 +3,15 @@
 # ------------------------------------------------------------------------------
 import copy
 from collections import OrderedDict
-import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-import torch.nn.functional as F
-from einops import rearrange, repeat
+from einops import rearrange
 
 from models.builder import MODELS
 # from models.dinotext.gumbel import gumbel_sigmoid
 from models.dinotext.modules import FeatureEncoder
 
-from utils import get_logger
 import us
 
 
@@ -195,9 +192,6 @@ class DINOTextMasker(nn.Module):
         self.sim2mask = DINOTextSim2Mask()
         self.sim2mask = self.sim2mask.eval()
         self.similarity_type = similarity_type
-
-    def forward(self, image, image_feat, text_emb, deterministic=False):
-        pass
 
     @torch.no_grad()
     def forward_seg(self, image_feat, text_emb, deterministic=True, hard=False):

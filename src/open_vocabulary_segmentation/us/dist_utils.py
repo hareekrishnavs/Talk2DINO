@@ -2,7 +2,6 @@
 # FreeDA
 # ------------------------------------------------------------------------------
 import os
-import sys
 import torch
 import torch.distributed as dist
 import torch.distributed.nn
