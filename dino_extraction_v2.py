@@ -3,7 +3,9 @@ import json
 import math
 import os
 import requests
+import subprocess
 import timm
+import time
 import torch
 import torchvision.transforms as T
 
@@ -21,6 +23,7 @@ from src.local_weights import (
     resolve_weight_path,
     save_torch_artifact,
 )
+from src.dense_features import DenseFeatureShardWriter
 
 # Initialize global variables
 # feats = {}
@@ -44,11 +47,37 @@ def generate_caption(model, processor, images, prompt="a photography of"):
     generated_text = processor.batch_decode(generated_ids, skip_special_tokens=True)
     return [x.strip() for x in generated_text]    
 
+
+def _git_commit():
+    try:
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+
+
+def _annotations_by_image(data):
+    grouped = {}
+    for annotation in data["annotations"]:
+        missing = {"id", "image_id", "caption", "ann_feats"}.difference(annotation)
+        if missing:
+            raise ValueError(
+                f"annotation is missing required fields: {sorted(missing)}"
+            )
+        grouped.setdefault(annotation["image_id"], []).append(annotation)
+    return grouped
+
 def run_dinov2_extraction(model_name, data_dir, ann_path, batch_size, resize_dim=518, crop_dim=518, out_path=None, 
                           write_as_wds=False, num_shards=25, n_in_splits=4, in_batch_offset=0, out_offset=0,
                           extract_cls=False, extract_avg_self_attn=False, extract_second_last_out=False,
                           extract_patch_tokens=False, extract_self_attn_maps=False, extract_disentangled_self_attn=False,
-                          blip_model_name=None, weight_dir=DEFAULT_WEIGHT_DIR, backbone_weights=None, clip_weights=None):
+                          blip_model_name=None, weight_dir=DEFAULT_WEIGHT_DIR, backbone_weights=None, clip_weights=None,
+                          streaming_shards=False, images_per_shard=128, max_images=None, split_name=None,
+                          overwrite=False):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
     # global num_global_tokens, num_patch_tokens, num_tokens, embed_dim, num_attn_heads, scale, batch_size_
@@ -179,17 +208,88 @@ def run_dinov2_extraction(model_name, data_dir, ann_path, batch_size, resize_dim
         model.blocks[-1].attn.qkv.register_forward_hook(get_self_attention)
         if 'beit' in model_name:
             model.blocks[-1].attn.qkv_bias_separate = True
+
+    writer = None
+    annotations_by_image = None
+    if streaming_shards:
+        if out_path is None:
+            raise ValueError("--out_path is required with --streaming_shards")
+        if write_as_wds:
+            raise ValueError("--write_as_wds and --streaming_shards are mutually exclusive")
+        if blip_model_name is not None:
+            raise ValueError("recaptioning is not supported by the E5 streaming format")
+        required_flags = (
+            extract_patch_tokens,
+            extract_self_attn_maps,
+            extract_disentangled_self_attn,
+        )
+        if not all(required_flags):
+            raise ValueError(
+                "E5 streaming extraction requires --extract_patch_tokens, "
+                "--extract_self_attn_maps, and --extract_disentangled_self_attn"
+            )
+        if (num_patch_tokens, embed_dim, num_attn_heads) != (1024, 768, 12):
+            raise ValueError(
+                "E5 Phase 1 requires ViT-B at 32x32 resolution: "
+                f"got P={num_patch_tokens}, D={embed_dim}, H={num_attn_heads}"
+            )
+        if max_images is not None and max_images <= 0:
+            raise ValueError("--max_images must be greater than zero")
+        if split_name is None:
+            raise ValueError("--split_name is required with --streaming_shards")
+        annotations_by_image = _annotations_by_image(data)
+        extraction_config = {
+            "annotation_path": os.path.abspath(ann_path),
+            "data_dir": os.path.abspath(data_dir),
+            "model": model_name,
+            "resize_dim": resize_dim,
+            "crop_dim": crop_dim,
+            "patch_count": num_patch_tokens,
+            "embedding_dim": embed_dim,
+            "attention_heads": num_attn_heads,
+            "attention_map_format": "probabilities",
+            "patch_tokens_dtype": "float16",
+            "self_attn_maps_dtype": "float16",
+            "disentangled_self_attn_dtype": "float32",
+        }
+        writer = DenseFeatureShardWriter(
+            out_path,
+            split=split_name,
+            extraction_config=extraction_config,
+            source_commit=_git_commit(),
+            images_per_shard=images_per_shard,
+            overwrite=overwrite,
+        )
+
     print("Starting the features extraction...")
-    n_imgs = len(data['images'])
+    selected_count = min(
+        len(data["images"]),
+        max_images if max_images is not None else len(data["images"]),
+    )
+    selected_indices = list(range(selected_count))
+    if writer is not None:
+        selected_image_ids = [data["images"][index]["id"] for index in selected_indices]
+        if len(set(selected_image_ids)) != len(selected_image_ids):
+            raise ValueError("source contains duplicate image IDs in the selected range")
+        selected_indices = [
+            index
+            for index in selected_indices
+            if data["images"][index]["id"] not in writer.completed_image_ids
+        ]
+    n_imgs = len(selected_indices)
     n_batch = math.ceil(n_imgs / batch_size)
     n_errors = 0
+    extraction_started = time.monotonic()
+    if device == "cuda":
+        torch.cuda.reset_peak_memory_stats()
     for i in tqdm(range(n_batch)):
         start = i * batch_size
         end = start + batch_size if i < n_batch - 1 else n_imgs
-        batch_size_ = end - start
+        batch_indices = selected_indices[start:end]
+        batch_size_ = len(batch_indices)
         raw_imgs = []
         failed_ids = []
-        for j in range(start, end):
+        for j in batch_indices:
             if 'jpg' in data['images'][j]:
                 # CC3M case
                 pil_img = data['images'][j]['jpg']
@@ -263,7 +363,7 @@ def run_dinov2_extraction(model_name, data_dir, ann_path, batch_size, resize_dim
                 }
             cls_token = outs['x_norm_clstoken']
             if extract_avg_self_attn or extract_self_attn_maps or extract_disentangled_self_attn:
-                self_attn, self_attn_maps = process_self_attention(feats['self_attn'], (end-start), num_tokens, num_attn_heads, embed_dim, scale, num_global_tokens, ret_self_attn_maps=True)
+                self_attn, self_attn_maps = process_self_attention(feats['self_attn'], batch_size_, num_tokens, num_attn_heads, embed_dim, scale, num_global_tokens, ret_self_attn_maps=True)
             if extract_avg_self_attn:
                 avg_self_attn_token = (self_attn.unsqueeze(-1) * outs['x_norm_patchtokens']).mean(dim=1)
             if extract_disentangled_self_attn:
@@ -275,27 +375,67 @@ def run_dinov2_extraction(model_name, data_dir, ann_path, batch_size, resize_dim
                 new_capts = generate_caption(blip_model, blip_processor, raw_imgs)
         
         # writing the outputs in the original data
-        for j in range(start, end):
+        for local_index, j in enumerate(batch_indices):
             if j in failed_ids:
                 continue
-            
-            if extract_cls or (not extract_avg_self_attn and not extract_second_last_out):
-                data['images'][j]['dino_features'] = cls_token[j - start].to('cpu')
-            if extract_avg_self_attn:
-                data['images'][j]['avg_self_attn_out'] = avg_self_attn_token[j - start].to('cpu')
-            if extract_second_last_out:
-                data['images'][j]['second_last_out'] = second_last_cls[j - start].to('cpu')
-            if extract_patch_tokens:
-                data['images'][j]['patch_tokens'] = outs['x_norm_patchtokens'][j - start].to('cpu')
-            if extract_self_attn_maps:
-                data['images'][j]['self_attn_maps'] = self_attn_maps[j - start].to('cpu')
-            if extract_disentangled_self_attn:
-                data['images'][j]['disentangled_self_attn'] = disentangled_self_attn[j - start].to('cpu')
-            if blip_model_name is not None:
-                data['annotations'][j]['caption'] = new_capts[j - start]
+
+            if writer is not None:
+                image = data["images"][j]
+                image_annotations = annotations_by_image.get(image["id"], [])
+                record = {
+                    "image_id": image["id"],
+                    "file_name": image["file_name"],
+                    "disentangled_self_attn": disentangled_self_attn[local_index]
+                    .detach()
+                    .cpu()
+                    .to(torch.float32),
+                    "patch_tokens": outs["x_norm_patchtokens"][local_index]
+                    .detach()
+                    .cpu()
+                    .to(torch.float16),
+                    "self_attn_maps": self_attn_maps[local_index]
+                    .detach()
+                    .cpu()
+                    .to(torch.float16),
+                    "captions": [annotation["caption"] for annotation in image_annotations],
+                    "ann_feats": [annotation["ann_feats"] for annotation in image_annotations],
+                    "annotation_ids": [annotation["id"] for annotation in image_annotations],
+                }
+                writer.add(record)
+            else:
+                if extract_cls or (not extract_avg_self_attn and not extract_second_last_out):
+                    data['images'][j]['dino_features'] = cls_token[local_index].to('cpu')
+                if extract_avg_self_attn:
+                    data['images'][j]['avg_self_attn_out'] = avg_self_attn_token[local_index].to('cpu')
+                if extract_second_last_out:
+                    data['images'][j]['second_last_out'] = second_last_cls[local_index].to('cpu')
+                if extract_patch_tokens:
+                    data['images'][j]['patch_tokens'] = outs['x_norm_patchtokens'][local_index].to('cpu')
+                if extract_self_attn_maps:
+                    data['images'][j]['self_attn_maps'] = self_attn_maps[local_index].to('cpu')
+                if extract_disentangled_self_attn:
+                    data['images'][j]['disentangled_self_attn'] = disentangled_self_attn[local_index].to('cpu')
+                if blip_model_name is not None:
+                    data['annotations'][j]['caption'] = new_capts[local_index]
                 
     print("Feature extraction done!")
-    print(f"Failed to extract {n_errors} of {len(data['images'])}")
+    print(f"Failed to extract {n_errors} of {n_imgs}")
+
+    if writer is not None:
+        writer.close()
+        elapsed = time.monotonic() - extraction_started
+        processed = n_imgs - n_errors
+        metrics = {
+            "elapsed_seconds": elapsed,
+            "extracted_images": processed,
+            "images_per_second": processed / elapsed if elapsed else None,
+            "peak_gpu_memory_bytes": (
+                torch.cuda.max_memory_allocated() if device == "cuda" else None
+            ),
+        }
+        print("E5 extraction metrics: " + json.dumps(metrics, sort_keys=True))
+        print(f"Streaming features saved at {out_path}")
+        return
     
     
     if write_as_wds:
@@ -332,11 +472,17 @@ def main():
     parser.add_argument('--n_in_split', type=int, default=1, help="Number of splits in which we want to divide the tar files. For example, with 4 n_split we elaborate 332 // 4 = 83 tar files.")
     parser.add_argument('--in_batch_offset', type=int, default=0, help="Of the n_splits in which we have divided tars, we decide which of them elaborate")
     parser.add_argument('--out_offset', type=int, default=0, help="Index of the first shard to save")
+    parser.add_argument('--streaming_shards', action="store_true", default=False, help="Write E5 image-level dense-feature shards continuously")
+    parser.add_argument('--images_per_shard', type=int, default=128, help="Images per finalized E5 shard")
+    parser.add_argument('--max_images', type=int, default=None, help="Limit extraction to the first N unique images")
+    parser.add_argument('--split_name', type=str, default=None, help="Shard filename prefix, for example train or val")
+    parser.add_argument('--overwrite', action="store_true", default=False, help="Explicitly replace an existing E5 extraction")
     args = parser.parse_args()
     
     run_dinov2_extraction(args.model, args.data_dir, args.ann_path, args.batch_size, args.resize_dim, args.crop_dim, args.out_path,
                           args.write_as_wds, args.n_shards, args.n_in_split, args.in_batch_offset, args.out_offset,
                           args.extract_cls, args.extract_avg_self_attn, args.extract_second_last_out, args.extract_patch_tokens, args.extract_self_attn_maps,
-                          args.extract_disentangled_self_attn, args.blip_model, args.weight_dir, args.backbone_weights, args.clip_weights)
+                          args.extract_disentangled_self_attn, args.blip_model, args.weight_dir, args.backbone_weights, args.clip_weights,
+                          args.streaming_shards, args.images_per_shard, args.max_images, args.split_name, args.overwrite)
 if __name__ == '__main__':
     main()
