@@ -8,6 +8,7 @@ import argparse
 import datetime
 import json
 import os
+import tempfile
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -100,17 +101,31 @@ def log_results(miou, proj_name, bench, result_dir, logger):
     
     # Load existing data or start with an empty dictionary
     if os.path.exists(json_path):
-        with open(json_path, 'r') as f:
-            data = json.load(f)
+        try:
+            with open(json_path, 'r') as f:
+                data = json.load(f)
+        except json.JSONDecodeError:
+            logger.warning(f"Replacing invalid result file: {json_path}")
+            data = {}
     else:
         data = {}
     
     # Add or update the benchmark result
-    data[bench] = miou
+    data[bench] = float(miou)
     
     # Write the updated data to the JSON file in human-readable format
-    with open(json_path, 'w') as f:
-        json.dump(data, f, indent=4)
+    fd, temporary_path = tempfile.mkstemp(
+        prefix=f".{proj_name}.", suffix=".json.tmp", dir=result_dir
+    )
+    try:
+        with os.fdopen(fd, 'w') as f:
+            json.dump(data, f, indent=4)
+            f.write("\n")
+        os.replace(temporary_path, json_path)
+    except Exception:
+        if os.path.exists(temporary_path):
+            os.unlink(temporary_path)
+        raise
     logger.info(f"Saved results at {json_path}")
 
 def train(cfg, args):
@@ -149,12 +164,13 @@ def train(cfg, args):
         # optimizer = build_optimizer(cfg.train, model)
         import torch.optim as optim
         optimizer = optim.Adam(model.parameters(), lr=cfg.train.base_lr) # TODO: Ripristinate
-        model = MMDistributedDataParallel(
-            model,
-            device_ids=[torch.cuda.current_device()],
-            broadcast_buffers=False,
-            find_unused_parameters=True,
-        )
+        if dist.get_world_size() > 1:
+            model = MMDistributedDataParallel(
+                model,
+                device_ids=[torch.cuda.current_device()],
+                broadcast_buffers=False,
+                find_unused_parameters=True,
+            )
 
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(f"number of params: {n_parameters} ({n_parameters/1000/1000:.1f}M)")
@@ -173,7 +189,8 @@ def train(cfg, args):
     scaler = torch.cuda.amp.GradScaler(enabled=cfg.train.fp16)
 
     if cfg.checkpoint.resume:
-        load_checkpoint(cfg, model.module, optimizer, lr_scheduler, scaler)
+        model_for_checkpoint = model.module if hasattr(model, "module") else model
+        load_checkpoint(cfg, model_for_checkpoint, optimizer, lr_scheduler, scaler)
 
 
     if cfg.evaluate.eval_only:
@@ -404,7 +421,7 @@ def validate_seg(config, seg_config, data_loader, model):
         seg_config,
     )
 
-    if device == "cuda":
+    if device == "cuda" and dist.get_world_size() > 1:
         mmddp_model = MMDistributedDataParallel(
             seg_model, device_ids=[torch.cuda.current_device()], broadcast_buffers=False
         )

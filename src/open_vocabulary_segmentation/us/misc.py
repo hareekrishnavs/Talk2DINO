@@ -126,13 +126,22 @@ import mmcv
 import numpy as np
 import torch
 from mmcv.engine import collect_results_cpu, collect_results_gpu
-from mmcv.image import tensor2imgs
 from mmcv.runner import get_dist_info
-from mmseg.apis.test import np2tmp
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 from typing import Optional
+
+
+def np2tmp(array, temp_file_name=None, tmpdir=None):
+    if temp_file_name is None:
+        temp_file_name = tempfile.NamedTemporaryFile(
+            suffix=".npy", delete=False, dir=tmpdir
+        ).name
+    np.save(temp_file_name, array)
+    return temp_file_name
+
+
 def collect_results_cpu(result_part: list,
                         size: int,
                         tmpdir: Optional[str] = None) -> Optional[list]:
@@ -271,7 +280,11 @@ def multi_gpu_test(model,
 
     for batch_indices, data in zip(loader_indices, data_loader):
         with torch.no_grad():
-            if device == 'cpu':
+            if not hasattr(model, "module"):
+                model_device = next(model.parameters()).device
+                data["img"] = [image.to(model_device, non_blocking=True) for image in data["img"]]
+                data['img_metas'] = [e.data[0] for e in data['img_metas']]
+            elif device == 'cpu':
                 data['img_metas'] = [e.data[0] for e in data['img_metas']]
             result = model(return_loss=False, rescale=True, **data)
 
