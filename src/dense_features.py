@@ -28,10 +28,34 @@ REQUIRED_RECORD_KEYS = {
     "ann_feats",
     "annotation_ids",
 }
+REQUIRED_MANIFEST_KEYS = {
+    "source_images",
+    "source_annotations",
+    "selected_images",
+    "selected_annotations",
+    "complete",
+    "failed_image_ids",
+}
 
 
 class DenseFeatureValidationError(ValueError):
     """Raised when a dense-feature shard or manifest is invalid."""
+
+
+class IncompleteDenseFeatureExtraction(RuntimeError):
+    """Raised after persisting an extraction that does not have exact coverage."""
+
+
+def _id_set_digest(values: Iterable[Any]) -> str:
+    encoded = sorted(
+        json.dumps(value, sort_keys=True, separators=(",", ":")) for value in values
+    )
+    digest = hashlib.sha256()
+    for value in encoded:
+        payload = value.encode("utf-8")
+        digest.update(len(payload).to_bytes(8, byteorder="big"))
+        digest.update(payload)
+    return digest.hexdigest()
 
 
 def _atomic_json_dump(value: Dict[str, Any], path: Path) -> None:
@@ -285,10 +309,21 @@ def _load_manifest(path: os.PathLike[str] | str) -> Dict[str, Any]:
         )
     if not isinstance(manifest.get("shards"), list):
         raise DenseFeatureValidationError("manifest shards must be a list")
+    missing = REQUIRED_MANIFEST_KEYS.difference(manifest)
+    if missing:
+        raise DenseFeatureValidationError(
+            f"manifest is missing completeness fields: {sorted(missing)}"
+        )
+    if not isinstance(manifest["complete"], bool):
+        raise DenseFeatureValidationError("manifest complete must be a boolean")
+    if not isinstance(manifest["failed_image_ids"], list):
+        raise DenseFeatureValidationError("manifest failed_image_ids must be a list")
     return manifest
 
 
-def validate_dense_dataset(path: os.PathLike[str] | str) -> Dict[str, Any]:
+def validate_dense_dataset(
+    path: os.PathLike[str] | str, *, require_complete: bool = False
+) -> Dict[str, Any]:
     """Validate every completed shard referenced by a manifest."""
     directory = Path(path)
     manifest = _load_manifest(directory)
@@ -337,6 +372,35 @@ def validate_dense_dataset(path: os.PathLike[str] | str) -> Dict[str, Any]:
         raise DenseFeatureValidationError(
             "manifest totals do not agree with the completed shards"
         )
+    image_coverage_matches = (
+        images == manifest["selected_images"]
+        and _id_set_digest(seen_images) == manifest.get("selected_image_ids_sha256")
+    )
+    annotation_coverage_matches = (
+        annotations == manifest["selected_annotations"]
+        and _id_set_digest(seen_annotations)
+        == manifest.get("selected_annotation_ids_sha256")
+    )
+    coverage_complete = (
+        image_coverage_matches
+        and annotation_coverage_matches
+        and not manifest["failed_image_ids"]
+    )
+    if manifest["complete"] and not coverage_complete:
+        raise DenseFeatureValidationError(
+            "manifest declares complete=true but exact selected ID coverage does not match"
+        )
+    is_pilot = manifest.get("is_pilot", False)
+    if require_complete and not (
+        manifest["complete"] and coverage_complete and not is_pilot
+    ):
+        raise DenseFeatureValidationError(
+            "dense-feature extraction is incomplete or is a pilot: "
+            f"images={images}/{manifest['selected_images']}, "
+            f"annotations={annotations}/{manifest['selected_annotations']}, "
+            f"failed_image_ids={manifest['failed_image_ids']!r}, "
+            f"is_pilot={is_pilot}"
+        )
     return {
         "images": images,
         "annotations": annotations,
@@ -352,6 +416,15 @@ def validate_dense_dataset(path: os.PathLike[str] | str) -> Dict[str, Any]:
             for result in shard_results
             for image_id in result["failed_images"]
         ],
+        "source_images": manifest["source_images"],
+        "source_annotations": manifest["source_annotations"],
+        "selected_images": manifest["selected_images"],
+        "selected_annotations": manifest["selected_annotations"],
+        "complete": manifest["complete"],
+        "coverage_complete": coverage_complete,
+        "failed_image_ids": manifest["failed_image_ids"],
+        "max_images": manifest.get("max_images"),
+        "is_pilot": is_pilot,
     }
 
 
@@ -364,6 +437,12 @@ class DenseFeatureShardWriter:
         split: str,
         extraction_config: Dict[str, Any],
         source_commit: str,
+        *,
+        source_images: int,
+        source_annotations: int,
+        selected_image_ids: Iterable[Any],
+        selected_annotation_ids: Iterable[Any],
+        max_images: Optional[int],
         images_per_shard: int = 128,
         overwrite: bool = False,
     ) -> None:
@@ -377,6 +456,21 @@ class DenseFeatureShardWriter:
         self.images_per_shard = images_per_shard
         self.extraction_config = extraction_config
         self.source_commit = source_commit
+        self.source_images = source_images
+        self.source_annotations = source_annotations
+        selected_image_ids = list(selected_image_ids)
+        selected_annotation_ids = list(selected_annotation_ids)
+        self.expected_image_ids = set(selected_image_ids)
+        self.expected_annotation_ids = set(selected_annotation_ids)
+        if len(self.expected_image_ids) != len(selected_image_ids):
+            raise ValueError("selected_image_ids contains duplicates")
+        if len(self.expected_annotation_ids) != len(selected_annotation_ids):
+            raise ValueError("selected_annotation_ids contains duplicates")
+        if len(self.expected_image_ids) > source_images:
+            raise ValueError("selected image count cannot exceed source_images")
+        if len(self.expected_annotation_ids) > source_annotations:
+            raise ValueError("selected annotation count cannot exceed source_annotations")
+        self.max_images = max_images
         self.manifest_path = self.output_dir / MANIFEST_NAME
         self._archive: Optional[tarfile.TarFile] = None
         self._temporary_path: Optional[Path] = None
@@ -400,12 +494,26 @@ class DenseFeatureShardWriter:
                 "images_per_shard": images_per_shard,
                 "extraction_config": extraction_config,
                 "source_commit": source_commit,
+                "source_images": source_images,
+                "source_annotations": source_annotations,
+                "selected_images": len(self.expected_image_ids),
+                "selected_annotations": len(self.expected_annotation_ids),
+                "selected_image_ids_sha256": _id_set_digest(self.expected_image_ids),
+                "selected_annotation_ids_sha256": _id_set_digest(
+                    self.expected_annotation_ids
+                ),
+                "max_images": max_images,
             }
             actual_identity = {key: self.manifest.get(key) for key in expected_identity}
             if actual_identity != expected_identity:
                 raise FileExistsError(
                     "completed output has a different extraction configuration; "
                     "pass overwrite=True only if replacement is intentional"
+                )
+            if self.manifest["complete"]:
+                raise FileExistsError(
+                    "completed extraction is immutable; pass overwrite=True only if "
+                    "replacement is intentional"
                 )
             referenced_shards = {shard["name"] for shard in self.manifest["shards"]}
             orphan_shards = [
@@ -441,6 +549,18 @@ class DenseFeatureShardWriter:
                 "images_per_shard": images_per_shard,
                 "extraction_config": extraction_config,
                 "source_commit": source_commit,
+                "source_images": source_images,
+                "source_annotations": source_annotations,
+                "selected_images": len(self.expected_image_ids),
+                "selected_annotations": len(self.expected_annotation_ids),
+                "selected_image_ids_sha256": _id_set_digest(self.expected_image_ids),
+                "selected_annotation_ids_sha256": _id_set_digest(
+                    self.expected_annotation_ids
+                ),
+                "max_images": max_images,
+                "is_pilot": max_images is not None,
+                "complete": False,
+                "failed_image_ids": [],
                 "images": 0,
                 "annotations": 0,
                 "shards": [],
@@ -508,15 +628,27 @@ class DenseFeatureShardWriter:
             return False
         if image_id is None:
             raise DenseFeatureValidationError("record has no image_id")
-        if self._archive is None:
-            self._open_shard()
+        if image_id not in self.expected_image_ids:
+            raise DenseFeatureValidationError(
+                f"image ID {image_id!r} is outside the selected extraction"
+            )
         _validate_record(record, f"image-{image_id}")
         annotation_ids = record["annotation_ids"]
+        unexpected_annotations = set(annotation_ids).difference(
+            self.expected_annotation_ids
+        )
+        if unexpected_annotations:
+            raise DenseFeatureValidationError(
+                "annotation IDs are outside the selected extraction: "
+                f"{sorted(unexpected_annotations, key=str)!r}"
+            )
         duplicate_annotations = self.completed_annotation_ids.intersection(annotation_ids)
         if duplicate_annotations:
             raise DenseFeatureValidationError(
                 f"annotation IDs already written: {sorted(duplicate_annotations)!r}"
             )
+        if self._archive is None:
+            self._open_shard()
         buffer = io.BytesIO()
         torch.save(record, buffer)
         payload = buffer.getvalue()
@@ -573,6 +705,53 @@ class DenseFeatureShardWriter:
         if self._archive is not None:
             self._finalize_shard()
 
+    def record_failure(self, image_id: Any) -> None:
+        """Persist a failed selected image without discarding earlier failures."""
+        if image_id not in self.expected_image_ids:
+            raise DenseFeatureValidationError(
+                f"failed image ID {image_id!r} is outside the selected extraction"
+            )
+        failed = set(self.manifest["failed_image_ids"])
+        failed.add(image_id)
+        self.manifest["failed_image_ids"] = sorted(failed, key=str)
+        self.manifest["complete"] = False
+        _atomic_json_dump(self.manifest, self.manifest_path)
+
+    def finish(self) -> None:
+        """Finalize pending data and mark complete only after exact ID-set checks."""
+        self.close()
+        missing_images = self.expected_image_ids.difference(self.completed_image_ids)
+        unexpected_images = self.completed_image_ids.difference(self.expected_image_ids)
+        missing_annotations = self.expected_annotation_ids.difference(
+            self.completed_annotation_ids
+        )
+        unexpected_annotations = self.completed_annotation_ids.difference(
+            self.expected_annotation_ids
+        )
+        unresolved_failures = set(self.manifest["failed_image_ids"]).difference(
+            self.completed_image_ids
+        )
+        self.manifest["failed_image_ids"] = sorted(unresolved_failures, key=str)
+        self.manifest["complete"] = not any(
+            (
+                missing_images,
+                unexpected_images,
+                missing_annotations,
+                unexpected_annotations,
+                unresolved_failures,
+            )
+        )
+        _atomic_json_dump(self.manifest, self.manifest_path)
+        if not self.manifest["complete"]:
+            raise IncompleteDenseFeatureExtraction(
+                "dense-feature extraction is incomplete: "
+                f"missing images={len(missing_images)}, "
+                f"unexpected images={len(unexpected_images)}, "
+                f"missing annotations={len(missing_annotations)}, "
+                f"unexpected annotations={len(unexpected_annotations)}, "
+                f"failed_image_ids={self.manifest['failed_image_ids']!r}"
+            )
+
     def abort(self) -> None:
         if self._archive is not None:
             self._archive.close()
@@ -590,12 +769,18 @@ class DenseFeatureStreamingDataset(IterableDataset):
         shuffle_shards: bool = False,
         shuffle_buffer: int = 0,
         seed: int = 0,
+        allow_incomplete: bool = False,
     ) -> None:
         super().__init__()
         if shuffle_buffer < 0:
             raise ValueError("shuffle_buffer cannot be negative")
         self.root = Path(root)
         self.manifest = _load_manifest(self.root)
+        if not self.manifest["complete"] and not allow_incomplete:
+            raise DenseFeatureValidationError(
+                "dense-feature extraction is incomplete; pass allow_incomplete=True "
+                "only for explicit pilot inspection or tests"
+            )
         self.shards = [self.root / shard["name"] for shard in self.manifest["shards"]]
         self.shuffle_shards = shuffle_shards
         self.shuffle_buffer = shuffle_buffer

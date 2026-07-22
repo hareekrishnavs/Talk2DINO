@@ -10,6 +10,7 @@ from src.dense_features import (
     DenseFeatureShardWriter,
     DenseFeatureStreamingDataset,
     DenseFeatureValidationError,
+    IncompleteDenseFeatureExtraction,
     iter_dense_shard_records,
     validate_dense_dataset,
     validate_dense_shard,
@@ -52,67 +53,108 @@ def make_record(dense_tensors, image_id, caption_count=2):
     }
 
 
-def writer(path, images_per_shard=2):
+def writer(
+    path,
+    records,
+    images_per_shard=2,
+    *,
+    source_images=None,
+    source_annotations=None,
+    max_images=None,
+    overwrite=False,
+):
+    image_ids = [record["image_id"] for record in records]
+    annotation_ids = [
+        annotation_id
+        for record in records
+        for annotation_id in record["annotation_ids"]
+    ]
     return DenseFeatureShardWriter(
         path,
         "train",
         CONFIG,
         "9f314dc",
+        source_images=source_images if source_images is not None else len(image_ids),
+        source_annotations=(
+            source_annotations
+            if source_annotations is not None
+            else len(annotation_ids)
+        ),
+        selected_image_ids=image_ids,
+        selected_annotation_ids=annotation_ids,
+        max_images=max_images,
         images_per_shard=images_per_shard,
+        overwrite=overwrite,
     )
 
 
-def write_records(path, dense_tensors, count=4, captions=2, images_per_shard=2):
-    with writer(path, images_per_shard) as output:
-        for image_id in range(count):
-            output.add(make_record(dense_tensors, image_id, captions))
+def write_records(path, dense_tensors, count=2, captions=2, images_per_shard=2):
+    records = [
+        make_record(dense_tensors, image_id, captions) for image_id in range(count)
+    ]
+    output = writer(path, records, images_per_shard)
+    for record in records:
+        output.add(record)
+    output.finish()
+    return records
 
 
 def test_continuous_image_level_storage_and_atomic_finalization(tmp_path, dense_tensors):
-    output = writer(tmp_path, images_per_shard=2)
-    output.add(make_record(dense_tensors, 1, caption_count=3))
-    assert not (tmp_path / "train-000000.tar").exists()
-    assert (tmp_path / "train-000000.tar.tmp").exists()
-
-    output.add(make_record(dense_tensors, 2, caption_count=4))
+    records = [
+        make_record(dense_tensors, 1, caption_count=3),
+        make_record(dense_tensors, 2, caption_count=4),
+    ]
+    output = writer(tmp_path, records, images_per_shard=1)
+    output.add(records[0])
     finalized = tmp_path / "train-000000.tar"
     assert finalized.exists()  # Written before the complete input has been consumed.
     assert not (tmp_path / "train-000000.tar.tmp").exists()
-    records = list(iter_dense_shard_records(finalized))
-    assert len(records) == 2  # Dense tensors occur once per image, not per caption.
-    assert records[0]["captions"] == ["caption 1-0", "caption 1-1", "caption 1-2"]
-    assert records[1]["annotation_ids"] == [20, 21, 22, 23]
-    assert records[0]["patch_tokens"].dtype == torch.float16
-    assert records[0]["self_attn_maps"].dtype == torch.float16
+    assert json.loads((tmp_path / "manifest.json").read_text())["complete"] is False
+    stored = list(iter_dense_shard_records(finalized))
+    assert len(stored) == 1  # Dense tensors occur once per image, not per caption.
+    assert stored[0]["captions"] == ["caption 1-0", "caption 1-1", "caption 1-2"]
+    assert stored[0]["patch_tokens"].dtype == torch.float16
+    assert stored[0]["self_attn_maps"].dtype == torch.float16
     assert torch.allclose(
-        records[0]["self_attn_maps"].float().sum(-1), torch.ones(12), atol=2e-3
+        stored[0]["self_attn_maps"].float().sum(-1), torch.ones(12), atol=2e-3
     )
-    output.add(make_record(dense_tensors, 3))
-    output.close()
+    output.add(records[1])
+    output.finish()
     assert (tmp_path / "train-000001.tar").exists()
 
 
 def test_manifest_and_dataset_validation(tmp_path, dense_tensors):
-    write_records(tmp_path, dense_tensors, count=3, captions=2)
+    write_records(tmp_path, dense_tensors, count=2, captions=2)
     manifest = json.loads((tmp_path / "manifest.json").read_text())
     assert manifest["source_commit"] == "9f314dc"
     assert manifest["extraction_config"] == CONFIG
-    assert manifest["images"] == 3
-    assert manifest["annotations"] == 6
-    assert [shard["images"] for shard in manifest["shards"]] == [2, 1]
+    assert manifest["source_images"] == 2
+    assert manifest["source_annotations"] == 4
+    assert manifest["selected_images"] == 2
+    assert manifest["selected_annotations"] == 4
+    assert manifest["complete"] is True
+    assert manifest["failed_image_ids"] == []
+    assert manifest["images"] == 2
+    assert manifest["annotations"] == 4
+    assert [shard["images"] for shard in manifest["shards"]] == [2]
     assert all(shard["sha256"] and shard["bytes"] > 0 for shard in manifest["shards"])
 
     result = validate_dense_dataset(tmp_path)
-    assert result["images"] == 3
-    assert result["annotations"] == 6
+    assert result["images"] == 2
+    assert result["annotations"] == 4
+    assert result["complete"] is True
+    assert result["coverage_complete"] is True
+    assert result["is_pilot"] is False
+    assert validate_dense_dataset(tmp_path, require_complete=True)["complete"] is True
     assert result["failed_images"] == []
     assert result["cosine_min"] > 0.999
     assert result["row_sum_min"] == pytest.approx(1.0, abs=2e-3)
 
 
 def test_partial_shard_is_rejected(tmp_path, dense_tensors):
-    output = writer(tmp_path)
-    output.add(make_record(dense_tensors, 1))
+    record = make_record(dense_tensors, 1)
+    output = writer(tmp_path, [record])
+    output.add(record)
     partial = tmp_path / "train-000000.tar.tmp"
     with pytest.raises(DenseFeatureValidationError, match="partial"):
         validate_dense_shard(partial)
@@ -121,9 +163,10 @@ def test_partial_shard_is_rejected(tmp_path, dense_tensors):
 
 
 def test_restart_skips_verified_images_without_overwrite(tmp_path, dense_tensors):
-    with writer(tmp_path) as output:
-        output.add(make_record(dense_tensors, 1))
-        output.add(make_record(dense_tensors, 2))
+    records = [make_record(dense_tensors, 1), make_record(dense_tensors, 2)]
+    output = writer(tmp_path, records, images_per_shard=1)
+    output.add(records[0])
+    output.close()
     first = tmp_path / "train-000000.tar"
     original = first.read_bytes()
 
@@ -135,22 +178,115 @@ def test_restart_skips_verified_images_without_overwrite(tmp_path, dense_tensors
     manifest["shards"] = []
     manifest_path.write_text(json.dumps(manifest))
 
-    with writer(tmp_path) as resumed:
-        assert resumed.add(make_record(dense_tensors, 1)) is False
-        assert resumed.add(make_record(dense_tensors, 3)) is True
+    resumed = writer(tmp_path, records, images_per_shard=1)
+    assert resumed.add(records[0]) is False
+    assert resumed.add(records[1]) is True
+    resumed.finish()
     assert first.read_bytes() == original
     result = validate_dense_dataset(tmp_path)
-    assert result["images"] == 3
+    assert result["images"] == 2
+    assert result["complete"] is True
+
+    with pytest.raises(FileExistsError, match="immutable"):
+        writer(tmp_path, records, images_per_shard=1)
+
+
+def test_interrupted_extraction_and_reader_incomplete_guard(tmp_path, dense_tensors):
+    records = [make_record(dense_tensors, 0), make_record(dense_tensors, 1)]
+    output = writer(tmp_path, records, images_per_shard=1)
+    output.add(records[0])
+    output.close()
+
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert manifest["complete"] is False
+    assert manifest["images"] == 1
+    with pytest.raises(DenseFeatureValidationError, match="incomplete"):
+        validate_dense_dataset(tmp_path, require_complete=True)
+    with pytest.raises(DenseFeatureValidationError, match="allow_incomplete"):
+        DenseFeatureStreamingDataset(tmp_path)
+
+    inspection = DenseFeatureStreamingDataset(tmp_path, allow_incomplete=True)
+    assert len(inspection) == 2
+    assert len(list(inspection)) == 2
+
+
+def test_pilot_is_complete_but_cannot_be_reused_as_full(tmp_path, dense_tensors):
+    pilot_record = make_record(dense_tensors, 0)
+    full_records = [pilot_record, make_record(dense_tensors, 1)]
+    pilot = writer(
+        tmp_path,
+        [pilot_record],
+        source_images=2,
+        source_annotations=4,
+        max_images=1,
+    )
+    pilot.add(pilot_record)
+    pilot.finish()
+
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert manifest["complete"] is True
+    assert manifest["is_pilot"] is True
+    assert manifest["max_images"] == 1
+    assert manifest["source_images"] == 2
+    assert manifest["selected_images"] == 1
+    assert validate_dense_dataset(tmp_path)["is_pilot"] is True
+    with pytest.raises(DenseFeatureValidationError, match="is_pilot=True"):
+        validate_dense_dataset(tmp_path, require_complete=True)
 
     with pytest.raises(FileExistsError, match="different extraction configuration"):
-        DenseFeatureShardWriter(tmp_path, "train", {"different": True}, "9f314dc", 2)
+        writer(
+            tmp_path,
+            full_records,
+            source_images=2,
+            source_annotations=4,
+            max_images=None,
+        )
+
+
+def test_failed_image_is_persisted_and_completion_fails(tmp_path, dense_tensors):
+    record = make_record(dense_tensors, 7)
+    output = writer(tmp_path, [record])
+    output.record_failure(7)
+    with pytest.raises(IncompleteDenseFeatureExtraction, match="failed_image_ids"):
+        output.finish()
+
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert manifest["complete"] is False
+    assert manifest["failed_image_ids"] == [7]
+    resumed = writer(tmp_path, [record])
+    assert resumed.manifest["failed_image_ids"] == [7]
+    resumed.abort()
+    with pytest.raises(DenseFeatureValidationError, match="incomplete"):
+        validate_dense_dataset(tmp_path, require_complete=True)
+
+
+def test_missing_image_id_is_detected(tmp_path, dense_tensors):
+    records = [make_record(dense_tensors, 0), make_record(dense_tensors, 1)]
+    output = writer(tmp_path, records)
+    output.add(records[0])
+    with pytest.raises(IncompleteDenseFeatureExtraction, match="missing images=1"):
+        output.finish()
+    assert json.loads((tmp_path / "manifest.json").read_text())["complete"] is False
+
+
+def test_missing_annotation_id_is_detected(tmp_path, dense_tensors):
+    expected = make_record(dense_tensors, 0, caption_count=2)
+    incomplete = dict(expected)
+    incomplete["captions"] = expected["captions"][:1]
+    incomplete["ann_feats"] = expected["ann_feats"][:1]
+    incomplete["annotation_ids"] = expected["annotation_ids"][:1]
+    output = writer(tmp_path, [expected])
+    output.add(incomplete)
+    with pytest.raises(IncompleteDenseFeatureExtraction, match="missing annotations=1"):
+        output.finish()
+    assert json.loads((tmp_path / "manifest.json").read_text())["complete"] is False
 
 
 def test_reader_expands_annotations_without_dense_copies(tmp_path, dense_tensors):
-    write_records(tmp_path, dense_tensors, count=3, captions=3)
+    write_records(tmp_path, dense_tensors, count=2, captions=3)
     dataset = DenseFeatureStreamingDataset(tmp_path)
     samples = list(dataset)
-    assert len(dataset) == len(samples) == 9
+    assert len(dataset) == len(samples) == 6
     assert [sample["metadata"]["annotation_id"] for sample in samples[:3]] == [0, 1, 2]
     assert all(sample["metadata"]["image_id"] == 0 for sample in samples[:3])
     assert samples[0]["patch_tokens"].data_ptr() == samples[1]["patch_tokens"].data_ptr()
@@ -161,7 +297,7 @@ def test_reader_expands_annotations_without_dense_copies(tmp_path, dense_tensors
 
 
 def test_reader_is_deterministic_and_bounded_shuffle_is_reproducible(tmp_path, dense_tensors):
-    write_records(tmp_path, dense_tensors, count=4, captions=2)
+    write_records(tmp_path, dense_tensors, count=2, captions=2, images_per_shard=1)
     ordered = [
         sample["metadata"]["annotation_id"]
         for sample in DenseFeatureStreamingDataset(tmp_path)
@@ -189,34 +325,7 @@ def test_reader_is_deterministic_and_bounded_shuffle_is_reproducible(tmp_path, d
 
 
 def test_multiple_workers_do_not_duplicate_samples(tmp_path, dense_tensors):
-    shard_entries = []
-    for shard_index in range(2):
-        records = []
-        for image_id in range(shard_index * 2, shard_index * 2 + 2):
-            record = make_record(dense_tensors, image_id)
-            # Reader partitioning does not depend on production tensor dimensions;
-            # keep worker IPC small in constrained test environments.
-            record["disentangled_self_attn"] = torch.ones(2, 3)
-            record["patch_tokens"] = torch.ones(4, 3)
-            record["self_attn_maps"] = torch.full((2, 4), 0.25)
-            records.append(record)
-        shard_path = tmp_path / f"train-{shard_index:06d}.tar"
-        write_unchecked_records(shard_path, records)
-        shard_entries.append(
-            {"name": shard_path.name, "images": 2, "annotations": 4}
-        )
-    (tmp_path / "manifest.json").write_text(
-        json.dumps(
-            {
-                "format_version": 1,
-                "split": "train",
-                "images_per_shard": 2,
-                "images": 4,
-                "annotations": 8,
-                "shards": shard_entries,
-            }
-        )
-    )
+    write_records(tmp_path, dense_tensors, count=2, captions=2, images_per_shard=1)
     dataset = DenseFeatureStreamingDataset(tmp_path)
     annotation_ids = [
         sample["metadata"]["annotation_id"]
@@ -224,7 +333,7 @@ def test_multiple_workers_do_not_duplicate_samples(tmp_path, dense_tensors):
     ]
     assert len(annotation_ids) == len(dataset)
     assert len(annotation_ids) == len(set(annotation_ids))
-    assert sorted(annotation_ids) == [0, 1, 10, 11, 20, 21, 30, 31]
+    assert sorted(annotation_ids) == [0, 1, 10, 11]
 
 
 def write_unchecked_records(path, records):

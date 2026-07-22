@@ -71,6 +71,22 @@ def _annotations_by_image(data):
         grouped.setdefault(annotation["image_id"], []).append(annotation)
     return grouped
 
+
+def _open_source_image(image, data_dir):
+    if "http" in image["file_name"]:
+        return Image.open(BytesIO(requests.get(image["file_name"]).content))
+    if "train" in image["file_name"]:
+        return Image.open(os.path.join(data_dir, f"train2014/{image['file_name']}"))
+    if "val" in image["file_name"]:
+        return Image.open(os.path.join(data_dir, f"val2014/{image['file_name']}"))
+    if "test" in image["file_name"]:
+        return Image.open(os.path.join(data_dir, f"test2014/{image['file_name']}"))
+    if "train" in image["coco_url"]:
+        return Image.open(os.path.join(data_dir, f"train2017/{image['file_name']}"))
+    if "val" in image["coco_url"]:
+        return Image.open(os.path.join(data_dir, f"val2017/{image['file_name']}"))
+    return None
+
 def run_dinov2_extraction(model_name, data_dir, ann_path, batch_size, resize_dim=518, crop_dim=518, out_path=None, 
                           write_as_wds=False, num_shards=25, n_in_splits=4, in_batch_offset=0, out_offset=0,
                           extract_cls=False, extract_avg_self_attn=False, extract_second_last_out=False,
@@ -211,6 +227,11 @@ def run_dinov2_extraction(model_name, data_dir, ann_path, batch_size, resize_dim
 
     writer = None
     annotations_by_image = None
+    selected_count = min(
+        len(data["images"]),
+        max_images if max_images is not None else len(data["images"]),
+    )
+    selected_indices = list(range(selected_count))
     if streaming_shards:
         if out_path is None:
             raise ValueError("--out_path is required with --streaming_shards")
@@ -238,6 +259,16 @@ def run_dinov2_extraction(model_name, data_dir, ann_path, batch_size, resize_dim
         if split_name is None:
             raise ValueError("--split_name is required with --streaming_shards")
         annotations_by_image = _annotations_by_image(data)
+        selected_image_ids = [data["images"][index]["id"] for index in selected_indices]
+        if len(set(selected_image_ids)) != len(selected_image_ids):
+            raise ValueError("source contains duplicate image IDs in the selected range")
+        selected_annotation_ids = [
+            annotation["id"]
+            for image_id in selected_image_ids
+            for annotation in annotations_by_image.get(image_id, [])
+        ]
+        if len(set(selected_annotation_ids)) != len(selected_annotation_ids):
+            raise ValueError("source contains duplicate selected annotation IDs")
         extraction_config = {
             "annotation_path": os.path.abspath(ann_path),
             "data_dir": os.path.abspath(data_dir),
@@ -257,20 +288,17 @@ def run_dinov2_extraction(model_name, data_dir, ann_path, batch_size, resize_dim
             split=split_name,
             extraction_config=extraction_config,
             source_commit=_git_commit(),
+            source_images=len(data["images"]),
+            source_annotations=len(data["annotations"]),
+            selected_image_ids=selected_image_ids,
+            selected_annotation_ids=selected_annotation_ids,
+            max_images=max_images,
             images_per_shard=images_per_shard,
             overwrite=overwrite,
         )
 
     print("Starting the features extraction...")
-    selected_count = min(
-        len(data["images"]),
-        max_images if max_images is not None else len(data["images"]),
-    )
-    selected_indices = list(range(selected_count))
     if writer is not None:
-        selected_image_ids = [data["images"][index]["id"] for index in selected_indices]
-        if len(set(selected_image_ids)) != len(selected_image_ids):
-            raise ValueError("source contains duplicate image IDs in the selected range")
         selected_indices = [
             index
             for index in selected_indices
@@ -296,34 +324,19 @@ def run_dinov2_extraction(model_name, data_dir, ann_path, batch_size, resize_dim
                 # saving space by eliminating the jpg
                 del data['images'][j]['jpg']
             else:
-                # COCO or Recap case
-                
-                # Recap
-                if 'http' in data['images'][j]['file_name']:
-                    try:
-                        pil_img = Image.open(BytesIO(requests.get(data['images'][j]['file_name']).content))
-                    except Exception:
-                        pil_img = Image.new("RGB", (224, 224)) # genererate dummy image
-                        failed_ids.append(j)
-                        n_errors += 1
-                # COCO 2014
-                elif 'train' in data['images'][j]['file_name']:
-                    pil_img = Image.open(os.path.join(data_dir, f"train2014/{data['images'][j]['file_name']}"))
-                elif 'val' in data['images'][j]['file_name']:
-                    pil_img = Image.open(os.path.join(data_dir, f"val2014/{data['images'][j]['file_name']}"))
-                elif 'test' in data['images'][j]['file_name']:
-                    pil_img = Image.open(os.path.join(data_dir, f"test2014/{data['images'][j]['file_name']}"))
-                # COCO 2017
-                elif 'train' in data['images'][j]['coco_url']:
-                    pil_img = Image.open(os.path.join(data_dir, f"train2017/{data['images'][j]['file_name']}"))
-                elif 'val' in data['images'][j]['coco_url']:
-                    pil_img = Image.open(os.path.join(data_dir, f"val2017/{data['images'][j]['file_name']}"))
-                else:
-                    pil_img = Image.new("RGB", (224, 224)) # genererate dummy image
+                try:
+                    pil_img = _open_source_image(data["images"][j], data_dir)
+                except Exception:
+                    if writer is None and "http" not in data["images"][j]["file_name"]:
+                        raise
+                    pil_img = None
+                if pil_img is None:
+                    pil_img = Image.new("RGB", (224, 224))
                     failed_ids.append(j)
                     n_errors += 1
-                
-                    
+                    if writer is not None:
+                        writer.record_failure(data["images"][j]["id"])
+
             if pil_img.mode != 'RGB':
                 pil_img = pil_img.convert('RGB')
             raw_imgs.append(pil_img)
@@ -422,7 +435,7 @@ def run_dinov2_extraction(model_name, data_dir, ann_path, batch_size, resize_dim
     print(f"Failed to extract {n_errors} of {n_imgs}")
 
     if writer is not None:
-        writer.close()
+        writer.finish()
         elapsed = time.monotonic() - extraction_started
         processed = n_imgs - n_errors
         metrics = {
