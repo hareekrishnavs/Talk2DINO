@@ -4,6 +4,7 @@ import torch
 import torch.optim as optim
 from tqdm import tqdm
 from src.loss import ContrastiveLoss
+from src.dataset import multicaption_collate_fn
 import os
 import numpy as np
 import random
@@ -82,14 +83,17 @@ def train(model, train_dataloader, contrastive_loss, optimizer, scheduler=None, 
             text_input_mask = batch['text_input_mask'].to(device)
         else:
             text_input_mask = None
+        caption_mask = batch.get('caption_mask')
+        if caption_mask is not None:
+            caption_mask = caption_mask.to(device)
             
         if scheduler is not None:
             scheduler(n_batch + prev_iter)
                     
         if not save_head_attivations:
-            loss = contrastive_loss(images, annotations, return_similarity_mat=False, self_attn_maps=self_attn_maps, cls=cls, text_input_mask=text_input_mask, text_argmax=text_argmax)
+            loss = contrastive_loss(images, annotations, return_similarity_mat=False, self_attn_maps=self_attn_maps, cls=cls, text_input_mask=text_input_mask, text_argmax=text_argmax, caption_mask=caption_mask)
         else:
-            loss, batch_head_attivations = contrastive_loss(images, annotations, return_similarity_mat=False, self_attn_maps=self_attn_maps, cls=cls, text_input_mask=text_input_mask, text_argmax=text_argmax, return_index=True)
+            loss, batch_head_attivations = contrastive_loss(images, annotations, return_similarity_mat=False, self_attn_maps=self_attn_maps, cls=cls, text_input_mask=text_input_mask, text_argmax=text_argmax, return_index=True, caption_mask=caption_mask)
             head_attivations.append(batch_head_attivations)
             ann_ids.append(batch['metadata']['annotation_id'])
             img_ids.append(batch['metadata']['image_id'])
@@ -144,9 +148,12 @@ def validate(model, val_dataloader, contrastive_loss, verbose=False):
             text_input_mask = batch['text_input_mask'].to(device)
         else:
             text_input_mask = None
+        caption_mask = batch.get('caption_mask')
+        if caption_mask is not None:
+            caption_mask = caption_mask.to(device)
         
         with torch.no_grad():
-            loss = contrastive_loss(images, annotations, return_similarity_mat=False, self_attn_maps=self_attn_maps, cls=cls, text_input_mask=text_input_mask, text_argmax=text_argmax)
+            loss = contrastive_loss(images, annotations, return_similarity_mat=False, self_attn_maps=self_attn_maps, cls=cls, text_input_mask=text_input_mask, text_argmax=text_argmax, caption_mask=caption_mask)
     
         val_batch_losses.append(loss.item())
     return torch.mean(torch.tensor(val_batch_losses)).item()
@@ -164,10 +171,12 @@ def do_train(model, train_dataset, val_dataset, train_cfg, seed=123, optimizer_n
     max_violation = train_cfg.get('max_violation', True)
     shuffle = train_cfg.get('shuffle', True)
     save_best_model = train_cfg.get('save_best_model', True)
+    multi_caption = train_cfg.get('multi_caption', False)
     # early_stopping = train_cfg.get('early_stopping', 0) # 0 means no early-stopping
     
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle, num_workers=16)
-    val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=16)
+    collate_fn = multicaption_collate_fn if multi_caption else None
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle, num_workers=16, collate_fn=collate_fn)
+    val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=16, collate_fn=collate_fn)
     
     criterion = ContrastiveLoss(model, margin=margin, max_violation=max_violation, ltype=ltype)
     if optimizer_name == "Adam":

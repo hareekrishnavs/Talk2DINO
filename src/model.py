@@ -159,7 +159,75 @@ class ProjectionLayer(nn.Module):
         
         return model
     
-    def compute_similarity(self, visual_embedding, textual_embedding, text_input_mask=None, return_index=False):
+    def compute_similarity(self, visual_embedding, textual_embedding, text_input_mask=None, return_index=False, caption_mask=None):
+        if self.alignment_strategy == 'multicaption_consensus_routing':
+            if visual_embedding.ndim != 3 or textual_embedding.ndim != 3:
+                raise ValueError(
+                    "multicaption_consensus_routing requires visual [B, H, D] "
+                    "and text [B, K, D], but received "
+                    f"visual={tuple(visual_embedding.shape)} and "
+                    f"text={tuple(textual_embedding.shape)}"
+                )
+            if caption_mask is None or caption_mask.ndim != 2:
+                mask_shape = None if caption_mask is None else tuple(caption_mask.shape)
+                raise ValueError(
+                    "multicaption_consensus_routing requires caption_mask [B, K], "
+                    f"but received {mask_shape}"
+                )
+            if caption_mask.dtype != torch.bool:
+                raise ValueError(
+                    f"caption_mask must have bool dtype, but received {caption_mask.dtype}"
+                )
+            if caption_mask.device != textual_embedding.device:
+                raise ValueError("caption_mask and text embeddings must be on the same device")
+            if visual_embedding.shape[0] != textual_embedding.shape[0]:
+                raise ValueError(
+                    "Image and text batch sizes must match, but received "
+                    f"visual={tuple(visual_embedding.shape)} and "
+                    f"text={tuple(textual_embedding.shape)}"
+                )
+            if caption_mask.shape != textual_embedding.shape[:2]:
+                raise ValueError(
+                    "caption_mask must match text [B, K], but received "
+                    f"mask={tuple(caption_mask.shape)} and "
+                    f"text={tuple(textual_embedding.shape)}"
+                )
+            if visual_embedding.shape[-1] != textual_embedding.shape[-1]:
+                raise ValueError(
+                    "Visual and text embedding dimensions must match, but received "
+                    f"visual={tuple(visual_embedding.shape)} and "
+                    f"text={tuple(textual_embedding.shape)}"
+                )
+            caption_counts = caption_mask.sum(dim=1, keepdim=True)
+            if torch.any(caption_counts == 0):
+                raise ValueError("Every image must have at least one valid caption")
+
+            affinities = torch.einsum(
+                "bkd,bhd->bkh",
+                textual_embedding,
+                visual_embedding,
+            )
+            valid = caption_mask.unsqueeze(-1)
+            consensus_affinities = (
+                (affinities * valid).sum(dim=1) / caption_counts
+            )
+            routing_weights = torch.softmax(
+                consensus_affinities / self.routing_temperature,
+                dim=-1,
+            )
+            routed_visual = torch.einsum(
+                "bh,bhd->bd",
+                routing_weights,
+                visual_embedding,
+            )
+            routed_visual = F.normalize(routed_visual, p=2, dim=-1)
+            valid_text = textual_embedding[caption_mask]
+            sims = valid_text @ routed_visual.transpose(0, 1)
+            if return_index:
+                routing_indices = consensus_affinities.argmax(dim=-1)
+                return sims, routing_indices
+            return sims
+
         if self.alignment_strategy == 'paired_soft_routing':
             if visual_embedding.ndim != 3 or textual_embedding.ndim != 2:
                 raise ValueError(
@@ -302,7 +370,7 @@ class ProjectionLayer(nn.Module):
         
         
     
-    def forward(self, visual_embedding, textual_embedding, ret_similarity_matrix=True, ret_embeds=False, self_attn_maps=None, cls=None, text_input_mask=None, return_index=False):
+    def forward(self, visual_embedding, textual_embedding, ret_similarity_matrix=True, ret_embeds=False, self_attn_maps=None, cls=None, text_input_mask=None, return_index=False, caption_mask=None):
         if self.weight_attn_heads is not None:
             assert self_attn_maps is not None, "In case we have attention maps weights, we have to weight patch tokens mean by the weighted self-attention maps"
             visual_embedding = self.get_visual_embed(visual_embedding, self_attn_maps=self_attn_maps, cls=cls)    
@@ -318,11 +386,15 @@ class ProjectionLayer(nn.Module):
             return textual_embedding, visual_embedding
         
         if not return_index:
-            x = self.compute_similarity(visual_embedding, textual_embedding, text_input_mask, return_index)
+            x = self.compute_similarity(visual_embedding, textual_embedding, text_input_mask, return_index, caption_mask)
         else:
-            x, index = self.compute_similarity(visual_embedding, textual_embedding, text_input_mask, return_index)
+            x, index = self.compute_similarity(visual_embedding, textual_embedding, text_input_mask, return_index, caption_mask)
             
         if not ret_similarity_matrix:
+            if self.alignment_strategy == 'multicaption_consensus_routing':
+                raise ValueError(
+                    "multicaption_consensus_routing does not support diagonal-only scores"
+                )
             x = x[torch.eye(len(x)) > 0.5] # only diagonal elements
         
         if not return_index:

@@ -9,7 +9,7 @@ import importlib
 import torchvision.transforms as T
 import clip
 
-from src.dataset import DinoClipDataset, COCOCaptions
+from src.dataset import COCOCaptions, DinoClipDataset, GroupedDinoClipDataset
 from src.metrics import get_image_and_text_tensor, i2t, t2i
 from src.train_util import do_train, set_seed
 from src.local_weights import save_torch_artifact
@@ -111,16 +111,33 @@ if __name__ == '__main__':
         alignment_strategy = model_config.get('model', {}).get(
             'alignment_strategy', 'max_score'
         )
-        val_dataset = DinoClipDataset(args.val_dataset, 
-                                      features_name=validation_feature_name(args.feature_name, alignment_strategy),
-                                      text_features=args.text_features,
-                                      load_attn_maps=args.feature_name == 'patch_tokens',
-                                      is_wds='.tar' in args.val_dataset)
-        train_dataset = DinoClipDataset(args.train_dataset,
-                                        features_name=args.feature_name,
-                                        text_features=args.text_features,
-                                        load_attn_maps=args.feature_name == 'patch_tokens',
-                                        is_wds='.tar' in args.train_dataset) 
+        multi_caption = model_config.get('train', {}).get('multi_caption', False)
+        if multi_caption:
+            if '.tar' in args.train_dataset or '.tar' in args.val_dataset:
+                raise ValueError("Multi-caption training requires PTH feature files")
+            train_dataset = GroupedDinoClipDataset(
+                args.train_dataset,
+                features_name=args.feature_name,
+                text_features=args.text_features,
+            )
+            val_dataset = GroupedDinoClipDataset(
+                args.val_dataset,
+                features_name=validation_feature_name(
+                    args.feature_name, alignment_strategy
+                ),
+                text_features=args.text_features,
+            )
+        else:
+            val_dataset = DinoClipDataset(args.val_dataset,
+                                          features_name=validation_feature_name(args.feature_name, alignment_strategy),
+                                          text_features=args.text_features,
+                                          load_attn_maps=args.feature_name == 'patch_tokens',
+                                          is_wds='.tar' in args.val_dataset)
+            train_dataset = DinoClipDataset(args.train_dataset,
+                                            features_name=args.feature_name,
+                                            text_features=args.text_features,
+                                            load_attn_maps=args.feature_name == 'patch_tokens',
+                                            is_wds='.tar' in args.train_dataset)
     else:
         image_transforms = T.Compose([
             T.Resize(args.resize_dim, interpolation=T.InterpolationMode.BICUBIC),

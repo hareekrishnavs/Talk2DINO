@@ -6,6 +6,83 @@ from io import BytesIO
 from PIL import Image
 from torch.utils.data import Dataset
 
+
+class GroupedDinoClipDataset(Dataset):
+    """One sample per image, with all of that image's caption features."""
+
+    def __init__(self, features_file, features_name='dino_features', text_features='ann_feats'):
+        print("Loading grouped dataset...")
+        data = torch.load(features_file, map_location='cpu', weights_only=False)
+        print("Grouped dataset loaded!")
+
+        images = {image['id']: image for image in data['images']}
+        captions_by_image = {image_id: [] for image_id in images}
+        for annotation in data['annotations']:
+            image_id = annotation['image_id']
+            if image_id not in images:
+                raise ValueError(
+                    f"Annotation references missing image ID {image_id}"
+                )
+            captions_by_image[image_id].append(annotation[text_features])
+
+        empty_image_ids = [
+            image_id for image_id, captions in captions_by_image.items()
+            if not captions
+        ]
+        if empty_image_ids:
+            raise ValueError(
+                "GroupedDinoClipDataset requires at least one caption per image; "
+                f"images without captions: {empty_image_ids[:5]}"
+            )
+
+        self.samples = [
+            {
+                'image': image[features_name],
+                'annotation': captions_by_image[image_id],
+                'image_id': image_id,
+            }
+            for image_id, image in images.items()
+        ]
+
+    def __getitem__(self, index):
+        return self.samples[index]
+
+    def __len__(self):
+        return len(self.samples)
+
+
+def multicaption_collate_fn(batch):
+    if not batch:
+        raise ValueError("Cannot collate an empty multi-caption batch")
+    caption_counts = [len(sample['annotation']) for sample in batch]
+    if min(caption_counts) <= 0:
+        raise ValueError("Every image must have at least one caption")
+
+    images = torch.stack([sample['image'] for sample in batch])
+    image_ids = torch.as_tensor([sample['image_id'] for sample in batch])
+    max_captions = max(caption_counts)
+    caption_shape = batch[0]['annotation'][0].shape
+    captions = batch[0]['annotation'][0].new_zeros(
+        (len(batch), max_captions, *caption_shape)
+    )
+    caption_mask = torch.zeros(
+        len(batch), max_captions, dtype=torch.bool
+    )
+    for image_index, sample in enumerate(batch):
+        stacked_captions = torch.stack(sample['annotation'])
+        if stacked_captions.shape[1:] != caption_shape:
+            raise ValueError("All caption features must have the same shape")
+        count = stacked_captions.shape[0]
+        captions[image_index, :count] = stacked_captions
+        caption_mask[image_index, :count] = True
+
+    return {
+        'image': images,
+        'annotation': captions,
+        'caption_mask': caption_mask,
+        'image_id': image_ids,
+    }
+
 class DinoClipDataset(Dataset):
     def __init__(self, features_file, features_name='dino_features', text_features='ann_feats', load_attn_maps=False, is_wds=False):
         if is_wds:

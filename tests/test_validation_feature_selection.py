@@ -15,5 +15,14 @@ def test_paired_soft_routing_preserves_validation_head_features():
     )
 
 
+def test_multicaption_consensus_preserves_validation_head_features():
+    assert (
+        validation_feature_name(
+            "disentangled_self_attn", "multicaption_consensus_routing"
+        )
+        == "disentangled_self_attn"
+    )
+
+
 def test_unrelated_feature_name_is_unchanged():
     assert validation_feature_name("patch_tokens", "max_score") == "patch_tokens"

@@ -1,0 +1,14 @@
+model:
+  act: tanh
+  hidden_layer: True
+  dino_embed_dim: 768
+  alignment_strategy: multicaption_consensus_routing
+  routing_temperature: 0.10
+
+train:
+  lr: 0.0001
+  ltype: multi_positive_infonce
+  num_epochs: 100
+  batch_size: 128 # unique images per batch; all captions are included
+  save_best_model: False
+  multi_caption: True
