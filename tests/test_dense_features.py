@@ -232,6 +232,11 @@ def test_pilot_is_complete_but_cannot_be_reused_as_full(tmp_path, dense_tensors)
     assert validate_dense_dataset(tmp_path)["is_pilot"] is True
     with pytest.raises(DenseFeatureValidationError, match="is_pilot=True"):
         validate_dense_dataset(tmp_path, require_complete=True)
+    with pytest.raises(DenseFeatureValidationError, match="allow_pilot"):
+        DenseFeatureStreamingDataset(tmp_path)
+    pilot_dataset = DenseFeatureStreamingDataset(tmp_path, allow_pilot=True)
+    assert len(pilot_dataset) == 2
+    assert len(list(pilot_dataset)) == 2
 
     with pytest.raises(FileExistsError, match="different extraction configuration"):
         writer(
@@ -241,6 +246,35 @@ def test_pilot_is_complete_but_cannot_be_reused_as_full(tmp_path, dense_tensors)
             source_annotations=4,
             max_images=None,
         )
+
+
+def test_incomplete_pilot_requires_both_reader_flags(tmp_path, dense_tensors):
+    records = [make_record(dense_tensors, 0), make_record(dense_tensors, 1)]
+    output = writer(
+        tmp_path,
+        records,
+        images_per_shard=1,
+        source_images=3,
+        source_annotations=6,
+        max_images=2,
+    )
+    output.add(records[0])
+    output.close()
+
+    with pytest.raises(DenseFeatureValidationError, match="allow_incomplete"):
+        DenseFeatureStreamingDataset(tmp_path)
+    with pytest.raises(DenseFeatureValidationError, match="allow_pilot"):
+        DenseFeatureStreamingDataset(tmp_path, allow_incomplete=True)
+    with pytest.raises(DenseFeatureValidationError, match="allow_incomplete"):
+        DenseFeatureStreamingDataset(tmp_path, allow_pilot=True)
+
+    inspection = DenseFeatureStreamingDataset(
+        tmp_path,
+        allow_incomplete=True,
+        allow_pilot=True,
+    )
+    assert len(inspection) == 2
+    assert len(list(inspection)) == 2
 
 
 def test_failed_image_is_persisted_and_completion_fails(tmp_path, dense_tensors):

@@ -770,6 +770,7 @@ class DenseFeatureStreamingDataset(IterableDataset):
         shuffle_buffer: int = 0,
         seed: int = 0,
         allow_incomplete: bool = False,
+        allow_pilot: bool = False,
     ) -> None:
         super().__init__()
         if shuffle_buffer < 0:
@@ -779,7 +780,12 @@ class DenseFeatureStreamingDataset(IterableDataset):
         if not self.manifest["complete"] and not allow_incomplete:
             raise DenseFeatureValidationError(
                 "dense-feature extraction is incomplete; pass allow_incomplete=True "
-                "only for explicit pilot inspection or tests"
+                "only for explicit inspection or tests"
+            )
+        if self.manifest.get("is_pilot", False) and not allow_pilot:
+            raise DenseFeatureValidationError(
+                "dense-feature dataset is a pilot; pass allow_pilot=True only for "
+                "explicit pilot inspection or tests"
             )
         self.shards = [self.root / shard["name"] for shard in self.manifest["shards"]]
         self.shuffle_shards = shuffle_shards
