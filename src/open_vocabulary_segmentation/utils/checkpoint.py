@@ -10,6 +10,7 @@ import re
 from collections import defaultdict
 
 import torch
+from mmcv.runner import CheckpointLoader
 from omegaconf import read_write
 from torch.nn.parallel.distributed import DistributedDataParallel
 
@@ -34,23 +35,10 @@ def clean_state_dict(state_dict):
         new_state_dict[key] = value
     return new_state_dict
 
-
-def load_local_checkpoint(path, map_location="cpu"):
-    try:
-        return torch.load(path, map_location=map_location, weights_only=False)
-    except TypeError:
-        return torch.load(path, map_location=map_location)
-
-
 def load_checkpoint(config, model, optimizer, lr_scheduler, scaler):
     logger = get_logger()
     logger.info(f"==============> Resuming form {config.checkpoint.resume}....................")
-    if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", config.checkpoint.resume):
-        raise ValueError(
-            "Remote checkpoint resume paths are disabled. "
-            "Use a local checkpoint file path."
-        )
-    checkpoint = load_local_checkpoint(config.checkpoint.resume, map_location="cpu")
+    checkpoint = CheckpointLoader.load_checkpoint(config.checkpoint.resume, map_location="cpu")
     if "model" in checkpoint:
         msg = model.load_state_dict(checkpoint["model"], strict=False)
     elif "state_dict" in checkpoint:
@@ -160,23 +148,7 @@ def save_checkpoint(
         "step": step,
         "config": config,
     }
-    if hasattr(model, "xattn_bridge") and model.xattn_bridge is not None:
-        save_state["bridge"] = model.xattn_bridge.state_dict()
-        save_state["bridge_name"] = "Talk2DINO_XAttnBridge"
-        save_state["clip_frozen"] = not any(
-            param.requires_grad for param in model.clip_model.parameters()
-        )
-        save_state["dino_frozen"] = not any(
-            param.requires_grad for param in model.model.parameters()
-        )
     if metrics is not None:
         save_state["metrics"] = metrics
 
-    os.makedirs(config.output, exist_ok=True)
-    path = os.path.join(config.output, filename)
-    tmp_path = f"{path}.tmp"
-    torch.save(save_state, tmp_path)
-    os.replace(tmp_path, path)
-
-    logger = get_logger()
-    logger.info(f"Checkpoint saved to {path}")
+    torch.save(save_state, os.path.join(config.output, filename))

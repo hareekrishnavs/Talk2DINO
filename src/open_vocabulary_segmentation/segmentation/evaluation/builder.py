@@ -31,15 +31,15 @@ def build_seg_dataset(config):
     return dataset
 
 
-def build_seg_dataloader(dataset, num_workers=0, pin_memory=False):
+def build_seg_dataloader(dataset):
     # batch size is set to 1 to handle varying image size (due to different aspect ratio)
     data_loader = build_dataloader(
         dataset,
         samples_per_gpu=1,
-        workers_per_gpu=num_workers,
+        workers_per_gpu=1,
         dist=True,
         shuffle=False,
-        persistent_workers=num_workers > 0,
-        pin_memory=pin_memory,
+        persistent_workers=True,
+        pin_memory=False,
     )
     return data_loader

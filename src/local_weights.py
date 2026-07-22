@@ -7,7 +7,7 @@ import torch.nn as nn
 from timm.layers.pos_embed import resample_abs_pos_embed
 
 
-DEFAULT_WEIGHT_DIR = os.environ.get("TALK2DINO_WEIGHT_DIR", "/scratch/haree/weights")
+DEFAULT_WEIGHT_DIR = os.environ.get("TALK2DINO_WEIGHT_DIR", "weights")
 
 CLIP_WEIGHT_PATHS = {
     "ViT-B/16": "ViT-B-16.pt",
@@ -38,10 +38,11 @@ def resolve_weight_path(path_or_name, weight_dir=DEFAULT_WEIGHT_DIR):
     return os.path.join(weight_dir, path_or_name)
 
 
-def require_file(path, description):
+def require_file(path, description, config_field=None):
     if path is None or not os.path.isfile(path):
         raise FileNotFoundError(
             f"Missing local {description}: {path}. "
+            f"Configuration field: {config_field or 'unspecified'}. "
             "Auto-download is disabled; put the file there or pass an explicit local path."
         )
     return path
@@ -63,7 +64,7 @@ def _load_checkpoint(path):
 
 
 def load_state_dict_from_local_file(model, weights_path, description, strict=False):
-    weights_path = require_file(weights_path, description)
+    weights_path = require_file(weights_path, description, "backbone_weights")
     state_dict = _load_checkpoint(weights_path)
     if isinstance(state_dict, dict):
         if "register_tokens" in state_dict and "reg_token" not in state_dict:
@@ -133,7 +134,7 @@ def load_local_clip(model_name, device="cpu", model_path=None, weight_dir=DEFAUL
 
     model_path = model_path or CLIP_WEIGHT_PATHS.get(model_name)
     model_path = resolve_weight_path(model_path, weight_dir)
-    require_file(model_path, f"CLIP weights for {model_name}")
+    require_file(model_path, f"CLIP weights for {model_name}", "clip_model_path")
     return clip.load(model_path, device=device, download_root=weight_dir)
 
 
@@ -146,7 +147,7 @@ def load_local_vision_backbone(model_name, img_size, weights_path=None, weight_d
 
     timm_name, default_weights, num_global_tokens = DINO_MODEL_INFO[model_name]
     weights_path = resolve_weight_path(weights_path or default_weights, weight_dir)
-    require_file(weights_path, f"backbone weights for {model_name}")
+    require_file(weights_path, f"backbone weights for {model_name}", "backbone_weights")
 
     model = timm.create_model(
         timm_name,
@@ -156,6 +157,4 @@ def load_local_vision_backbone(model_name, img_size, weights_path=None, weight_d
     )
     load_state_dict_from_local_file(model, weights_path, f"backbone weights for {model_name}", strict=False)
 
-    if "dinov2" in model_name:
-        return DinoTimmWrapper(model, num_global_tokens)
-    return model
+    return DinoTimmWrapper(model, num_global_tokens)

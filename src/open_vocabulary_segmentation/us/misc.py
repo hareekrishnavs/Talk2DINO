@@ -4,7 +4,6 @@
 from typing import Dict, List, Any
 from datetime import datetime
 from itertools import chain
-import time
 
 import torch
 import torch.nn as nn
@@ -129,64 +128,11 @@ import torch
 from mmcv.engine import collect_results_cpu, collect_results_gpu
 from mmcv.image import tensor2imgs
 from mmcv.runner import get_dist_info
-from mmseg.core.evaluation import intersect_and_union
+from mmseg.apis.test import np2tmp
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 from typing import Optional
-
-
-def np2tmp(array, temp_file_name=None, tmpdir=None):
-    if temp_file_name is None:
-        temp_file_name = tempfile.NamedTemporaryFile(
-            suffix=".npy",
-            delete=False,
-            dir=tmpdir,
-        ).name
-    np.save(temp_file_name, array)
-    return temp_file_name
-
-
-def _format_duration(seconds):
-    seconds = max(0, int(seconds))
-    hours, remainder = divmod(seconds, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    if hours:
-        return f"{hours:d}:{minutes:02d}:{seconds:02d}"
-    return f"{minutes:02d}:{seconds:02d}"
-
-
-def _print_eval_progress(
-        processed,
-        total,
-        start_time,
-        width=30,
-        final=False,
-        timing_avgs=None):
-    total = max(1, total)
-    fraction = min(1.0, processed / total)
-    filled = int(width * fraction)
-    bar = "=" * filled + "." * (width - filled)
-    elapsed = time.time() - start_time
-    rate = processed / elapsed if elapsed > 0 and processed > 0 else 0.0
-    eta = (total - processed) / rate if rate > 0 else 0.0
-    line = (
-        f"\rEval [{bar}] {processed}/{total} "
-        f"({100.0 * fraction:5.1f}%) "
-        f"elapsed {_format_duration(elapsed)} "
-        f"eta {_format_duration(eta)} "
-        f"{rate:5.2f} img/s"
-    )
-    if timing_avgs:
-        line += (
-            f" | avg50 talk {timing_avgs.get('talk2dino_forward_time', 0.0):.2f}s"
-            f" e2 {timing_avgs.get('e2_clustering_time', 0.0):.2f}s"
-            f" e3 {timing_avgs.get('e3_gate_time', 0.0):.2f}s"
-            f" eval {timing_avgs.get('evaluator_time', 0.0):.2f}s"
-        )
-    print(line, end="\n" if final else "", flush=True)
-
-
 def collect_results_cpu(result_part: list,
                         size: int,
                         tmpdir: Optional[str] = None) -> Optional[list]:
@@ -261,10 +207,7 @@ def multi_gpu_test(model,
                    efficient_test=False,
                    pre_eval=False,
                    format_only=False,
-                   format_args={},
-                   show_progress=True,
-                   progress_log_interval=0,
-                   diagnostic_ignore_eval=True):
+                   format_args={}):
     """Test model with multiple gpus by progressive mode.
 
     This method tests model with multiple gpus and collects the results
@@ -309,15 +252,6 @@ def multi_gpu_test(model,
     model.eval()
     results = []
     dataset = data_loader.dataset
-    eval_dataset = getattr(dataset, "dataset", dataset)
-
-    def absolute_dataset_index(index):
-        if hasattr(dataset, "indices"):
-            indices = dataset.indices
-            if hasattr(indices, "start"):
-                return index + indices.start
-            return indices[index]
-        return index
     # The pipeline about how the data_loader retrieval samples from dataset:
     # sampler -> batch_sampler -> indices
     # The indices are passed to dataset_fetcher to get data from dataset.
@@ -329,51 +263,21 @@ def multi_gpu_test(model,
     loader_indices = data_loader.batch_sampler
 
     rank, world_size = get_dist_info()
-    progress_log_interval = int(progress_log_interval or 0)
-    processed = 0
-    progress_start_time = time.time()
-    timing_window = []
-    timing_avgs = None
-    if rank == 0 and show_progress:
-        prog_bar = mmcv.ProgressBar(len(dataset))
-    elif rank == 0 and progress_log_interval > 0:
-        _print_eval_progress(0, len(dataset), progress_start_time)
     if rank == 0:
-        print("Eval debug: waiting for first dataloader batch...", flush=True)
+        prog_bar = mmcv.ProgressBar(len(dataset))
 
     pred_qualitatives = []
     gt_qualitatives = []
 
-    for batch_id, (batch_indices, data) in enumerate(zip(loader_indices, data_loader)):
-        if rank == 0 and batch_id == 0:
-            waited = time.time() - progress_start_time
-            print(
-                f"Eval debug: first batch loaded after {waited:.1f}s; "
-                f"indices={list(batch_indices)}",
-                flush=True,
-            )
-        forward_start = time.time()
+    for batch_indices, data in zip(loader_indices, data_loader):
         with torch.no_grad():
             if device == 'cpu':
                 data['img_metas'] = [e.data[0] for e in data['img_metas']]
             result = model(return_loss=False, rescale=True, **data)
-        if rank == 0 and batch_id == 0:
-            print(
-                f"Eval debug: first model forward finished in "
-                f"{time.time() - forward_start:.1f}s",
-                flush=True,
-            )
 
         for pred_qualitative, index in zip(result, batch_indices):
-            displayed_prediction = (
-                pred_qualitative["strict"]
-                if isinstance(pred_qualitative, dict)
-                else pred_qualitative
-            )
-            pred_qualitatives.append(displayed_prediction + 1)
-            seg_map_gt = eval_dataset.get_gt_seg_map_by_idx(
-                absolute_dataset_index(index)
-            )
+            pred_qualitatives.append(pred_qualitative+1)
+            seg_map_gt = dataset.dataset.get_gt_seg_map_by_idx(index + dataset.indices.start)
             # seg_map_gt[seg_map_gt == 255] = 0
             gt_qualitatives.append(seg_map_gt)
 
@@ -381,95 +285,19 @@ def multi_gpu_test(model,
             result = [np2tmp(_, tmpdir='.efficient_test') for _ in result]
 
         if format_only:
-            result = eval_dataset.format_results(
+            result = dataset.dataset.format_results(
                 result, indices=batch_indices, **format_args)
         if pre_eval:
             # TODO: adapt samples_per_gpu > 1.
             # only samples_per_gpu=1 valid now
-            absolute_indices = [absolute_dataset_index(i) for i in batch_indices]
-            if result and isinstance(result[0], dict):
-                sg_results = []
-                eval_start = time.perf_counter()
-                for prediction, absolute_index in zip(result, absolute_indices):
-                    strict_pre_eval = eval_dataset.pre_eval(
-                        [prediction["strict"]],
-                        indices=[absolute_index],
-                    )[0]
-                    diagnostic_pre_eval = None
-                    if diagnostic_ignore_eval:
-                        diagnostic_gt = eval_dataset.get_gt_seg_map_by_idx(
-                            absolute_index
-                        ).copy()
-                        diagnostic_gt[prediction["diagnostic"] == 255] = \
-                            eval_dataset.ignore_index
-                        diagnostic_pre_eval = intersect_and_union(
-                            prediction["diagnostic"],
-                            diagnostic_gt,
-                            len(eval_dataset.CLASSES),
-                            eval_dataset.ignore_index,
-                            label_map=dict(),
-                            reduce_zero_label=eval_dataset.reduce_zero_label,
-                        )
-                    sg_results.append({
-                        "strict": strict_pre_eval,
-                        "diagnostic": diagnostic_pre_eval,
-                        "ignore_pixels": prediction["ignore_pixels"],
-                        "total_pixels": prediction["total_pixels"],
-                        "positive_pixels": prediction.get("positive_pixels", 0),
-                        "ignore_pixels_after_compile": prediction.get(
-                            "ignore_pixels_after_compile",
-                            prediction["ignore_pixels"],
-                        ),
-                        "timing": prediction.get("timing", {}),
-                        "stats": prediction.get("stats", {}),
-                    })
-                evaluator_time = time.perf_counter() - eval_start
-                per_item_evaluator_time = evaluator_time / max(1, len(sg_results))
-                for sg_result in sg_results:
-                    sg_result["timing"]["evaluator_time"] = per_item_evaluator_time
-                result = sg_results
-            else:
-                result = eval_dataset.pre_eval(
-                    result,
-                    indices=absolute_indices,
-                )
+            result = dataset.dataset.pre_eval(result, indices=[i+dataset.indices.start for i in batch_indices])
 
         results.extend(result)
-        for item in result:
-            if isinstance(item, dict) and "timing" in item:
-                timing_window.append(item["timing"])
-        if rank == 0 and timing_window and len(timing_window) >= 50:
-            keys = (
-                "talk2dino_forward_time",
-                "e2_clustering_time",
-                "e3_gate_time",
-                "evaluator_time",
-            )
-            window = timing_window[-50:]
-            timing_avgs = {
-                key: sum(float(timing.get(key, 0.0)) for timing in window) / len(window)
-                for key in keys
-            }
 
-        batch_size = len(result) * world_size
-        if rank == 0 and show_progress:
+        if rank == 0:
+            batch_size = len(result) * world_size
             for _ in range(batch_size):
                 prog_bar.update()
-        elif rank == 0 and progress_log_interval > 0:
-            previous = processed
-            processed = min(processed + batch_size, len(dataset))
-            if (
-                processed == len(dataset)
-                or processed // progress_log_interval
-                > previous // progress_log_interval
-            ):
-                _print_eval_progress(
-                    processed,
-                    len(dataset),
-                    progress_start_time,
-                    final=processed == len(dataset),
-                    timing_avgs=timing_avgs,
-                )
 
     # collect results from all ranks
     if world_size > 1:
@@ -477,4 +305,4 @@ def multi_gpu_test(model,
             results = collect_results_gpu(results, len(dataset))
         else:
             results = collect_results_cpu(results, len(dataset), tmpdir)
-    return results, pred_qualitatives, gt_qualitatives, len(eval_dataset.CLASSES)
+    return results, pred_qualitatives, gt_qualitatives, len(dataset.dataset.CLASSES)

@@ -10,9 +10,7 @@ data:
 model:
   type: DINOText
   model_name: "dinov2_vitb14_reg"
-  backbone_weights: /scratch/haree/weights/dinov2_vitb14_reg4_pretrain.pth
   clip_model_name: ViT-B/16
-  clip_model_path: /scratch/haree/weights/ViT-B-16.pt
   resize_dim: 448
   proj_class: "vitb_mlp_infonce"
   proj_name: "vitb_mlp_infonce_448_avg_self_attn_out"
@@ -46,6 +44,6 @@ evaluate:
 
 checkpoint:
   save_topk: 0
-  resume: ""
+  resume: "output/release_b64/checkpoint.pth"
 
 model_name: "release"

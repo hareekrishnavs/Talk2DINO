@@ -29,3 +29,10 @@ checkpoints/
 
 # Jupyter Notebook checkpoints
 .ipynb_checkpoints/
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

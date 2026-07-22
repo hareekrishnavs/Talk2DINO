@@ -35,11 +35,6 @@ def build_dinotext_seg_inference(
 
     model_type = config.model.type
     if model_type == "DINOText":
-        sg_gate = config.get("sg_gate", {"enabled": False})
-        if sg_gate.get("enabled", False):
-            if with_bg or len(classnames) != 171 or classnames[0] != "person":
-                raise ValueError("SG-Gate is supported only for the 171-class COCO-Stuff evaluation")
-            kwargs["sg_gate"] = sg_gate
         seg_model = DINOTextSegInference(model, text_embedding, classnames, **kwargs, **config.evaluate)
     else:
         raise ValueError(model_type)

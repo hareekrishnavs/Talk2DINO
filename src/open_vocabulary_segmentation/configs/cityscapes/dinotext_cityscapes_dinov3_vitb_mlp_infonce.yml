@@ -1,11 +1,9 @@
 _base_: default.yml
 model:
   clip_model_name: ViT-B/16
-  clip_model_path: /scratch/haree/weights/ViT-B-16.pt
   keep_cls: false
   keep_end_seq: false
   model_name: vit_base_patch16_dinov3.lvd1689m
-  backbone_weights: /scratch/haree/weights/vit_base_patch16_dinov3.lvd1689m.pth
   proj_class: dinov3_vitb_mlp_infonce
   proj_model: ProjectionLayer
   proj_name: dinov3_vitb_mlp_infonce

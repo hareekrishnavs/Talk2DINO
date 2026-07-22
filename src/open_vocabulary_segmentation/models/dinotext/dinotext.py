@@ -12,27 +12,21 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
 from einops import rearrange
+from transformers import BertModel, AutoTokenizer
 import torchvision.transforms as T
-import importlib
 import clip
+import importlib
 
 from models.builder import MODELS
 from models.dinotext.pamr import PAMR
 from models.dinotext.masker import DINOTextMasker
 import us
 from datasets import get_template
-from utils import get_logger
 
-from src.model import ProjectionLayer, VisualProjectionLayer, CLIPLastLayer, DoubleMLP, Talk2DINOXAttnBridge
+from src.model import ProjectionLayer, VisualProjectionLayer, CLIPLastLayer, DoubleMLP
 from src.loss import Contrastive
 from src.hooks import average_text_tokens, get_vit_out, feats
-from src.local_weights import (
-    DEFAULT_WEIGHT_DIR,
-    load_local_clip,
-    load_local_vision_backbone,
-    load_state_dict_from_local_file,
-    resolve_weight_path,
-)
+from src.local_weights import DEFAULT_WEIGHT_DIR, load_local_clip, load_local_vision_backbone, load_state_dict_from_local_file, resolve_weight_path
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -61,31 +55,18 @@ class DINOText(nn.Module):
         # loading the model
         
         if 'dinov2' in model_name or 'dinov3' in model_name:
-            self.model = load_local_vision_backbone(
-                model_name,
-                img_size=resize_dim,
-                weights_path=backbone_weights,
-                weight_dir=weight_dir,
-            )
+            self.model = load_local_vision_backbone(model_name, resize_dim, backbone_weights, weight_dir)
             
         elif 'mae' in model_name or 'sam' in model_name or 'clip' in model_name or 'dino' in model_name:
-            if backbone_weights is None:
-                raise FileNotFoundError(
-                    f"Missing local backbone_weights for {model_name}. "
-                    "Auto-download is disabled."
-                )
             self.model = timm.create_model(
                 model_name,
                 pretrained=False,
                 num_classes=0,  # remove classifier nn.Linear
                 img_size=resize_dim
             )
-            load_state_dict_from_local_file(
-                self.model,
-                resolve_weight_path(backbone_weights, weight_dir),
-                f"backbone weights for {model_name}",
-                strict=False,
-            )
+            if backbone_weights is None:
+                raise FileNotFoundError(f"Missing local backbone weights. Configuration field: backbone_weights (model={model_name}).")
+            load_state_dict_from_local_file(self.model, resolve_weight_path(backbone_weights, weight_dir), f"backbone weights for {model_name}")
             
             if 'sam' in model_name:
                 self.model.blocks[-1].register_forward_hook(get_vit_out)
@@ -101,30 +82,15 @@ class DINOText(nn.Module):
         ])
         
         self.model.to(device)
-        self.model.eval()
         self.model.requires_grad_(False)
         
         self.clip_model_name = clip_model_name
         if 'bert' in self.clip_model_name:
-            from transformers import BertModel, AutoTokenizer
-
-            self.clip_model = BertModel.from_pretrained(
-                self.clip_model_name,
-                output_hidden_states=False,
-                local_files_only=True,
-            )
+            self.clip_model = BertModel.from_pretrained(self.clip_model_name, output_hidden_states = False)
             # load the corresponding wordtokenizer
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                self.clip_model_name,
-                local_files_only=True,
-            )
+            self.tokenizer = AutoTokenizer.from_pretrained(self.clip_model_name)
         else:
-            self.clip_model, _ = load_local_clip(
-                clip_model_name,
-                device=device,
-                model_path=clip_model_path,
-                weight_dir=weight_dir,
-            )
+            self.clip_model, _ = load_local_clip(clip_model_name, device=device, model_path=clip_model_path, weight_dir=weight_dir)
         self.clip_model.eval()
         self.clip_model.requires_grad_(False)
         if unfreeze_last_text_layer:
@@ -147,41 +113,6 @@ class DINOText(nn.Module):
         if pre_trained:
             self.proj.load_state_dict(torch.load(os.path.join("weights", f"{proj_name}.pth"), 'cpu'))
         self.proj.to(device)
-
-        self.xattn_cfg = kwargs.get("xattn_bridge", {}) or {}
-        self.xattn_enabled = bool(self.xattn_cfg.get("enabled", False))
-        self.xattn_debug_base_only = bool(
-            self.xattn_cfg.get("debug_base_only", False)
-        )
-        self.xattn_disable_correction = bool(
-            self.xattn_cfg.get("disable_correction", False)
-        )
-        self.xattn_force_gamma_zero = bool(
-            self.xattn_cfg.get("force_gamma_zero", False)
-        )
-        self.xattn_debug_compare_base_projection = bool(
-            self.xattn_cfg.get("debug_compare_base_projection", False)
-        )
-        self.xattn_hard_return_base = bool(
-            self.xattn_cfg.get("hard_return_base", False)
-        )
-        self.xattn_checkpoint_loaded = bool(
-            self.xattn_cfg.get("checkpoint_loaded", False)
-        )
-        self.xattn_checkpoint_path = self.xattn_cfg.get("checkpoint_path", None)
-        self._xattn_base_compare_logged = False
-        self.xattn_bridge = None
-        if self.xattn_enabled:
-            clip_embed_dim = self._infer_clip_embed_dim()
-            dino_embed_dim = self._infer_dino_embed_dim()
-            self.xattn_bridge = Talk2DINOXAttnBridge.from_config(
-                self.xattn_cfg,
-                clip_embed_dim=clip_embed_dim,
-                dino_embed_dim=dino_embed_dim,
-            ).to(device)
-            if bool(self.xattn_cfg.get("train_bridge_only", True)):
-                self.proj.requires_grad_(False)
-                self.logit_scale.requires_grad_(False)
         
         self.masker = DINOTextMasker(similarity_type="cosine")
         self.masker = self.masker.eval()
@@ -216,186 +147,6 @@ class DINOText(nn.Module):
             self.keep_end_seq = keep_end_seq        
             
         self.with_bg_clean = with_bg_clean    
-        loss = loss or {}
-        self.contrastive_loss = Contrastive(
-            margin=loss.get("margin", 0),
-            max_violation=loss.get("max_violation", False),
-            ltype=loss.get("ltype", "triplet"),
-        )
-        if self.xattn_enabled and bool(self.xattn_cfg.get("train_bridge_only", True)):
-            self.contrastive_loss.requires_grad_(False)
-
-    def train(self, mode=True):
-        super().train(mode)
-        self.model.eval()
-        self.clip_model.eval()
-        self.masker.eval()
-        if self.pamr is not None:
-            self.pamr.eval()
-        return self
-
-    def _infer_clip_embed_dim(self):
-        if hasattr(self.proj, "linear_layer"):
-            return int(self.proj.linear_layer.in_features)
-        if hasattr(self.clip_model, "text_projection"):
-            return int(self.clip_model.text_projection.shape[1])
-        return 512
-
-    def _infer_dino_embed_dim(self):
-        if hasattr(self.proj, "linear_layer"):
-            return int(self.proj.linear_layer.out_features)
-        if hasattr(self.proj, "visual_linear"):
-            return int(self.proj.visual_linear.out_features)
-        return 768
-
-    def _frozen_base_text_to_dino(self, text_feat):
-        if hasattr(self.proj, "project_clip_txt"):
-            return self.proj.project_clip_txt(text_feat.float())
-        if callable(self.proj):
-            return self.proj(text_feat.float())
-        raise RuntimeError("No compatible frozen base text-to-DINO projector is available")
-
-    @torch.no_grad()
-    def _log_xattn_base_projection_debug(self, clip_text_embs):
-        if (
-            not self.xattn_enabled
-            or self.xattn_bridge is None
-            or not self.xattn_debug_compare_base_projection
-            or self._xattn_base_compare_logged
-        ):
-            return
-        sample = clip_text_embs[: min(16, clip_text_embs.shape[0])].float()
-        original_base = self._frozen_base_text_to_dino(sample)
-        xattn_base = self.xattn_bridge.compute_base(
-            sample,
-            base_projector=self._frozen_base_text_to_dino,
-            normalize=False,
-        )
-        diff = (original_base - xattn_base).abs()
-        cosine = F.cosine_similarity(original_base, xattn_base, dim=-1).mean()
-        logger = get_logger()
-        logger.info("=" * 64)
-        logger.info("XAttnBridge base projection parity")
-        logger.info("=" * 64)
-        logger.info(f"debug_base_only                    : {self.xattn_debug_base_only}")
-        logger.info(f"disable_correction                : {self.xattn_disable_correction}")
-        logger.info(f"force_gamma_zero                  : {self.xattn_force_gamma_zero}")
-        logger.info(f"debug_compare_base_projection     : true")
-        logger.info(f"base_source                       : original_talk2dino_proj")
-        logger.info(f"correction_disabled               : true")
-        logger.info(f"base_projection_sample_count      : {sample.shape[0]}")
-        logger.info(f"base_projection_original_shape    : {tuple(original_base.shape)}")
-        logger.info(f"base_projection_xattn_shape       : {tuple(xattn_base.shape)}")
-        logger.info(f"base_projection_max_abs_diff      : {diff.max().item():.8f}")
-        logger.info(f"base_projection_mean_abs_diff     : {diff.mean().item():.8f}")
-        logger.info(f"base_projection_cosine_similarity : {cosine.item():.8f}")
-        logger.info(f"base_projection_original_norm     : {original_base.norm(dim=-1).mean().item():.8f}")
-        logger.info(f"base_projection_xattn_norm        : {xattn_base.norm(dim=-1).mean().item():.8f}")
-        self._xattn_base_compare_logged = True
-
-    def assert_frozen_backbones(self):
-        clip_trainable = [n for n, p in self.clip_model.named_parameters() if p.requires_grad]
-        dino_trainable = [n for n, p in self.model.named_parameters() if p.requires_grad]
-        if clip_trainable:
-            raise AssertionError(f"CLIP is not frozen; trainable params: {clip_trainable[:8]}")
-        if dino_trainable:
-            raise AssertionError(f"DINO is not frozen; trainable params: {dino_trainable[:8]}")
-
-    def trainable_parameter_names(self):
-        return [name for name, param in self.named_parameters() if param.requires_grad]
-
-    def xattn_trainable_parameter_count(self):
-        return sum(param.numel() for param in self.parameters() if param.requires_grad)
-
-    def _forward_dino_patch_tokens(self, image):
-        if 'dinov2' in self.model_name:
-            return self.model.forward_features(image)['x_norm_patchtokens']
-        if 'dinov3' in self.model_name:
-            return self.model.forward_features(image)[:, 5:, :]
-        if 'mae' in self.model_name or 'clip' in self.model_name or 'dino' in self.model_name:
-            return self.model.forward_features(image)[:, 1:, :]
-        if 'sam' in self.model_name:
-            self.model.forward_features(image)
-            return feats['vit_out'].reshape(
-                feats['vit_out'].shape[0],
-                feats['vit_out'].shape[1]**2,
-                feats['vit_out'].shape[-1],
-            )
-        raise Exception("Unknown ViT model")
-
-    def encode_image_with_patch_tokens(self, images):
-        batch_size, _, _, _ = images.shape
-        self_attn_maps = None
-        x = self.model(
-            images,
-            is_training=(self.avg_self_attn_token or self.disentangled_self_attn_token),
-        )
-        patch_tokens = x['x_norm_patchtokens']
-        batch_size, num_tokens, embed_dim = patch_tokens.shape
-        num_tokens = num_tokens + self.num_global_tokens
-        if self.avg_self_attn_token or self.disentangled_self_attn_token:
-            self_attn, self_attn_maps = self.process_self_attention(
-                self.feats['self_attn'],
-                batch_size,
-                num_tokens,
-                self.num_attn_heads,
-                embed_dim,
-                self.scale,
-                self.num_global_tokens,
-                ret_self_attn_maps=True,
-            )
-        if self.avg_self_attn_token:
-            visual_embed = (self_attn.unsqueeze(-1) * patch_tokens).mean(dim=1)
-        elif self.disentangled_self_attn_token:
-            self_attn_maps = self_attn_maps.softmax(dim=-1)
-            visual_embed = (patch_tokens.unsqueeze(1) * self_attn_maps.unsqueeze(-1)).mean(dim=2)
-        else:
-            visual_embed = patch_tokens.mean(dim=1)
-        return visual_embed, self_attn_maps, patch_tokens
-
-    def compute_pairwise_xattn_scores(self, text_feat, visual_embed, patch_tokens):
-        """Build the full image-text score matrix for XAttnBridge training.
-
-        For every text_i and image_j, condition text_i on image_j patches:
-        score[j, i] = sim(XAttnBridge(text_i, patches_j), original_visual_embed_j).
-        Rows are images and columns are texts, matching the existing InfoNCE
-        convention used by Contrastive.compute_contrastive_loss().
-        """
-        if text_feat.dim() != 2:
-            raise ValueError(f"Expected text_feat [B, D], got {tuple(text_feat.shape)}")
-        if patch_tokens.dim() != 3:
-            raise ValueError(f"Expected patch_tokens [B, N, D], got {tuple(patch_tokens.shape)}")
-        batch_size = text_feat.shape[0]
-        if patch_tokens.shape[0] != batch_size:
-            raise ValueError(
-                f"Batch mismatch: text={batch_size}, patches={patch_tokens.shape[0]}"
-            )
-
-        if type(self.proj) == DoubleMLP:
-            visual_embed = self.proj.project_visual(visual_embed.float())
-        visual_embed = F.normalize(visual_embed.float(), p=2, dim=-1)
-
-        # [image_j, text_i, D_clip], so each text queries every image's patches.
-        text_for_each_image = text_feat.float().unsqueeze(0).expand(batch_size, -1, -1)
-        mapped_text = self.xattn_bridge(
-            text_for_each_image,
-            patch_tokens,
-                base_projector=self._frozen_base_text_to_dino,
-                gamma_max=self.xattn_cfg.get("gamma_max", None),
-                force_gamma_zero=self.xattn_force_gamma_zero,
-                disable_correction=self.xattn_disable_correction,
-                checkpoint_loaded=self.xattn_checkpoint_loaded,
-                checkpoint_path=self.xattn_checkpoint_path,
-            )
-        mapped_text = F.normalize(mapped_text, p=2, dim=-1)
-        if visual_embed.dim() == 2:
-            return torch.einsum("jtd,jd->jt", mapped_text, visual_embed)
-        if visual_embed.dim() == 3:
-            # Original Talk2DINO's disentangled visual side keeps one embedding
-            # per attention head/region. For pairwise XAttn scores, use the
-            # strongest region match for each text-image pair.
-            return torch.einsum("jtd,jhd->jth", mapped_text, visual_embed).max(dim=-1).values
-        raise ValueError(f"Unsupported visual_embed shape: {tuple(visual_embed.shape)}")
 
     
     def process_self_attention(self, output, batch_size, num_tokens, num_attn_heads, embed_dim, scale, num_global_tokens, ret_self_attn_maps=False):
@@ -420,38 +171,25 @@ class DINOText(nn.Module):
         return x
     
     def encode_image(self, images):
-        visual_embed, self_attn_maps, _ = self.encode_image_with_patch_tokens(images)
-        return visual_embed, self_attn_maps
+        batch_size, _, _, _ = images.shape
+        self_attn_maps = None
+        x = self.model(images, is_training=(self.avg_self_attn_token or self.disentangled_self_attn_token))
+        batch_size, num_tokens, embed_dim = x['x_norm_patchtokens'].shape
+        num_tokens = num_tokens + self.num_global_tokens
+        if self.avg_self_attn_token or self.disentangled_self_attn_token:
+            self_attn, self_attn_maps = self.process_self_attention(self.feats['self_attn'], batch_size, num_tokens, self.num_attn_heads, embed_dim, self.scale, self.num_global_tokens, ret_self_attn_maps=True)
+        if self.avg_self_attn_token:
+            x = (self_attn.unsqueeze(-1) * x['x_norm_patchtokens']).mean(dim=1)
+        elif self.disentangled_self_attn_token:
+            self_attn_maps = self_attn_maps.softmax(dim=-1)
+            x = (x['x_norm_patchtokens'].unsqueeze(1) * self_attn_maps.unsqueeze(-1)).mean(dim=2)
+
+        return x, self_attn_maps
 
     def forward(self, image, text, return_logit_scale=False):
         with torch.no_grad():
             txt_embed = self.encode_text(text)
-
-        if self.xattn_enabled:
-            with torch.no_grad():
-                visual_embed, _, patch_tokens = self.encode_image_with_patch_tokens(image)
-            if self.training:
-                pairwise_scores = self.compute_pairwise_xattn_scores(
-                    txt_embed,
-                    visual_embed,
-                    patch_tokens,
-                )
-                return pairwise_scores, None
-            txt_embed = self.xattn_bridge(
-                txt_embed,
-                patch_tokens,
-                base_projector=self._frozen_base_text_to_dino,
-                base_only=self.xattn_debug_base_only,
-                gamma_max=self.xattn_cfg.get("gamma_max", None),
-                force_gamma_zero=self.xattn_force_gamma_zero,
-                disable_correction=self.xattn_disable_correction,
-                checkpoint_loaded=self.xattn_checkpoint_loaded,
-                checkpoint_path=self.xattn_checkpoint_path,
-            )
-            if return_logit_scale:
-                return txt_embed, visual_embed, self.logit_scale
-            return txt_embed, visual_embed
-
+            
         img_embed, self_attn_maps = self.encode_image(image)
         
         if type(self.proj) == CLIPLastLayer:
@@ -464,16 +202,12 @@ class DINOText(nn.Module):
 
         return txt_embed, img_embed
         
-    def compute_loss(self, img_embed, txt_embed, cosine=True, ret_similarity_matrix=True):
+    def compute_loss(self, image, text, cosine=True, ret_similarity_matrix=True):
         ret = {}
-        if txt_embed is None:
-            sim = img_embed
-        elif cosine:
+        if cosine:
             img_embed = F.normalize(img_embed, p=2, dim=1)
             txt_embed = F.normalize(txt_embed, p=2, dim=1)
-            sim = img_embed @ txt_embed.transpose(1, 0)
-        else:
-            sim = img_embed @ txt_embed.transpose(1, 0)
+        sim = img_embed @ txt_embed.transpose(1, 0)
         if not ret_similarity_matrix:
             sim = sim[torch.eye(len(sim)) > 0.5] # only diagonal elements
         
@@ -546,15 +280,7 @@ class DINOText(nn.Module):
         text_embs = rearrange(text_embs, '(n t) c -> n t c', n=num_classes, t=num_templates)
         # [N, C]
         text_embs = text_embs.mean(dim=1).float()
-        if self.xattn_enabled and (
-            self.xattn_debug_base_only or self.xattn_disable_correction
-        ):
-            self._log_xattn_base_projection_debug(text_embs)
-            text_embs = self._frozen_base_text_to_dino(text_embs)
-        elif self.xattn_enabled:
-            self._log_xattn_base_projection_debug(text_embs)
-            text_embs = us.normalize(text_embs.float(), dim=-1)
-        elif type(self.proj) == ProjectionLayer or type(self.proj) == DoubleMLP:
+        if type(self.proj) == ProjectionLayer or type(self.proj) == DoubleMLP:
             text_embs = self.proj.project_clip_txt(text_embs)
         text_embs = us.normalize(text_embs, dim=-1)
 
@@ -585,11 +311,10 @@ class DINOText(nn.Module):
             b = tb - t
 
         return l, r, t, b
-
+    
     @torch.no_grad()
     def generate_masks(
             self, image, img_metas, text_emb, classnames, text_is_token=False, apply_pamr=False, background_func="weighted_average_sigmoid", lambda_bg=0.2,
-            return_sg_inputs=False,
             # kp_w=0.3,
     ):
         """Generate masks for each text embeddings
@@ -623,26 +348,9 @@ class DINOText(nn.Module):
             image_feat = feats['vit_out'].reshape(feats['vit_out'].shape[0], feats['vit_out'].shape[1]**2, feats['vit_out'].shape[-1]) # BS x N_PATCHES x EMBED_DIM
               
         batch_size, num_tokens, embed_dim = image_feat.shape
-        raw_patch_features = image_feat if (return_sg_inputs or self.xattn_enabled) else None
-        if self.xattn_enabled and (
-            self.xattn_hard_return_base
-            or not (self.xattn_debug_base_only or self.xattn_disable_correction)
-        ):
-            text_emb = self.xattn_bridge(
-                text_emb.unsqueeze(0) if text_emb.dim() == 2 else text_emb,
-                image_feat,
-                base_projector=self._frozen_base_text_to_dino,
-                gamma_max=self.xattn_cfg.get("gamma_max", None),
-                force_gamma_zero=self.xattn_force_gamma_zero,
-                checkpoint_loaded=self.xattn_checkpoint_loaded,
-                checkpoint_path=self.xattn_checkpoint_path,
-            )
-            if text_emb.dim() == 3:
-                text_emb = text_emb[0]
-            image_feat = image_feat.float()
-        elif type(self.proj) == VisualProjectionLayer:
+        if type(self.proj) == VisualProjectionLayer:
             image_feat = self.proj.project_dino(image_feat.float())
-        elif type(self.proj) == DoubleMLP:
+        if type(self.proj) == DoubleMLP:
             image_feat = self.proj.project_visual(image_feat.float())
         b, np, c = image_feat.shape
         np_h = np_w = int(sqrt(np))
@@ -650,9 +358,6 @@ class DINOText(nn.Module):
         
         self_attn, self_attn_maps = self.process_self_attention(self.feats['self_attn'], batch_size, num_tokens + self.num_global_tokens, self.num_attn_heads, embed_dim, self.scale, self.num_global_tokens, ret_self_attn_maps=True)
         mask, simmap = self.masker.forward_seg(image_feat, text_emb, hard=False)  # [B, N, H', W']
-
-        if return_sg_inputs:
-            return mask, simmap, raw_patch_features
         
         if self.with_bg_clean:
             mask = self.similarity_assignment_weighted(mask, image_feat, self_attn_maps, text_emb, lambda_bg)
