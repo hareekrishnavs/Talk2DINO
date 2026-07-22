@@ -105,8 +105,14 @@ if __name__ == '__main__':
     
     # if the model config name contains 'dino', it means that we do not work with pre-extracted features
     if not ('dino' in args.model_config):
+        with open(args.model_config, 'r') as f:
+            model_config = yaml.safe_load(f)
+        uses_all_pairs_max = (
+            model_config.get('model', {}).get('alignment_strategy')
+            == 'all_pairs_max'
+        )
         val_dataset = DinoClipDataset(args.val_dataset, 
-                                      features_name='avg_self_attn_out' if args.feature_name == 'disentangled_self_attn' else args.feature_name,
+                                      features_name=args.feature_name if uses_all_pairs_max else ('avg_self_attn_out' if args.feature_name == 'disentangled_self_attn' else args.feature_name),
                                       text_features=args.text_features,
                                       load_attn_maps=args.feature_name == 'patch_tokens',
                                       is_wds='.tar' in args.val_dataset)

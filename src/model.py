@@ -153,6 +153,30 @@ class ProjectionLayer(nn.Module):
         return model
     
     def compute_similarity(self, visual_embedding, textual_embedding, text_input_mask=None, return_index=False):
+        if self.alignment_strategy == 'all_pairs_max':
+            if visual_embedding.ndim != 3 or textual_embedding.ndim != 2:
+                raise ValueError(
+                    "all_pairs_max requires visual embeddings [B, H, D] and "
+                    "text embeddings [T, D], but received "
+                    f"visual={tuple(visual_embedding.shape)} and "
+                    f"text={tuple(textual_embedding.shape)}"
+                )
+            affinities = torch.einsum(
+                "td,bhd->tbh",
+                textual_embedding,
+                visual_embedding,
+            )
+            sims, pairwise_head_indices = affinities.max(dim=-1)
+            if return_index:
+                if sims.shape[0] != sims.shape[1]:
+                    raise ValueError(
+                        "all_pairs_max with return_index=True requires a square "
+                        f"text-image batch, but received scores={tuple(sims.shape)}"
+                    )
+                index = pairwise_head_indices.diagonal()
+                return sims, index
+            return sims
+
         if len(visual_embedding.shape) == 3 or len(textual_embedding.shape) == 3:
             # at least one embedding is decomposed: either we have all textual tokens or we have all the attention head tokens
             
