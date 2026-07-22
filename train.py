@@ -13,6 +13,7 @@ from src.dataset import DinoClipDataset, COCOCaptions
 from src.metrics import get_image_and_text_tensor, i2t, t2i
 from src.train_util import do_train, set_seed
 from src.local_weights import save_torch_artifact
+from src.training_features import validation_feature_name
 
 device = 'cuda'
 
@@ -105,8 +106,13 @@ if __name__ == '__main__':
     
     # if the model config name contains 'dino', it means that we do not work with pre-extracted features
     if not ('dino' in args.model_config):
+        with open(args.model_config, 'r') as f:
+            model_config = yaml.safe_load(f)
+        alignment_strategy = model_config.get('model', {}).get(
+            'alignment_strategy', 'max_score'
+        )
         val_dataset = DinoClipDataset(args.val_dataset, 
-                                      features_name='avg_self_attn_out' if args.feature_name == 'disentangled_self_attn' else args.feature_name,
+                                      features_name=validation_feature_name(args.feature_name, alignment_strategy),
                                       text_features=args.text_features,
                                       load_attn_maps=args.feature_name == 'patch_tokens',
                                       is_wds='.tar' in args.val_dataset)

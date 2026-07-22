@@ -1,3 +1,4 @@
+import math
 import yaml
 import torch
 import torch.nn as nn
@@ -91,7 +92,7 @@ class ProjectionLayer(nn.Module):
     The forward method calculate the similarity between the DINO CLS token and the projected CLIP textual CLS token. 
     """
     def __init__(self, act=nn.Tanh(), hidden_layer=False, cosine=True, dino_embed_dim=1024, clip_embed_dim=512, num_attn_head=16, weight_attn_heads=None,
-                 alignment_strategy='max_score', alpha=0.6, keep_cls=False, keep_end_seq=False):
+                 alignment_strategy='max_score', alpha=0.6, keep_cls=False, keep_end_seq=False, region_temperature=0.10):
         # mlp_dims list of mlp dimensions
         super().__init__()
         self.num_attn_head = num_attn_head      
@@ -112,6 +113,12 @@ class ProjectionLayer(nn.Module):
             self.weight_layer2 = nn.Linear(dino_embed_dim, self.num_attn_head)
             
         self.alignment_strategy = alignment_strategy # relevant only if we use disentangled_self_attn
+        self.region_temperature = float(region_temperature)
+        if self.region_temperature <= 0:
+            raise ValueError(
+                "region_temperature must be strictly positive, but received "
+                f"{self.region_temperature}"
+            )
         self.keep_cls = keep_cls # relevant only if we use clip_txt_tokens_out
         self.keep_end_seq = keep_end_seq # relevant only if we use clip_txt_tokens_out
         self.alpha = alpha
@@ -143,6 +150,7 @@ class ProjectionLayer(nn.Module):
             clip_embed_dim=config.get('clip_embed_dim', 512),
             weight_attn_heads=config.get('weight_attn_heads', None),
             alignment_strategy=config.get('alignment_strategy', 'max_score'),
+            region_temperature=config.get('region_temperature', 0.10),
             alpha=config.get('alpha', 0.6),
             keep_cls=config.get('keep_cls', None),
             keep_end_seq=config.get('keep_end_seq', None),
@@ -153,6 +161,36 @@ class ProjectionLayer(nn.Module):
         return model
     
     def compute_similarity(self, visual_embedding, textual_embedding, text_input_mask=None, return_index=False):
+        if self.alignment_strategy == 'all_pairs_lse':
+            if visual_embedding.ndim != 3 or textual_embedding.ndim != 2:
+                raise ValueError(
+                    "all_pairs_lse requires visual embeddings [B, H, D] and "
+                    "text embeddings [T, D], but received "
+                    f"visual={tuple(visual_embedding.shape)} and "
+                    f"text={tuple(textual_embedding.shape)}"
+                )
+            affinities = torch.einsum(
+                "td,bhd->tbh",
+                textual_embedding,
+                visual_embedding,
+            )
+            tau = self.region_temperature
+            num_heads = visual_embedding.shape[1]
+            sims = (
+                tau * torch.logsumexp(affinities / tau, dim=-1)
+                - tau * math.log(num_heads)
+            )
+            if return_index:
+                if sims.shape[0] != sims.shape[1]:
+                    raise ValueError(
+                        "all_pairs_lse with return_index=True requires a square "
+                        f"text-image batch, but received scores={tuple(sims.shape)}"
+                    )
+                pairwise_head_indices = affinities.argmax(dim=-1)
+                index = pairwise_head_indices.diagonal()
+                return sims, index
+            return sims
+
         if len(visual_embedding.shape) == 3 or len(textual_embedding.shape) == 3:
             # at least one embedding is decomposed: either we have all textual tokens or we have all the attention head tokens
             
