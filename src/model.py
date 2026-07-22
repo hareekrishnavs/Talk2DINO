@@ -91,7 +91,7 @@ class ProjectionLayer(nn.Module):
     The forward method calculate the similarity between the DINO CLS token and the projected CLIP textual CLS token. 
     """
     def __init__(self, act=nn.Tanh(), hidden_layer=False, cosine=True, dino_embed_dim=1024, clip_embed_dim=512, num_attn_head=16, weight_attn_heads=None,
-                 alignment_strategy='max_score', alpha=0.6, keep_cls=False, keep_end_seq=False):
+                 alignment_strategy='max_score', alpha=0.6, keep_cls=False, keep_end_seq=False, routing_temperature=0.10):
         # mlp_dims list of mlp dimensions
         super().__init__()
         self.num_attn_head = num_attn_head      
@@ -112,6 +112,12 @@ class ProjectionLayer(nn.Module):
             self.weight_layer2 = nn.Linear(dino_embed_dim, self.num_attn_head)
             
         self.alignment_strategy = alignment_strategy # relevant only if we use disentangled_self_attn
+        self.routing_temperature = float(routing_temperature)
+        if self.routing_temperature <= 0:
+            raise ValueError(
+                "routing_temperature must be strictly positive, but received "
+                f"{self.routing_temperature}"
+            )
         self.keep_cls = keep_cls # relevant only if we use clip_txt_tokens_out
         self.keep_end_seq = keep_end_seq # relevant only if we use clip_txt_tokens_out
         self.alpha = alpha
@@ -143,6 +149,7 @@ class ProjectionLayer(nn.Module):
             clip_embed_dim=config.get('clip_embed_dim', 512),
             weight_attn_heads=config.get('weight_attn_heads', None),
             alignment_strategy=config.get('alignment_strategy', 'max_score'),
+            routing_temperature=config.get('routing_temperature', 0.10),
             alpha=config.get('alpha', 0.6),
             keep_cls=config.get('keep_cls', None),
             keep_end_seq=config.get('keep_end_seq', None),
@@ -153,6 +160,49 @@ class ProjectionLayer(nn.Module):
         return model
     
     def compute_similarity(self, visual_embedding, textual_embedding, text_input_mask=None, return_index=False):
+        if self.alignment_strategy == 'paired_soft_routing':
+            if visual_embedding.ndim != 3 or textual_embedding.ndim != 2:
+                raise ValueError(
+                    "paired_soft_routing requires visual embeddings [B, H, D] "
+                    "and text embeddings [B, D], but received "
+                    f"visual={tuple(visual_embedding.shape)} and "
+                    f"text={tuple(textual_embedding.shape)}"
+                )
+            if visual_embedding.shape[0] != textual_embedding.shape[0]:
+                raise ValueError(
+                    "paired_soft_routing requires equal text and image batch "
+                    "sizes, but received "
+                    f"visual={tuple(visual_embedding.shape)} and "
+                    f"text={tuple(textual_embedding.shape)}"
+                )
+            if visual_embedding.shape[-1] != textual_embedding.shape[-1]:
+                raise ValueError(
+                    "paired_soft_routing requires matching embedding dimensions, "
+                    "but received "
+                    f"visual={tuple(visual_embedding.shape)} and "
+                    f"text={tuple(textual_embedding.shape)}"
+                )
+            positive_affinities = torch.einsum(
+                "bd,bhd->bh",
+                textual_embedding,
+                visual_embedding,
+            )
+            routing_weights = torch.softmax(
+                positive_affinities / self.routing_temperature,
+                dim=-1,
+            )
+            routed_visual = torch.einsum(
+                "bh,bhd->bd",
+                routing_weights,
+                visual_embedding,
+            )
+            routed_visual = F.normalize(routed_visual, p=2, dim=-1)
+            sims = textual_embedding @ routed_visual.transpose(0, 1)
+            if return_index:
+                routing_indices = positive_affinities.argmax(dim=-1)
+                return sims, routing_indices
+            return sims
+
         if len(visual_embedding.shape) == 3 or len(textual_embedding.shape) == 3:
             # at least one embedding is decomposed: either we have all textual tokens or we have all the attention head tokens
             

@@ -1,0 +1,13 @@
+model:
+  act: tanh
+  hidden_layer: True
+  dino_embed_dim: 768
+  alignment_strategy: paired_soft_routing
+  routing_temperature: 0.10
+
+train:
+  lr: 0.0001
+  ltype: infonce
+  num_epochs: 100
+  batch_size: 128
+  save_best_model: False
