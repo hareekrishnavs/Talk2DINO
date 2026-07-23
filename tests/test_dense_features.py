@@ -7,7 +7,7 @@ import pytest
 import torch
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
-from src.dataset import ImageAwareBatchLoader
+from src.dataset import ImageAwareBatchLoader, balanced_record_pool_sizes
 
 from src.dense_features import (
     DenseFeatureShardWriter,
@@ -30,10 +30,26 @@ CONFIG = {
 class SyntheticImageRecordDataset(IterableDataset):
     """Tiny records exercise scheduling without allocating real dense tensors."""
 
-    def __init__(self, image_count=1000, captions_per_image=5, seed=123):
+    def __init__(
+        self,
+        image_count=1000,
+        captions_per_image=5,
+        seed=123,
+    ):
         super().__init__()
         self.image_count = image_count
-        self.captions_per_image = captions_per_image
+        if isinstance(captions_per_image, int):
+            self.caption_counts = [captions_per_image] * image_count
+        else:
+            self.caption_counts = list(captions_per_image)
+            if len(self.caption_counts) != image_count:
+                raise ValueError("caption counts must match image_count")
+        self.annotation_offsets = []
+        annotation_count = 0
+        for caption_count in self.caption_counts:
+            self.annotation_offsets.append(annotation_count)
+            annotation_count += caption_count
+        self.annotation_count = annotation_count
         self.seed = seed
         self.epoch = 0
 
@@ -47,9 +63,10 @@ class SyntheticImageRecordDataset(IterableDataset):
         image_ids = list(range(self.image_count))
         random.Random(self.seed + 1_000_003 * self.epoch).shuffle(image_ids)
         for image_id in image_ids[worker_id::worker_count]:
+            annotation_offset = self.annotation_offsets[image_id]
             annotation_ids = [
-                image_id * self.captions_per_image + index
-                for index in range(self.captions_per_image)
+                annotation_offset + index
+                for index in range(self.caption_counts[image_id])
             ]
             yield {
                 "image_id": image_id,
@@ -65,7 +82,8 @@ class SyntheticImageRecordDataset(IterableDataset):
 def synthetic_image_aware_loader(dataset, num_workers):
     return ImageAwareBatchLoader(
         dataset,
-        annotation_count=dataset.image_count * dataset.captions_per_image,
+        image_count=dataset.image_count,
+        annotation_count=dataset.annotation_count,
         batch_size=128,
         record_pool_size=256,
         seed=dataset.seed,
@@ -88,29 +106,60 @@ def collect_batch_metadata(loader):
     return sizes, unique_image_counts, annotation_ids, image_order
 
 
-def test_image_aware_batches_have_unique_images_and_complete_coverage():
-    dataset = SyntheticImageRecordDataset(image_count=1000, captions_per_image=5)
-    loader = synthetic_image_aware_loader(dataset, num_workers=0)
-    sizes, unique_counts, annotation_ids, _ = collect_batch_metadata(loader)
+def assert_image_aware_schedule(dataset, num_workers):
+    loader = synthetic_image_aware_loader(dataset, num_workers=num_workers)
+    first = collect_batch_metadata(loader)
+    replay = collect_batch_metadata(loader)
+    sizes, unique_counts, annotation_ids, image_order = first
 
-    assert len(loader) == len(sizes) == 40
-    assert sizes[:-1] == [128] * 39
-    assert sizes[-1] == 8
+    assert replay == first
+    assert len(loader) == len(sizes)
+    assert sizes[:-1] == [128] * (len(sizes) - 1)
+    assert sizes[-1] <= 128
     assert unique_counts == sizes
-    assert len(annotation_ids) == len(set(annotation_ids)) == 5000
-    assert sorted(annotation_ids) == list(range(5000))
+    assert len(annotation_ids) == len(set(annotation_ids))
+    assert sorted(annotation_ids) == list(range(dataset.annotation_count))
+    return sizes, image_order
+
+
+@pytest.mark.parametrize(
+    ("image_count", "expected_pool_sizes", "expected_batch_sizes"),
+    [
+        (271, [136, 135], [128] * 10 + [75]),
+        (257, [129, 128], [128] * 10 + [5]),
+        (256, [256], [128] * 10),
+        (1000, [250, 250, 250, 250], [128] * 39 + [8]),
+    ],
+)
+def test_image_aware_balanced_pools_are_tail_safe(
+    image_count,
+    expected_pool_sizes,
+    expected_batch_sizes,
+):
+    assert balanced_record_pool_sizes(image_count, 256) == expected_pool_sizes
+    dataset = SyntheticImageRecordDataset(
+        image_count=image_count,
+        captions_per_image=5,
+    )
+    sizes, _ = assert_image_aware_schedule(dataset, num_workers=0)
+    assert sizes == expected_batch_sizes
+
+
+def test_image_aware_variable_caption_counts_are_tail_safe():
+    image_count = 1000
+    caption_counts = [image_id % 7 + 1 for image_id in range(image_count)]
+    dataset = SyntheticImageRecordDataset(
+        image_count=image_count,
+        captions_per_image=caption_counts,
+    )
+    sizes, _ = assert_image_aware_schedule(dataset, num_workers=0)
+    assert sizes == [128] * 31 + [29]
 
 
 def test_image_aware_batches_preserve_two_worker_disjointness():
-    dataset = SyntheticImageRecordDataset(image_count=1000, captions_per_image=5)
-    loader = synthetic_image_aware_loader(dataset, num_workers=2)
-    sizes, unique_counts, annotation_ids, _ = collect_batch_metadata(loader)
-
-    assert sizes[:-1] == [128] * 39
-    assert sizes[-1] == 8
-    assert unique_counts == sizes
-    assert len(annotation_ids) == len(set(annotation_ids)) == 5000
-    assert sorted(annotation_ids) == list(range(5000))
+    dataset = SyntheticImageRecordDataset(image_count=271, captions_per_image=5)
+    sizes, _ = assert_image_aware_schedule(dataset, num_workers=2)
+    assert sizes == [128] * 10 + [75]
 
 
 def test_image_aware_seed_and_epoch_are_deterministic():
@@ -125,6 +174,28 @@ def test_image_aware_seed_and_epoch_are_deterministic():
     assert next_epoch != first
     dataset.set_epoch(0)
     assert collect_batch_metadata(loader)[3] == first
+
+
+@pytest.mark.parametrize(("actual_images", "manifest_images"), [(256, 257), (257, 256)])
+def test_image_aware_record_count_must_match_manifest(
+    actual_images,
+    manifest_images,
+):
+    dataset = SyntheticImageRecordDataset(
+        image_count=actual_images,
+        captions_per_image=5,
+    )
+    loader = ImageAwareBatchLoader(
+        dataset,
+        image_count=manifest_images,
+        annotation_count=dataset.annotation_count,
+        batch_size=128,
+        record_pool_size=256,
+        seed=dataset.seed,
+        num_workers=0,
+    )
+    with pytest.raises(RuntimeError, match="manifest selected_images count"):
+        list(loader)
 
 
 @pytest.fixture(scope="module")

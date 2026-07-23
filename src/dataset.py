@@ -212,9 +212,29 @@ def _annotation_sample(record, annotation_index):
     }
 
 
+def balanced_record_pool_sizes(image_count, record_pool_size):
+    """Split a known image count into approximately equal bounded pools."""
+    image_count = int(image_count)
+    record_pool_size = int(record_pool_size)
+    if image_count < 0:
+        raise ValueError("image_count cannot be negative")
+    if record_pool_size <= 0:
+        raise ValueError("record_pool_size must be positive")
+    if image_count == 0:
+        return []
+
+    pool_count = (image_count + record_pool_size - 1) // record_pool_size
+    smaller_pool_size, larger_pool_count = divmod(image_count, pool_count)
+    return [
+        smaller_pool_size + (pool_index < larger_pool_count)
+        for pool_index in range(pool_count)
+    ]
+
+
 def iter_image_aware_batches(
     records,
     *,
+    image_count,
     batch_size,
     record_pool_size,
     seed,
@@ -228,6 +248,7 @@ def iter_image_aware_batches(
     rng = random.Random(int(seed))
     record_iterator = iter(records)
     partial_assignments = []
+    pool_sizes = balanced_record_pool_sizes(image_count, record_pool_size)
 
     def collate_assignments(assignments):
         image_ids = [record["image_id"] for record, _ in assignments]
@@ -242,15 +263,16 @@ def iter_image_aware_batches(
             ]
         )
 
-    while True:
+    for pool_size in pool_sizes:
         record_pool = []
-        for _ in range(record_pool_size):
+        for _ in range(pool_size):
             try:
                 record_pool.append(next(record_iterator))
             except StopIteration:
-                break
-        if not record_pool:
-            break
+                raise RuntimeError(
+                    "image record stream ended before manifest selected_images "
+                    f"count {image_count}"
+                ) from None
 
         total_annotations = sum(
             len(record["annotation_ids"]) for record in record_pool
@@ -325,6 +347,26 @@ def iter_image_aware_batches(
                 rng.shuffle(assignments)
                 yield collate_assignments(assignments)
 
+        # Release this pool before reading the next one. The carried partial
+        # keeps at most batch_size - 1 records alive across pool boundaries.
+        record_pool = None
+        states = None
+        local_assignments = None
+        full_assignments = None
+        local_partial = None
+        record = None
+        assignments = None
+
+    try:
+        next(record_iterator)
+    except StopIteration:
+        pass
+    else:
+        raise RuntimeError(
+            "image record stream contains more records than manifest "
+            f"selected_images count {image_count}"
+        )
+
     if partial_assignments:
         rng.shuffle(partial_assignments)
         yield collate_assignments(partial_assignments)
@@ -337,6 +379,7 @@ class ImageAwareBatchLoader:
         self,
         record_dataset,
         *,
+        image_count,
         annotation_count,
         batch_size,
         record_pool_size,
@@ -344,6 +387,7 @@ class ImageAwareBatchLoader:
         num_workers,
     ):
         self.record_dataset = record_dataset
+        self.image_count = int(image_count)
         self.annotation_count = int(annotation_count)
         self.batch_size = int(batch_size)
         self.record_pool_size = int(record_pool_size)
@@ -364,6 +408,7 @@ class ImageAwareBatchLoader:
         epoch = getattr(self.record_dataset, "epoch", 0)
         yield from iter_image_aware_batches(
             records,
+            image_count=self.image_count,
             batch_size=self.batch_size,
             record_pool_size=self.record_pool_size,
             seed=self.seed + 1_000_003 * epoch,
@@ -405,6 +450,7 @@ class DenseConsistencyDataset(DenseFeatureStreamingDataset):
         record_pool_size = self.record_pool_size or 2 * batch_size
         return ImageAwareBatchLoader(
             _DenseConsistencyRecordDataset(self),
+            image_count=self.manifest["selected_images"],
             annotation_count=len(self),
             batch_size=batch_size,
             record_pool_size=record_pool_size,
