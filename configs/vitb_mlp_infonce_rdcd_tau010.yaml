@@ -1,0 +1,17 @@
+model:
+  act: tanh
+  hidden_layer: True
+  dino_embed_dim: 768
+  alignment_strategy: paired_soft_routing_rdcd
+  routing_temperature: 0.10
+  dense_temperature: 0.10
+  dense_loss_weight: 1.0
+  attention_map_format: probabilities
+
+train:
+  lr: 0.0001
+  ltype: infonce_rdcd
+  num_epochs: 100
+  batch_size: 128
+  save_best_model: False
+  dense_consistency: True

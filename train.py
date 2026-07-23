@@ -9,7 +9,7 @@ import importlib
 import torchvision.transforms as T
 import clip
 
-from src.dataset import DinoClipDataset, COCOCaptions
+from src.dataset import COCOCaptions, DenseConsistencyDataset, DinoClipDataset
 from src.metrics import get_image_and_text_tensor, i2t, t2i
 from src.train_util import do_train, set_seed
 from src.local_weights import save_torch_artifact
@@ -111,16 +111,43 @@ if __name__ == '__main__':
         alignment_strategy = model_config.get('model', {}).get(
             'alignment_strategy', 'max_score'
         )
-        val_dataset = DinoClipDataset(args.val_dataset, 
-                                      features_name=validation_feature_name(args.feature_name, alignment_strategy),
-                                      text_features=args.text_features,
-                                      load_attn_maps=args.feature_name == 'patch_tokens',
-                                      is_wds='.tar' in args.val_dataset)
-        train_dataset = DinoClipDataset(args.train_dataset,
-                                        features_name=args.feature_name,
-                                        text_features=args.text_features,
-                                        load_attn_maps=args.feature_name == 'patch_tokens',
-                                        is_wds='.tar' in args.train_dataset) 
+        dense_consistency = model_config.get('train', {}).get(
+            'dense_consistency', False
+        )
+        if dense_consistency:
+            if not os.path.isdir(args.train_dataset) or not os.path.isdir(
+                args.val_dataset
+            ):
+                raise ValueError(
+                    "dense_consistency requires train_dataset and val_dataset to "
+                    "be complete E5 dense-shard directories"
+                )
+            dino_embed_dim = model_config.get('model', {}).get(
+                'dino_embed_dim', 768
+            )
+            train_dataset = DenseConsistencyDataset(
+                args.train_dataset,
+                dino_embed_dim=dino_embed_dim,
+                shuffle_shards=True,
+                shuffle_buffer=model_config.get('train', {}).get(
+                    'shuffle_buffer', 128
+                ),
+            )
+            val_dataset = DenseConsistencyDataset(
+                args.val_dataset,
+                dino_embed_dim=dino_embed_dim,
+            )
+        else:
+            val_dataset = DinoClipDataset(args.val_dataset,
+                                          features_name=validation_feature_name(args.feature_name, alignment_strategy),
+                                          text_features=args.text_features,
+                                          load_attn_maps=args.feature_name == 'patch_tokens',
+                                          is_wds='.tar' in args.val_dataset)
+            train_dataset = DinoClipDataset(args.train_dataset,
+                                            features_name=args.feature_name,
+                                            text_features=args.text_features,
+                                            load_attn_maps=args.feature_name == 'patch_tokens',
+                                            is_wds='.tar' in args.train_dataset)
     else:
         image_transforms = T.Compose([
             T.Resize(args.resize_dim, interpolation=T.InterpolationMode.BICUBIC),

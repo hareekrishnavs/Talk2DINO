@@ -1,5 +1,5 @@
 from copy import deepcopy
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, IterableDataset
 import torch
 import torch.optim as optim
 from tqdm import tqdm
@@ -73,7 +73,11 @@ def train(model, train_dataloader, contrastive_loss, optimizer, scheduler=None, 
             text_argmax = None
         if 'self_attn_maps' in batch:
             self_attn_maps = batch['self_attn_maps'].to(device)
-            cls = batch['dino_features'].to(device)
+            cls = (
+                batch['dino_features'].to(device)
+                if 'dino_features' in batch
+                else None
+            )
         else: 
             self_attn_maps = None
             cls = None
@@ -86,8 +90,12 @@ def train(model, train_dataloader, contrastive_loss, optimizer, scheduler=None, 
         if scheduler is not None:
             scheduler(n_batch + prev_iter)
                     
+        loss_kwargs = {}
+        if 'patch_tokens' in batch:
+            loss_kwargs['patch_tokens'] = batch['patch_tokens'].to(device)
+
         if not save_head_attivations:
-            loss = contrastive_loss(images, annotations, return_similarity_mat=False, self_attn_maps=self_attn_maps, cls=cls, text_input_mask=text_input_mask, text_argmax=text_argmax)
+            loss = contrastive_loss(images, annotations, return_similarity_mat=False, self_attn_maps=self_attn_maps, cls=cls, text_input_mask=text_input_mask, text_argmax=text_argmax, **loss_kwargs)
         else:
             loss, batch_head_attivations = contrastive_loss(images, annotations, return_similarity_mat=False, self_attn_maps=self_attn_maps, cls=cls, text_input_mask=text_input_mask, text_argmax=text_argmax, return_index=True)
             head_attivations.append(batch_head_attivations)
@@ -135,7 +143,11 @@ def validate(model, val_dataloader, contrastive_loss, verbose=False):
         images = batch['image'].to(device)
         if 'self_attn_maps' in batch:
             self_attn_maps = batch['self_attn_maps'].to(device)
-            cls = batch['dino_features'].to(device)
+            cls = (
+                batch['dino_features'].to(device)
+                if 'dino_features' in batch
+                else None
+            )
         else: 
             self_attn_maps = None
             cls = None
@@ -145,8 +157,12 @@ def validate(model, val_dataloader, contrastive_loss, verbose=False):
         else:
             text_input_mask = None
         
+        loss_kwargs = {}
+        if 'patch_tokens' in batch:
+            loss_kwargs['patch_tokens'] = batch['patch_tokens'].to(device)
+
         with torch.no_grad():
-            loss = contrastive_loss(images, annotations, return_similarity_mat=False, self_attn_maps=self_attn_maps, cls=cls, text_input_mask=text_input_mask, text_argmax=text_argmax)
+            loss = contrastive_loss(images, annotations, return_similarity_mat=False, self_attn_maps=self_attn_maps, cls=cls, text_input_mask=text_input_mask, text_argmax=text_argmax, **loss_kwargs)
     
         val_batch_losses.append(loss.item())
     return torch.mean(torch.tensor(val_batch_losses)).item()
@@ -166,8 +182,24 @@ def do_train(model, train_dataset, val_dataset, train_cfg, seed=123, optimizer_n
     save_best_model = train_cfg.get('save_best_model', True)
     # early_stopping = train_cfg.get('early_stopping', 0) # 0 means no early-stopping
     
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=shuffle, num_workers=16)
-    val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=16)
+    train_is_streaming = isinstance(train_dataset, IterableDataset)
+    val_is_streaming = isinstance(val_dataset, IterableDataset)
+    train_loader_kwargs = {
+        'batch_size': batch_size,
+        'shuffle': shuffle if not train_is_streaming else False,
+        'num_workers': 2 if train_is_streaming else 16,
+    }
+    val_loader_kwargs = {
+        'batch_size': batch_size,
+        'shuffle': False,
+        'num_workers': 2 if val_is_streaming else 16,
+    }
+    if train_is_streaming:
+        train_loader_kwargs['prefetch_factor'] = 1
+    if val_is_streaming:
+        val_loader_kwargs['prefetch_factor'] = 1
+    train_dataloader = DataLoader(train_dataset, **train_loader_kwargs)
+    val_dataloader = DataLoader(val_dataset, **val_loader_kwargs)
     
     criterion = ContrastiveLoss(model, margin=margin, max_violation=max_violation, ltype=ltype)
     if optimizer_name == "Adam":
@@ -188,6 +220,8 @@ def do_train(model, train_dataset, val_dataset, train_cfg, seed=123, optimizer_n
     train_losses = torch.zeros(num_epochs)
     val_losses = torch.zeros(num_epochs)
     for epoch in range(num_epochs):
+        if hasattr(train_dataset, 'set_epoch'):
+            train_dataset.set_epoch(epoch)
         # train loss
         model.train()
         train_loss = train(model, train_dataloader, criterion, optimizer, scheduler, save_head_attivations=None if epoch < num_epochs - 1 else save_head_attivations, n_epochs=epoch)

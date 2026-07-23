@@ -91,7 +91,8 @@ class ProjectionLayer(nn.Module):
     The forward method calculate the similarity between the DINO CLS token and the projected CLIP textual CLS token. 
     """
     def __init__(self, act=nn.Tanh(), hidden_layer=False, cosine=True, dino_embed_dim=1024, clip_embed_dim=512, num_attn_head=16, weight_attn_heads=None,
-                 alignment_strategy='max_score', alpha=0.6, keep_cls=False, keep_end_seq=False, routing_temperature=0.10):
+                 alignment_strategy='max_score', alpha=0.6, keep_cls=False, keep_end_seq=False, routing_temperature=0.10,
+                 dense_temperature=0.10, dense_loss_weight=1.0, attention_map_format='probabilities'):
         # mlp_dims list of mlp dimensions
         super().__init__()
         self.num_attn_head = num_attn_head      
@@ -118,6 +119,24 @@ class ProjectionLayer(nn.Module):
                 "routing_temperature must be strictly positive, but received "
                 f"{self.routing_temperature}"
             )
+        self.dense_temperature = float(dense_temperature)
+        if self.dense_temperature <= 0:
+            raise ValueError(
+                "dense_temperature must be strictly positive, but received "
+                f"{self.dense_temperature}"
+            )
+        self.dense_loss_weight = float(dense_loss_weight)
+        if self.dense_loss_weight < 0:
+            raise ValueError(
+                "dense_loss_weight must be non-negative, but received "
+                f"{self.dense_loss_weight}"
+            )
+        if attention_map_format not in {"probabilities", "logits"}:
+            raise ValueError(
+                "attention_map_format must be 'probabilities' or 'logits', but "
+                f"received {attention_map_format!r}"
+            )
+        self.attention_map_format = attention_map_format
         self.keep_cls = keep_cls # relevant only if we use clip_txt_tokens_out
         self.keep_end_seq = keep_end_seq # relevant only if we use clip_txt_tokens_out
         self.alpha = alpha
@@ -150,6 +169,11 @@ class ProjectionLayer(nn.Module):
             weight_attn_heads=config.get('weight_attn_heads', None),
             alignment_strategy=config.get('alignment_strategy', 'max_score'),
             routing_temperature=config.get('routing_temperature', 0.10),
+            dense_temperature=config.get('dense_temperature', 0.10),
+            dense_loss_weight=config.get('dense_loss_weight', 1.0),
+            attention_map_format=config.get(
+                'attention_map_format', 'probabilities'
+            ),
             alpha=config.get('alpha', 0.6),
             keep_cls=config.get('keep_cls', None),
             keep_end_seq=config.get('keep_end_seq', None),
@@ -160,7 +184,10 @@ class ProjectionLayer(nn.Module):
         return model
     
     def compute_similarity(self, visual_embedding, textual_embedding, text_input_mask=None, return_index=False):
-        if self.alignment_strategy == 'paired_soft_routing':
+        if self.alignment_strategy in {
+            'paired_soft_routing',
+            'paired_soft_routing_rdcd',
+        }:
             if visual_embedding.ndim != 3 or textual_embedding.ndim != 2:
                 raise ValueError(
                     "paired_soft_routing requires visual embeddings [B, H, D] "
