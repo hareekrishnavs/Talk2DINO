@@ -17,20 +17,20 @@ from src.loss import (
     prepare_attention_probabilities,
 )
 from src.model import ProjectionLayer
-from src.train_util import train, validate
+from src.train_util import assert_unique_dense_image_ids, train, validate
 from src.training_features import validation_feature_name
 
 
-def make_dense_record(batch_id=7, heads=3, patches=5, dim=4, captions=2):
-    maps = torch.rand(heads, patches)
+def make_dense_record(batch_id=7, captions=2):
+    maps = torch.rand(12, 1024)
     maps = maps / maps.sum(dim=-1, keepdim=True)
     return {
         "image_id": batch_id,
-        "disentangled_self_attn": torch.randn(heads, dim),
-        "patch_tokens": torch.randn(patches, dim),
-        "self_attn_maps": maps,
+        "disentangled_self_attn": torch.randn(12, 768, dtype=torch.float32),
+        "patch_tokens": torch.randn(1024, 768, dtype=torch.float16),
+        "self_attn_maps": maps.to(torch.float16),
         "captions": [f"caption-{index}" for index in range(captions)],
-        "ann_feats": [torch.randn(dim) for _ in range(captions)],
+        "ann_feats": [torch.randn(512) for _ in range(captions)],
         "annotation_ids": [batch_id * 10 + index for index in range(captions)],
     }
 
@@ -107,14 +107,12 @@ def identity_layer(strategy, dim=4, dense_loss_weight=1.0):
 
 def test_e5_dataset_returns_annotation_level_dense_samples(tmp_path):
     record = make_dense_record()
-    dataset = DenseConsistencyDataset(
-        write_dense_fixture(tmp_path / "dense", record), dino_embed_dim=4
-    )
+    dataset = DenseConsistencyDataset(write_dense_fixture(tmp_path / "dense", record))
     samples = list(dataset)
     assert len(dataset) == len(samples) == 2
-    assert samples[0]["image"].shape == (3, 4)
-    assert samples[0]["patch_tokens"].shape == (5, 4)
-    assert samples[0]["self_attn_maps"].shape == (3, 5)
+    assert samples[0]["image"].shape == (12, 768)
+    assert samples[0]["patch_tokens"].shape == (1024, 768)
+    assert samples[0]["self_attn_maps"].shape == (12, 1024)
     assert samples[0]["metadata"] == {"image_id": 7, "annotation_id": 70}
 
 
@@ -136,9 +134,7 @@ def test_default_dinoclip_dataset_is_unchanged(tmp_path):
 def test_dense_dataset_missing_auxiliary_field_fails(tmp_path):
     record = make_dense_record()
     record.pop("patch_tokens")
-    dataset = DenseConsistencyDataset(
-        write_dense_fixture(tmp_path / "missing", record), dino_embed_dim=4
-    )
+    dataset = DenseConsistencyDataset(write_dense_fixture(tmp_path / "missing", record))
     with pytest.raises(ValueError, match="patch_tokens"):
         list(dataset)
 
@@ -146,9 +142,22 @@ def test_dense_dataset_missing_auxiliary_field_fails(tmp_path):
 @pytest.mark.parametrize(
     ("field", "replacement", "message"),
     [
-        ("self_attn_maps", torch.ones(2, 5), "head count H"),
-        ("self_attn_maps", torch.ones(3, 4), "patch count P"),
-        ("patch_tokens", torch.ones(5, 6), "dimension D"),
+        (
+            "disentangled_self_attn",
+            torch.ones(11, 768, dtype=torch.float32),
+            "disentangled_self_attn must have shape",
+        ),
+        (
+            "self_attn_maps",
+            torch.ones(12, 1023, dtype=torch.float16),
+            "self_attn_maps must have shape",
+        ),
+        (
+            "patch_tokens",
+            torch.ones(1024, 767, dtype=torch.float16),
+            "patch_tokens must have shape",
+        ),
+        ("ann_feats", [torch.ones(511), torch.ones(511)], "ann_feats must have shape"),
     ],
 )
 def test_dense_dataset_shape_mismatches_fail(
@@ -156,24 +165,75 @@ def test_dense_dataset_shape_mismatches_fail(
 ):
     record = make_dense_record()
     record[field] = replacement
-    dataset = DenseConsistencyDataset(
-        write_dense_fixture(tmp_path / field, record), dino_embed_dim=4
-    )
+    dataset = DenseConsistencyDataset(write_dense_fixture(tmp_path / field, record))
     with pytest.raises(ValueError, match=message):
         list(dataset)
 
 
-@pytest.mark.parametrize("field", ["disentangled_self_attn", "patch_tokens", "ann_feats"])
+@pytest.mark.parametrize(
+    "field",
+    ["disentangled_self_attn", "patch_tokens", "self_attn_maps", "ann_feats"],
+)
 def test_dense_dataset_nonfinite_fields_fail(tmp_path, field):
     record = make_dense_record()
     if field == "ann_feats":
         record[field][0][0] = float("nan")
     else:
         record[field][0, 0] = float("nan")
-    dataset = DenseConsistencyDataset(
-        write_dense_fixture(tmp_path / field, record), dino_embed_dim=4
-    )
+    dataset = DenseConsistencyDataset(write_dense_fixture(tmp_path / field, record))
     with pytest.raises(ValueError, match="finite"):
+        list(dataset)
+
+
+@pytest.mark.parametrize(
+    ("field", "dtype"),
+    [
+        ("disentangled_self_attn", torch.float16),
+        ("patch_tokens", torch.float32),
+        ("self_attn_maps", torch.float32),
+    ],
+)
+def test_dense_dataset_rejects_incorrect_dtypes(tmp_path, field, dtype):
+    record = make_dense_record()
+    record[field] = record[field].to(dtype)
+    dataset = DenseConsistencyDataset(write_dense_fixture(tmp_path / field, record))
+    with pytest.raises(ValueError, match="must have dtype"):
+        list(dataset)
+
+
+@pytest.mark.parametrize("failure", ["negative", "row_sum"])
+def test_dense_dataset_rejects_invalid_map_probabilities(tmp_path, failure):
+    record = make_dense_record()
+    record["self_attn_maps"] = record["self_attn_maps"].clone()
+    if failure == "negative":
+        record["self_attn_maps"][0, 0] = -0.1
+        message = "negative"
+    else:
+        record["self_attn_maps"][0] *= 2
+        message = "sum to one"
+    dataset = DenseConsistencyDataset(
+        write_dense_fixture(tmp_path / failure, record)
+    )
+    with pytest.raises(ValueError, match=message):
+        list(dataset)
+
+
+@pytest.mark.parametrize("failure", ["caption", "annotation_id", "alignment"])
+def test_dense_dataset_rejects_invalid_annotation_alignment(tmp_path, failure):
+    record = make_dense_record()
+    if failure == "caption":
+        record["captions"][0] = 123
+        message = "strings"
+    elif failure == "annotation_id":
+        record["annotation_ids"][1] = record["annotation_ids"][0]
+        message = "unique"
+    else:
+        record["captions"].pop()
+        message = "aligned"
+    dataset = DenseConsistencyDataset(
+        write_dense_fixture(tmp_path / failure, record)
+    )
+    with pytest.raises(ValueError, match=message):
         list(dataset)
 
 
@@ -391,6 +451,7 @@ def test_training_and_validation_loops_forward_dense_inputs():
             "annotation": torch.randn(4),
             "patch_tokens": torch.randn(5, 4),
             "self_attn_maps": maps[index],
+            "metadata": {"image_id": index, "annotation_id": index},
         }
         for index in range(2)
     ]
@@ -398,6 +459,45 @@ def test_training_and_validation_loops_forward_dense_inputs():
     train_loss = train(model, loader, criterion, optimizer)
     val_loss = validate(model, loader, criterion)
     assert torch.isfinite(torch.tensor([train_loss, val_loss])).all()
+
+
+def test_duplicate_dense_image_ids_fail_before_loss():
+    batch = {
+        "patch_tokens": torch.randn(2, 3, 4),
+        "metadata": {"image_id": torch.tensor([7, 7])},
+    }
+    with pytest.raises(ValueError, match="duplicate metadata.image_id"):
+        assert_unique_dense_image_ids(batch)
+
+
+@pytest.mark.parametrize(
+    ("parameter", "value"),
+    [
+        ("routing_temperature", float("nan")),
+        ("routing_temperature", float("inf")),
+        ("dense_temperature", float("nan")),
+        ("dense_temperature", float("inf")),
+        ("dense_loss_weight", float("nan")),
+        ("dense_loss_weight", float("inf")),
+    ],
+)
+def test_nonfinite_rdcd_hyperparameters_are_rejected(parameter, value):
+    with pytest.raises(ValueError):
+        ProjectionLayer(**{parameter: value})
+
+
+@pytest.mark.parametrize("parameter", ["routing_temperature", "dense_temperature"])
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+def test_direct_rdcd_helper_rejects_nonfinite_temperatures(parameter, value):
+    text, heads, patches, maps = normalized_inputs(batch=2)
+    kwargs = {
+        "routing_temperature": 0.1,
+        "dense_temperature": 0.1,
+        "attention_map_format": "probabilities",
+    }
+    kwargs[parameter] = value
+    with pytest.raises(ValueError, match="must be positive"):
+        compute_rdcd_components(text, heads, patches, maps, **kwargs)
 
 
 def test_standard_infonce_and_triplet_numerics_unchanged():

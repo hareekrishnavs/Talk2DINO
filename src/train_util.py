@@ -1,5 +1,5 @@
 from copy import deepcopy
-from torch.utils.data import DataLoader, IterableDataset
+from torch.utils.data import DataLoader
 import torch
 import torch.optim as optim
 from tqdm import tqdm
@@ -13,6 +13,23 @@ try:
     import wandb
 except ImportError:
     wandb = None
+
+
+def assert_unique_dense_image_ids(batch):
+    if 'patch_tokens' not in batch:
+        return
+    try:
+        image_ids = batch['metadata']['image_id']
+    except KeyError as exc:
+        raise ValueError("dense batch is missing metadata.image_id") from exc
+    if torch.is_tensor(image_ids):
+        image_ids = image_ids.detach().cpu().reshape(-1).tolist()
+    else:
+        image_ids = list(image_ids)
+    if len(image_ids) != len(set(image_ids)):
+        raise ValueError(
+            "dense contrastive batch contains duplicate metadata.image_id values"
+        )
 
 def set_seed(seed):
     print(f'Setting seed {seed}...')
@@ -65,6 +82,7 @@ def train(model, train_dataloader, contrastive_loss, optimizer, scheduler=None, 
     ann_ids = []
     img_ids = []
     for n_batch, batch in enumerate(tqdm(train_dataloader)):
+        assert_unique_dense_image_ids(batch)
         annotations = batch['annotation'].to(device, dtype=torch.float32)
         images = batch['image'].to(device)
         if 'text_argmax' in batch:
@@ -134,6 +152,7 @@ def validate(model, val_dataloader, contrastive_loss, verbose=False):
     
     val_dataloader = tqdm(val_dataloader) if verbose else val_dataloader
     for n_batch, batch in enumerate(val_dataloader):
+        assert_unique_dense_image_ids(batch)
         annotations = batch['annotation'].to(device, dtype=torch.float32)
         if 'text_argmax' in batch:
             text_argmax = batch['text_argmax'].to(device)
@@ -182,24 +201,32 @@ def do_train(model, train_dataset, val_dataset, train_cfg, seed=123, optimizer_n
     save_best_model = train_cfg.get('save_best_model', True)
     # early_stopping = train_cfg.get('early_stopping', 0) # 0 means no early-stopping
     
-    train_is_streaming = isinstance(train_dataset, IterableDataset)
-    val_is_streaming = isinstance(val_dataset, IterableDataset)
-    train_loader_kwargs = {
-        'batch_size': batch_size,
-        'shuffle': shuffle if not train_is_streaming else False,
-        'num_workers': 2 if train_is_streaming else 16,
-    }
-    val_loader_kwargs = {
-        'batch_size': batch_size,
-        'shuffle': False,
-        'num_workers': 2 if val_is_streaming else 16,
-    }
-    if train_is_streaming:
-        train_loader_kwargs['prefetch_factor'] = 1
-    if val_is_streaming:
-        val_loader_kwargs['prefetch_factor'] = 1
-    train_dataloader = DataLoader(train_dataset, **train_loader_kwargs)
-    val_dataloader = DataLoader(val_dataset, **val_loader_kwargs)
+    if hasattr(train_dataset, 'make_batch_loader'):
+        train_dataloader = train_dataset.make_batch_loader(
+            batch_size=batch_size,
+            seed=seed,
+            num_workers=2,
+        )
+    else:
+        train_dataloader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            num_workers=16,
+        )
+    if hasattr(val_dataset, 'make_batch_loader'):
+        val_dataloader = val_dataset.make_batch_loader(
+            batch_size=batch_size,
+            seed=seed,
+            num_workers=2,
+        )
+    else:
+        val_dataloader = DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=16,
+        )
     
     criterion = ContrastiveLoss(model, margin=margin, max_violation=max_violation, ltype=ltype)
     if optimizer_name == "Adam":

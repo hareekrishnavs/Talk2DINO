@@ -122,20 +122,18 @@ if __name__ == '__main__':
                     "dense_consistency requires train_dataset and val_dataset to "
                     "be complete E5 dense-shard directories"
                 )
-            dino_embed_dim = model_config.get('model', {}).get(
-                'dino_embed_dim', 768
+            batch_size = model_config.get('train', {}).get('batch_size', 128)
+            record_pool_size = model_config.get('train', {}).get(
+                'record_pool_size', 2 * batch_size
             )
             train_dataset = DenseConsistencyDataset(
                 args.train_dataset,
-                dino_embed_dim=dino_embed_dim,
+                record_pool_size=record_pool_size,
                 shuffle_shards=True,
-                shuffle_buffer=model_config.get('train', {}).get(
-                    'shuffle_buffer', 128
-                ),
             )
             val_dataset = DenseConsistencyDataset(
                 args.val_dataset,
-                dino_embed_dim=dino_embed_dim,
+                record_pool_size=record_pool_size,
             )
         else:
             val_dataset = DinoClipDataset(args.val_dataset,

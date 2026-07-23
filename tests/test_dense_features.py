@@ -1,10 +1,13 @@
 import io
 import json
+import random
 import tarfile
 
 import pytest
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, IterableDataset, get_worker_info
+
+from src.dataset import ImageAwareBatchLoader
 
 from src.dense_features import (
     DenseFeatureShardWriter,
@@ -22,6 +25,106 @@ CONFIG = {
     "patch_count": 1024,
     "attention_map_format": "probabilities",
 }
+
+
+class SyntheticImageRecordDataset(IterableDataset):
+    """Tiny records exercise scheduling without allocating real dense tensors."""
+
+    def __init__(self, image_count=1000, captions_per_image=5, seed=123):
+        super().__init__()
+        self.image_count = image_count
+        self.captions_per_image = captions_per_image
+        self.seed = seed
+        self.epoch = 0
+
+    def set_epoch(self, epoch):
+        self.epoch = epoch
+
+    def __iter__(self):
+        worker = get_worker_info()
+        worker_id = worker.id if worker is not None else 0
+        worker_count = worker.num_workers if worker is not None else 1
+        image_ids = list(range(self.image_count))
+        random.Random(self.seed + 1_000_003 * self.epoch).shuffle(image_ids)
+        for image_id in image_ids[worker_id::worker_count]:
+            annotation_ids = [
+                image_id * self.captions_per_image + index
+                for index in range(self.captions_per_image)
+            ]
+            yield {
+                "image_id": image_id,
+                "disentangled_self_attn": torch.tensor([image_id]),
+                "patch_tokens": torch.tensor([image_id]),
+                "self_attn_maps": torch.tensor([image_id]),
+                "captions": [str(index) for index in annotation_ids],
+                "ann_feats": [torch.tensor([index]) for index in annotation_ids],
+                "annotation_ids": annotation_ids,
+            }
+
+
+def synthetic_image_aware_loader(dataset, num_workers):
+    return ImageAwareBatchLoader(
+        dataset,
+        annotation_count=dataset.image_count * dataset.captions_per_image,
+        batch_size=128,
+        record_pool_size=256,
+        seed=dataset.seed,
+        num_workers=num_workers,
+    )
+
+
+def collect_batch_metadata(loader):
+    sizes = []
+    unique_image_counts = []
+    annotation_ids = []
+    image_order = []
+    for batch in loader:
+        image_ids = batch["metadata"]["image_id"].tolist()
+        batch_annotation_ids = batch["metadata"]["annotation_id"].tolist()
+        sizes.append(len(image_ids))
+        unique_image_counts.append(len(set(image_ids)))
+        annotation_ids.extend(batch_annotation_ids)
+        image_order.extend(image_ids)
+    return sizes, unique_image_counts, annotation_ids, image_order
+
+
+def test_image_aware_batches_have_unique_images_and_complete_coverage():
+    dataset = SyntheticImageRecordDataset(image_count=1000, captions_per_image=5)
+    loader = synthetic_image_aware_loader(dataset, num_workers=0)
+    sizes, unique_counts, annotation_ids, _ = collect_batch_metadata(loader)
+
+    assert len(loader) == len(sizes) == 40
+    assert sizes[:-1] == [128] * 39
+    assert sizes[-1] == 8
+    assert unique_counts == sizes
+    assert len(annotation_ids) == len(set(annotation_ids)) == 5000
+    assert sorted(annotation_ids) == list(range(5000))
+
+
+def test_image_aware_batches_preserve_two_worker_disjointness():
+    dataset = SyntheticImageRecordDataset(image_count=1000, captions_per_image=5)
+    loader = synthetic_image_aware_loader(dataset, num_workers=2)
+    sizes, unique_counts, annotation_ids, _ = collect_batch_metadata(loader)
+
+    assert sizes[:-1] == [128] * 39
+    assert sizes[-1] == 8
+    assert unique_counts == sizes
+    assert len(annotation_ids) == len(set(annotation_ids)) == 5000
+    assert sorted(annotation_ids) == list(range(5000))
+
+
+def test_image_aware_seed_and_epoch_are_deterministic():
+    dataset = SyntheticImageRecordDataset(image_count=1000, captions_per_image=5)
+    loader = synthetic_image_aware_loader(dataset, num_workers=2)
+    first = collect_batch_metadata(loader)[3]
+    repeated = collect_batch_metadata(loader)[3]
+    assert repeated == first
+
+    dataset.set_epoch(1)
+    next_epoch = collect_batch_metadata(loader)[3]
+    assert next_epoch != first
+    dataset.set_epoch(0)
+    assert collect_batch_metadata(loader)[3] == first
 
 
 @pytest.fixture(scope="module")

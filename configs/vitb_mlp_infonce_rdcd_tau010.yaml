@@ -13,5 +13,6 @@ train:
   ltype: infonce_rdcd
   num_epochs: 100
   batch_size: 128
+  record_pool_size: 256
   save_best_model: False
   dense_consistency: True

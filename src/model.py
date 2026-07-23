@@ -1,3 +1,4 @@
+import math
 import yaml
 import torch
 import torch.nn as nn
@@ -114,19 +115,19 @@ class ProjectionLayer(nn.Module):
             
         self.alignment_strategy = alignment_strategy # relevant only if we use disentangled_self_attn
         self.routing_temperature = float(routing_temperature)
-        if self.routing_temperature <= 0:
+        if not math.isfinite(self.routing_temperature) or self.routing_temperature <= 0:
             raise ValueError(
                 "routing_temperature must be strictly positive, but received "
                 f"{self.routing_temperature}"
             )
         self.dense_temperature = float(dense_temperature)
-        if self.dense_temperature <= 0:
+        if not math.isfinite(self.dense_temperature) or self.dense_temperature <= 0:
             raise ValueError(
                 "dense_temperature must be strictly positive, but received "
                 f"{self.dense_temperature}"
             )
         self.dense_loss_weight = float(dense_loss_weight)
-        if self.dense_loss_weight < 0:
+        if not math.isfinite(self.dense_loss_weight) or self.dense_loss_weight < 0:
             raise ValueError(
                 "dense_loss_weight must be non-negative, but received "
                 f"{self.dense_loss_weight}"

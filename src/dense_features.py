@@ -799,6 +799,19 @@ class DenseFeatureStreamingDataset(IterableDataset):
     def set_epoch(self, epoch: int) -> None:
         self.epoch = epoch
 
+    def set_seed(self, seed: int) -> None:
+        self.seed = int(seed)
+
+    def _shards_for_worker(self) -> List[Path]:
+        worker = get_worker_info()
+        worker_id = worker.id if worker is not None else 0
+        worker_count = worker.num_workers if worker is not None else 1
+        rng = random.Random(self.seed + 1_000_003 * self.epoch)
+        shards = list(self.shards)
+        if self.shuffle_shards:
+            rng.shuffle(shards)
+        return shards[worker_id::worker_count]
+
     def _expanded_samples(self, shards: Iterable[Path]) -> Iterator[Dict[str, Any]]:
         for shard in shards:
             for record in iter_dense_shard_records(shard):
@@ -836,13 +849,7 @@ class DenseFeatureStreamingDataset(IterableDataset):
             yield buffer.pop(rng.randrange(len(buffer)))
 
     def __iter__(self) -> Iterator[Dict[str, Any]]:
-        worker = get_worker_info()
-        worker_id = worker.id if worker is not None else 0
-        worker_count = worker.num_workers if worker is not None else 1
         rng = random.Random(self.seed + 1_000_003 * self.epoch)
-        shards = list(self.shards)
-        if self.shuffle_shards:
-            rng.shuffle(shards)
-        shards = shards[worker_id::worker_count]
+        shards = self._shards_for_worker()
         samples = self._expanded_samples(shards)
         yield from self._bounded_shuffle(samples, self.shuffle_buffer, rng)

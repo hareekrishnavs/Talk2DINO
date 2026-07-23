@@ -1,3 +1,4 @@
+import math
 import numpy as np
 import torch
 from torch import nn
@@ -182,7 +183,14 @@ def compute_rdcd_components(
     attention_map_format,
     eps=1e-8,
 ):
-    if routing_temperature <= 0 or dense_temperature <= 0:
+    routing_temperature = float(routing_temperature)
+    dense_temperature = float(dense_temperature)
+    if (
+        not math.isfinite(routing_temperature)
+        or routing_temperature <= 0
+        or not math.isfinite(dense_temperature)
+        or dense_temperature <= 0
+    ):
         raise ValueError("routing_temperature and dense_temperature must be positive")
     if text.ndim != 2 or heads.ndim != 3:
         raise ValueError(

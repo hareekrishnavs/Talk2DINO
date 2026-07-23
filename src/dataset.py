@@ -1,10 +1,11 @@
 import webdataset as wds
 import os
+import random
 import torch
 
 from io import BytesIO
 from PIL import Image
-from torch.utils.data import Dataset
+from torch.utils.data import DataLoader, Dataset, IterableDataset, default_collate
 
 from src.dense_features import (
     DenseFeatureStreamingDataset,
@@ -107,92 +108,309 @@ class DinoClipDataset(Dataset):
         print("Dataset loaded!")
 
 
+E5_HEAD_SHAPE = (12, 768)
+E5_PATCH_SHAPE = (1024, 768)
+E5_MAP_SHAPE = (12, 1024)
+E5_ANN_SHAPE = (512,)
+E5_ATTENTION_SUM_TOLERANCE = 2e-3
+
+
+def validate_e5_dense_record(record):
+    """Validate one E5 image record without inspecting any other shard member."""
+    required = {
+        "image_id",
+        "disentangled_self_attn",
+        "patch_tokens",
+        "self_attn_maps",
+        "captions",
+        "ann_feats",
+        "annotation_ids",
+    }
+    if not isinstance(record, dict):
+        raise ValueError("dense consistency record must be a dictionary")
+    missing = required.difference(record)
+    if missing:
+        raise ValueError(
+            "dense consistency record is missing required fields: "
+            f"{sorted(missing)}"
+        )
+
+    tensor_contract = (
+        ("disentangled_self_attn", E5_HEAD_SHAPE, torch.float32),
+        ("patch_tokens", E5_PATCH_SHAPE, torch.float16),
+        ("self_attn_maps", E5_MAP_SHAPE, torch.float16),
+    )
+    for name, expected_shape, expected_dtype in tensor_contract:
+        tensor = record[name]
+        if not torch.is_tensor(tensor):
+            raise ValueError(f"{name} must be a tensor")
+        if tuple(tensor.shape) != expected_shape:
+            raise ValueError(
+                f"{name} must have shape {list(expected_shape)}, got "
+                f"{list(tensor.shape)}"
+            )
+        if tensor.dtype != expected_dtype:
+            raise ValueError(
+                f"{name} must have dtype {expected_dtype}, got {tensor.dtype}"
+            )
+        if not torch.isfinite(tensor).all():
+            raise ValueError(f"{name} contains non-finite values")
+
+    attention_maps = record["self_attn_maps"]
+    if (attention_maps < 0).any():
+        raise ValueError("self_attn_maps contains negative probabilities")
+    row_sums = attention_maps.float().sum(dim=-1)
+    if not torch.allclose(
+        row_sums,
+        torch.ones_like(row_sums),
+        atol=E5_ATTENTION_SUM_TOLERANCE,
+        rtol=E5_ATTENTION_SUM_TOLERANCE,
+    ):
+        raise ValueError(
+            "self_attn_maps rows must sum to one within extraction tolerance"
+        )
+
+    captions = record["captions"]
+    ann_feats = record["ann_feats"]
+    annotation_ids = record["annotation_ids"]
+    if not all(isinstance(values, list) for values in (captions, ann_feats, annotation_ids)):
+        raise ValueError("captions, ann_feats, and annotation_ids must be lists")
+    if not captions or not (
+        len(captions) == len(ann_feats) == len(annotation_ids)
+    ):
+        raise ValueError(
+            "captions, ann_feats, and annotation_ids are not aligned"
+        )
+    if any(not isinstance(caption, str) for caption in captions):
+        raise ValueError("captions must contain only strings")
+    if len(set(annotation_ids)) != len(annotation_ids):
+        raise ValueError("annotation_ids must be unique within each image record")
+    for ann_feat in ann_feats:
+        if not torch.is_tensor(ann_feat):
+            raise ValueError("ann_feats must contain tensors")
+        if tuple(ann_feat.shape) != E5_ANN_SHAPE:
+            raise ValueError(
+                f"ann_feats must have shape {list(E5_ANN_SHAPE)}, got "
+                f"{list(ann_feat.shape)}"
+            )
+        if not torch.isfinite(ann_feat).all():
+            raise ValueError("ann_feats must contain finite tensors")
+    return record
+
+
+def _annotation_sample(record, annotation_index):
+    return {
+        "annotation": record["ann_feats"][annotation_index],
+        "image": record["disentangled_self_attn"],
+        "metadata": {
+            "image_id": record["image_id"],
+            "annotation_id": record["annotation_ids"][annotation_index],
+        },
+        "caption": record["captions"][annotation_index],
+        "patch_tokens": record["patch_tokens"],
+        "self_attn_maps": record["self_attn_maps"],
+    }
+
+
+def iter_image_aware_batches(
+    records,
+    *,
+    batch_size,
+    record_pool_size,
+    seed,
+):
+    """Collate every annotation once while keeping image IDs unique per batch."""
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    if record_pool_size < batch_size:
+        raise ValueError("record_pool_size must be at least batch_size")
+
+    rng = random.Random(int(seed))
+    record_iterator = iter(records)
+    partial_assignments = []
+
+    def collate_assignments(assignments):
+        image_ids = [record["image_id"] for record, _ in assignments]
+        if len(image_ids) != len(set(image_ids)):
+            raise RuntimeError(
+                "image-aware batch contains duplicate image IDs"
+            )
+        return default_collate(
+            [
+                _annotation_sample(record, annotation_index)
+                for record, annotation_index in assignments
+            ]
+        )
+
+    while True:
+        record_pool = []
+        for _ in range(record_pool_size):
+            try:
+                record_pool.append(next(record_iterator))
+            except StopIteration:
+                break
+        if not record_pool:
+            break
+
+        total_annotations = sum(
+            len(record["annotation_ids"]) for record in record_pool
+        )
+        local_batch_count = (
+            total_annotations + batch_size - 1
+        ) // batch_size
+        final_local_size = total_annotations - (
+            local_batch_count - 1
+        ) * batch_size
+        capacities = [batch_size] * (local_batch_count - 1) + [
+            final_local_size
+        ]
+        local_assignments = [[] for _ in capacities]
+
+        states = []
+        for record in record_pool:
+            annotation_order = list(range(len(record["annotation_ids"])))
+            rng.shuffle(annotation_order)
+            states.append((record, annotation_order))
+        rng.shuffle(states)
+        states.sort(key=lambda item: len(item[1]), reverse=True)
+
+        for record, annotation_order in states:
+            candidate_batches = [
+                index for index, capacity in enumerate(capacities) if capacity > 0
+            ]
+            rng.shuffle(candidate_batches)
+            candidate_batches.sort(
+                key=lambda index: capacities[index],
+                reverse=True,
+            )
+            if len(candidate_batches) < len(annotation_order):
+                raise RuntimeError(
+                    "an image has too many captions for the configured "
+                    "record_pool_size; increase record_pool_size"
+                )
+            for annotation_index, local_batch_index in zip(
+                annotation_order,
+                candidate_batches,
+            ):
+                local_assignments[local_batch_index].append(
+                    (record, annotation_index)
+                )
+                capacities[local_batch_index] -= 1
+
+        if any(capacities):
+            raise RuntimeError("unable to construct complete unique-image batches")
+        rng.shuffle(local_assignments)
+        full_assignments = [
+            assignments
+            for assignments in local_assignments
+            if len(assignments) == batch_size
+        ]
+        local_partial = [
+            assignments
+            for assignments in local_assignments
+            if len(assignments) < batch_size
+        ]
+        if len(local_partial) > 1:
+            raise RuntimeError("record pool produced multiple partial batches")
+
+        for assignments in full_assignments:
+            rng.shuffle(assignments)
+            yield collate_assignments(assignments)
+
+        if local_partial:
+            partial_assignments.extend(local_partial[0])
+            while len(partial_assignments) >= batch_size:
+                assignments = partial_assignments[:batch_size]
+                del partial_assignments[:batch_size]
+                rng.shuffle(assignments)
+                yield collate_assignments(assignments)
+
+    if partial_assignments:
+        rng.shuffle(partial_assignments)
+        yield collate_assignments(partial_assignments)
+
+
+class ImageAwareBatchLoader:
+    """Main-process image-aware batching over worker-partitioned record streams."""
+
+    def __init__(
+        self,
+        record_dataset,
+        *,
+        annotation_count,
+        batch_size,
+        record_pool_size,
+        seed,
+        num_workers,
+    ):
+        self.record_dataset = record_dataset
+        self.annotation_count = int(annotation_count)
+        self.batch_size = int(batch_size)
+        self.record_pool_size = int(record_pool_size)
+        self.seed = int(seed)
+        self.num_workers = int(num_workers)
+
+    def __len__(self):
+        return (self.annotation_count + self.batch_size - 1) // self.batch_size
+
+    def __iter__(self):
+        loader_kwargs = {
+            "batch_size": None,
+            "num_workers": self.num_workers,
+        }
+        if self.num_workers > 0:
+            loader_kwargs["prefetch_factor"] = 1
+        records = DataLoader(self.record_dataset, **loader_kwargs)
+        epoch = getattr(self.record_dataset, "epoch", 0)
+        yield from iter_image_aware_batches(
+            records,
+            batch_size=self.batch_size,
+            record_pool_size=self.record_pool_size,
+            seed=self.seed + 1_000_003 * epoch,
+        )
+
+
+class _DenseConsistencyRecordDataset(IterableDataset):
+    def __init__(self, source):
+        super().__init__()
+        self.source = source
+
+    @property
+    def epoch(self):
+        return self.source.epoch
+
+    def __iter__(self):
+        yield from self.source._validated_records(self.source._shards_for_worker())
+
+
 class DenseConsistencyDataset(DenseFeatureStreamingDataset):
     """Strict annotation-level E5 view over complete dense-feature shards."""
 
-    def __init__(self, root, dino_embed_dim=768, **kwargs):
-        self.dino_embed_dim = int(dino_embed_dim)
+    def __init__(self, root, record_pool_size=None, **kwargs):
+        self.record_pool_size = record_pool_size
         super().__init__(root, **kwargs)
 
-    def _expanded_samples(self, shards):
-        required = {
-            "image_id",
-            "disentangled_self_attn",
-            "patch_tokens",
-            "self_attn_maps",
-            "captions",
-            "ann_feats",
-            "annotation_ids",
-        }
+    def _validated_records(self, shards):
         for shard in shards:
             for record in iter_dense_shard_records(shard):
-                missing = required.difference(record)
-                if missing:
-                    raise ValueError(
-                        "dense consistency record is missing required fields: "
-                        f"{sorted(missing)}"
-                    )
-                heads = record["disentangled_self_attn"]
-                patches = record["patch_tokens"]
-                attention_maps = record["self_attn_maps"]
-                if not all(
-                    torch.is_tensor(tensor)
-                    for tensor in (heads, patches, attention_maps)
-                ):
-                    raise ValueError("dense consistency features must be tensors")
-                if heads.ndim != 2 or patches.ndim != 2 or attention_maps.ndim != 2:
-                    raise ValueError(
-                        "dense consistency shapes must be heads [H,D], patches "
-                        "[P,D], and attention maps [H,P]"
-                    )
-                if heads.shape[0] != attention_maps.shape[0]:
-                    raise ValueError("head count H does not match attention maps")
-                if patches.shape[0] != attention_maps.shape[1]:
-                    raise ValueError("patch count P does not match attention maps")
-                if (
-                    heads.shape[1] != self.dino_embed_dim
-                    or patches.shape[1] != self.dino_embed_dim
-                ):
-                    raise ValueError(
-                        "dense feature dimension D does not match dino_embed_dim="
-                        f"{self.dino_embed_dim}"
-                    )
-                for name, tensor in (
-                    ("disentangled_self_attn", heads),
-                    ("patch_tokens", patches),
-                    ("self_attn_maps", attention_maps),
-                ):
-                    if not torch.isfinite(tensor).all():
-                        raise ValueError(f"{name} contains non-finite values")
-                captions = record["captions"]
-                ann_feats = record["ann_feats"]
-                annotation_ids = record["annotation_ids"]
-                if not (
-                    len(captions) == len(ann_feats) == len(annotation_ids)
-                ):
-                    raise ValueError(
-                        "captions, ann_feats, and annotation_ids are not aligned"
-                    )
-                for caption, ann_feat, annotation_id in zip(
-                    captions,
-                    ann_feats,
-                    annotation_ids,
-                ):
-                    if not torch.is_tensor(ann_feat) or not torch.isfinite(
-                        ann_feat
-                    ).all():
-                        raise ValueError("ann_feats must be finite tensors")
-                    yield {
-                        "annotation": ann_feat,
-                        "image": heads,
-                        "metadata": {
-                            "image_id": record["image_id"],
-                            "annotation_id": annotation_id,
-                        },
-                        "caption": caption,
-                        "patch_tokens": patches,
-                        "self_attn_maps": attention_maps,
-                    }
+                yield validate_e5_dense_record(record)
+
+    def _expanded_samples(self, shards):
+        for record in self._validated_records(shards):
+            for annotation_index in range(len(record["annotation_ids"])):
+                yield _annotation_sample(record, annotation_index)
+
+    def make_batch_loader(self, batch_size, seed, num_workers=2):
+        self.set_seed(seed)
+        record_pool_size = self.record_pool_size or 2 * batch_size
+        return ImageAwareBatchLoader(
+            _DenseConsistencyRecordDataset(self),
+            annotation_count=len(self),
+            batch_size=batch_size,
+            record_pool_size=record_pool_size,
+            seed=seed,
+            num_workers=num_workers,
+        )
 
 
 class COCOCaptions(Dataset):
