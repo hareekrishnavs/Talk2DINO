@@ -24,7 +24,17 @@ def build_dinotext_seg_inference(
     else:
         classnames = dataset.dataset.CLASSES
     text_tokens = model.build_dataset_class_tokens(config.evaluate.template, classnames)
-    text_embedding = model.build_text_embedding(text_tokens)
+    if getattr(model, "rgtp", None) is None:
+        text_embedding = model.build_text_embedding(text_tokens)
+    else:
+        raw_text_embedding, text_embedding = model.build_text_embedding(
+            text_tokens,
+            return_raw=True,
+        )
+        model.build_retrieval_grounded_prototypes(
+            raw_text_embedding,
+            text_embedding,
+        )
     kwargs = dict(with_bg=with_bg)
     if hasattr(dset_cfg, "test_cfg"):
         kwargs["test_cfg"] = dset_cfg.test_cfg

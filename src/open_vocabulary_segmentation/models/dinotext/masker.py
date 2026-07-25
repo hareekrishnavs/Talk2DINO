@@ -2,6 +2,7 @@
 # Talk2DINO
 # ------------------------------------------------------------------------------
 import copy
+import math
 from collections import OrderedDict
 import torch
 import torch.distributed as dist
@@ -224,6 +225,118 @@ class DINOTextMasker(nn.Module):
         mask = hard_mask if hard else soft_mask
 
         return mask, simmap
+
+    @torch.no_grad()
+    def forward_seg_with_prototypes(
+        self,
+        image_feat,
+        text_emb,
+        prototypes,
+        valid_mask,
+        confidence,
+        *,
+        prototype_temperature=0.10,
+        prototype_fusion_weight=0.25,
+        deterministic=True,
+        hard=False,
+    ):
+        """Explicit RGTP path that fuses raw cosine scores before one sigmoid."""
+        if prototype_fusion_weight == 0 or not torch.any(valid_mask):
+            return self.forward_seg(
+                image_feat,
+                text_emb,
+                deterministic=deterministic,
+                hard=hard,
+            )
+        if (
+            not math.isfinite(prototype_temperature)
+            or prototype_temperature <= 0
+        ):
+            raise ValueError("prototype_temperature must be strictly positive")
+        if (
+            not math.isfinite(prototype_fusion_weight)
+            or not 0 <= prototype_fusion_weight <= 1
+        ):
+            raise ValueError("prototype_fusion_weight must be in [0, 1]")
+
+        image_feat = us.normalize(image_feat, dim=1)
+        text_emb = text_emb.to(
+            device=image_feat.device,
+            dtype=image_feat.dtype,
+        )
+        prototypes = prototypes.to(
+            device=image_feat.device,
+            dtype=image_feat.dtype,
+        )
+        valid_mask = valid_mask.to(device=image_feat.device, dtype=torch.bool)
+        confidence = confidence.to(
+            device=image_feat.device,
+            dtype=image_feat.dtype,
+        )
+        if prototypes.ndim != 3:
+            raise ValueError("prototypes must have shape [C, K, D]")
+        if valid_mask.shape != prototypes.shape[:2]:
+            raise ValueError("valid_mask must have shape [C, K]")
+        if confidence.shape != prototypes.shape[:1]:
+            raise ValueError("confidence must have shape [C]")
+        if text_emb.shape != (prototypes.shape[0], prototypes.shape[2]):
+            raise ValueError(
+                "text embeddings and prototypes must have matching [C, D]"
+            )
+        if not torch.isfinite(prototypes).all() or not torch.isfinite(
+            confidence
+        ).all():
+            raise ValueError("prototype inputs must be finite")
+        if not torch.isfinite(text_emb).all() or not torch.isfinite(
+            image_feat
+        ).all():
+            raise ValueError("image and text embeddings must be finite")
+        if torch.any((confidence < 0) | (confidence > 1)):
+            raise ValueError("confidence must be in [0, 1]")
+
+        base_score = torch.einsum(
+            "b c h w, n c -> b n h w",
+            image_feat,
+            text_emb,
+        )
+        prototype_score = torch.einsum(
+            "b d h w, n k d -> b n k h w",
+            image_feat,
+            prototypes,
+        )
+        final_score = base_score.clone()
+        for class_index in range(prototypes.shape[0]):
+            class_valid = valid_mask[class_index]
+            valid_count = int(class_valid.sum().item())
+            if valid_count == 0:
+                continue
+            class_scores = prototype_score[:, class_index, class_valid]
+            maximum = class_scores.amax(dim=1)
+            grounded_score = maximum + prototype_temperature * (
+                torch.logsumexp(
+                    (
+                        class_scores
+                        - maximum.unsqueeze(1)
+                    )
+                    / prototype_temperature,
+                    dim=1,
+                )
+                - torch.log(
+                    prototype_score.new_tensor(float(valid_count))
+                )
+            )
+            beta = prototype_fusion_weight * confidence[class_index]
+            final_score[:, class_index] = (
+                (1 - beta) * base_score[:, class_index]
+                + beta * grounded_score
+            )
+
+        hard_mask, soft_mask = self.sim2mask(
+            final_score,
+            deterministic=deterministic,
+        )
+        mask = hard_mask if hard else soft_mask
+        return mask, final_score
 
 
 @MODELS.register_module()

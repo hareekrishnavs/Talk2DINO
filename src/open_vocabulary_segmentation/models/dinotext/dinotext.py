@@ -20,8 +20,14 @@ import us
 from datasets import get_template
 
 from src.model import ProjectionLayer, VisualProjectionLayer, CLIPLastLayer, DoubleMLP
+from src.e6_prototype_bank import sha256_file
 from src.hooks import average_text_tokens, get_vit_out, feats
 from src.local_weights import DEFAULT_WEIGHT_DIR, load_local_clip, load_local_vision_backbone, load_state_dict_from_local_file, resolve_weight_path
+from src.retrieval_grounded_prototypes import (
+    PrototypeBank,
+    RGTPSettings,
+    RetrievalGroundedPrototypes,
+)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -42,7 +48,8 @@ class DINOText(nn.Module):
     def __init__(
             self, model_name, resize_dim, clip_model_name, proj_class, proj_name, proj_model, avg_self_attn_token=False, disentangled_self_attn_token=True, pre_trained=True,
             unfreeze_last_text_layer=False, is_eval=True, use_avg_text_token=False, keep_cls=False, keep_end_seq=False, with_bg_clean=False,
-            weight_dir=DEFAULT_WEIGHT_DIR, backbone_weights=None, clip_model_path=None, **kwargs
+            weight_dir=DEFAULT_WEIGHT_DIR, backbone_weights=None, clip_model_path=None,
+            retrieval_grounded_prototypes=None, **kwargs
     ):
         super().__init__()
         self.feats = {}
@@ -96,7 +103,8 @@ class DINOText(nn.Module):
             self.clip_model.text_projection.requires_grad = True
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
-        with open(os.path.join('configs', f"{proj_class}.yaml"), 'r') as config_file:
+        projection_config_path = os.path.join('configs', f"{proj_class}.yaml")
+        with open(projection_config_path, 'r') as config_file:
             config = yaml.safe_load(config_file)['model']
             
         ProjClass = getattr(importlib.import_module('src.model'), proj_model)
@@ -105,9 +113,48 @@ class DINOText(nn.Module):
             self.clip_model.transformer.resblocks[-2].register_forward_hook(self.get_clip_second_last_dense_out)
         
             
+        projection_checkpoint_path = os.path.join("weights", f"{proj_name}.pth")
         if pre_trained:
-            self.proj.load_state_dict(torch.load(os.path.join("weights", f"{proj_name}.pth"), 'cpu'))
+            self.proj.load_state_dict(torch.load(projection_checkpoint_path, 'cpu'))
         self.proj.to(device)
+
+        self.rgtp = None
+        self.rgtp_context = None
+        if retrieval_grounded_prototypes is not None:
+            if not pre_trained:
+                raise ValueError(
+                    "retrieval-grounded prototypes require the frozen E3 "
+                    "projection checkpoint"
+                )
+            if not isinstance(retrieval_grounded_prototypes, dict):
+                raise TypeError(
+                    "retrieval_grounded_prototypes must be a configuration mapping"
+                )
+            rgtp_config = dict(retrieval_grounded_prototypes)
+            try:
+                bank_path = rgtp_config.pop("bank_path")
+            except KeyError as error:
+                raise ValueError(
+                    "retrieval_grounded_prototypes.bank_path is required"
+                ) from error
+            settings = RGTPSettings.from_mapping(rgtp_config)
+            bank = PrototypeBank.load(
+                bank_path,
+                expected_config_sha256=sha256_file(
+                    projection_config_path
+                ),
+                expected_checkpoint_sha256=sha256_file(
+                    projection_checkpoint_path
+                ),
+            )
+            if bank.metadata["e3_checkpoint_name"] != os.path.basename(
+                projection_checkpoint_path
+            ):
+                raise ValueError(
+                    "prototype bank E3 checkpoint name does not match the "
+                    "evaluation projection checkpoint"
+                )
+            self.rgtp = RetrievalGroundedPrototypes(bank, settings)
         
         self.masker = DINOTextMasker(similarity_type="cosine")
         self.masker = self.masker.eval()
@@ -214,7 +261,7 @@ class DINOText(nn.Module):
         return tokens
 
     @torch.no_grad()
-    def build_text_embedding(self, text):
+    def build_text_embedding(self, text, return_raw=False):
         """
         Args:
             text (torch.Tensor): [NUM_CLASSES, NUM_TEMPLATES, CONTEXT_LENGTH] text tokens
@@ -261,11 +308,32 @@ class DINOText(nn.Module):
         text_embs = rearrange(text_embs, '(n t) c -> n t c', n=num_classes, t=num_templates)
         # [N, C]
         text_embs = text_embs.mean(dim=1).float()
+        raw_text_embs = text_embs
         if type(self.proj) == ProjectionLayer or type(self.proj) == DoubleMLP:
             text_embs = self.proj.project_clip_txt(text_embs)
         text_embs = us.normalize(text_embs, dim=-1)
 
+        if return_raw:
+            if type(self.proj) != ProjectionLayer:
+                raise TypeError(
+                    "retrieval-grounded prototypes require ProjectionLayer"
+                )
+            return us.normalize(raw_text_embs, dim=-1), text_embs
         return text_embs
+
+    @torch.no_grad()
+    def build_retrieval_grounded_prototypes(
+        self,
+        raw_text_embeddings,
+        mapped_text_embeddings,
+    ):
+        if self.rgtp is None:
+            raise RuntimeError("retrieval-grounded prototypes are not enabled")
+        self.rgtp_context = self.rgtp.generate(
+            raw_text_embeddings,
+            mapped_text_embeddings,
+        )
+        return self.rgtp_context
 
     def apply_pamr(self, image, mask):
         image = F.interpolate(image, mask.shape[-2:], mode="bilinear", align_corners=True)
@@ -337,7 +405,29 @@ class DINOText(nn.Module):
         image_feat = image_feat.reshape(b, np_h, np_w, c).permute(0, 3, 1, 2)
         
         self_attn, self_attn_maps = self.process_self_attention(self.feats['self_attn'], batch_size, num_tokens + self.num_global_tokens, self.num_attn_heads, embed_dim, self.scale, self.num_global_tokens, ret_self_attn_maps=True)
-        mask, simmap = self.masker.forward_seg(image_feat, text_emb, hard=False)  # [B, N, H', W']
+        if self.rgtp is None:
+            mask, simmap = self.masker.forward_seg(
+                image_feat,
+                text_emb,
+                hard=False,
+            )
+        else:
+            if self.rgtp_context is None:
+                raise RuntimeError(
+                    "RGTP class prototypes must be built before mask generation"
+                )
+            mask, simmap = self.masker.forward_seg_with_prototypes(
+                image_feat,
+                text_emb,
+                self.rgtp_context.prototypes,
+                self.rgtp_context.valid_mask,
+                self.rgtp_context.confidence,
+                prototype_temperature=self.rgtp.settings.prototype_temperature,
+                prototype_fusion_weight=(
+                    self.rgtp.settings.prototype_fusion_weight
+                ),
+                hard=False,
+            )
         
         if self.with_bg_clean:
             mask = self.similarity_assignment_weighted(mask, image_feat, self_attn_maps, text_emb, lambda_bg)

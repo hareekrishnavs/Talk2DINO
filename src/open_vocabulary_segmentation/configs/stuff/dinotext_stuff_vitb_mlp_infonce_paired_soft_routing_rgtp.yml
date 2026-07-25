@@ -1,0 +1,16 @@
+_base_: dinotext_stuff_vitb_mlp_infonce_paired_soft_routing_tau010.yml
+model:
+  retrieval_grounded_prototypes:
+    bank_path: ${oc.env:TALK2DINO_PROTOTYPE_BANK}
+    prototype_candidate_pool: 256
+    prototype_retrieval_count: 64
+    retrieval_chunk_size: 32768
+    retrieval_min_similarity: 0.18
+    prototype_mmr_lambda: 0.70
+    retrieval_temperature: 0.07
+    prototype_count: 3
+    prototype_confidence_center: 0.25
+    prototype_confidence_scale: 0.05
+    prototype_anchor_max: 0.30
+    prototype_fusion_weight: 0.25
+    prototype_temperature: 0.10
