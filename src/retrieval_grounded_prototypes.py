@@ -17,6 +17,7 @@ from src.e6_prototype_bank import load_prototype_bank
 @dataclass(frozen=True)
 class RGTPSettings:
     prototype_candidate_pool: int = 256
+    prototype_candidate_pool_max: int = 2048
     prototype_retrieval_count: int = 64
     retrieval_chunk_size: int = 32768
     retrieval_min_similarity: float = 0.18
@@ -32,6 +33,7 @@ class RGTPSettings:
     def __post_init__(self) -> None:
         integer_fields = (
             "prototype_candidate_pool",
+            "prototype_candidate_pool_max",
             "prototype_retrieval_count",
             "retrieval_chunk_size",
             "prototype_count",
@@ -44,6 +46,11 @@ class RGTPSettings:
             raise ValueError(
                 "prototype_retrieval_count cannot exceed "
                 "prototype_candidate_pool"
+            )
+        if self.prototype_candidate_pool > self.prototype_candidate_pool_max:
+            raise ValueError(
+                "prototype_candidate_pool cannot exceed "
+                "prototype_candidate_pool_max"
             )
         finite_fields = (
             "retrieval_min_similarity",
@@ -142,6 +149,7 @@ class PrototypeBank:
     def identity(self) -> tuple[Any, ...]:
         return (
             self.metadata["format_version"],
+            self.metadata["source_feature_sha256"],
             self.metadata["checkpoint_sha256"],
             self.metadata["annotation_id_fingerprint"],
             self.metadata["selected_annotation_count"],
@@ -155,6 +163,10 @@ class GroundedPrototypeBatch:
     confidence: torch.Tensor
     retrieval_indices: torch.Tensor
     retrieval_scores: torch.Tensor
+    candidate_pool_used: torch.Tensor
+    deduplicated_candidate_count: torch.Tensor
+    threshold_valid_count: torch.Tensor
+    selected_retrieval_count: torch.Tensor
 
 
 def _validate_embedding_matrix(value, name):
@@ -249,6 +261,84 @@ def deduplicate_by_image(scores, indices, image_ids):
     if not kept_scores:
         return scores[:0], indices[:0]
     return torch.stack(kept_scores), torch.stack(kept_indices)
+
+
+def select_adaptive_unique_image_candidates(
+    ranked_scores,
+    ranked_indices,
+    image_ids,
+    *,
+    initial_pool,
+    maximum_pool,
+    retrieval_count,
+    minimum_similarity,
+):
+    """Select a deterministic prefix with enough threshold-valid unique images."""
+
+    if (
+        ranked_scores.ndim != 1
+        or ranked_indices.ndim != 1
+        or ranked_scores.shape != ranked_indices.shape
+    ):
+        raise ValueError("ranked scores and indices must be aligned vectors")
+    if ranked_indices.dtype != torch.int64:
+        raise ValueError("ranked_indices must have dtype torch.int64")
+    if image_ids.ndim != 1:
+        raise ValueError("image_ids must be a vector")
+    if not ranked_scores.is_floating_point() or not torch.isfinite(
+        ranked_scores
+    ).all():
+        raise ValueError("ranked_scores must be finite and floating point")
+    for name, value in (
+        ("initial_pool", initial_pool),
+        ("maximum_pool", maximum_pool),
+        ("retrieval_count", retrieval_count),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
+    if initial_pool > maximum_pool:
+        raise ValueError("initial_pool cannot exceed maximum_pool")
+    if not math.isfinite(minimum_similarity):
+        raise ValueError("minimum_similarity must be finite")
+
+    available = min(len(ranked_scores), maximum_pool)
+    if available == 0:
+        return (
+            ranked_scores[:0],
+            ranked_indices[:0],
+            0,
+            0,
+            0,
+        )
+
+    prefix = min(initial_pool, available)
+    while True:
+        scores, indices = deduplicate_by_image(
+            ranked_scores[:prefix],
+            ranked_indices[:prefix],
+            image_ids,
+        )
+        deduplicated_count = len(scores)
+        threshold_mask = scores >= minimum_similarity
+        valid_scores = scores[threshold_mask]
+        valid_indices = indices[threshold_mask]
+        valid_count = len(valid_scores)
+        tail_below_threshold = bool(
+            ranked_scores[prefix - 1] < minimum_similarity
+        )
+        if (
+            valid_count >= retrieval_count
+            or tail_below_threshold
+            or prefix >= available
+        ):
+            return (
+                valid_scores,
+                valid_indices,
+                prefix,
+                deduplicated_count,
+                valid_count,
+            )
+        prefix = min(prefix * 2, available)
 
 
 def _deterministic_argmax(values, tie_break_ids):
@@ -587,7 +677,7 @@ class RetrievalGroundedPrototypes:
         top_scores, top_indices = exact_chunked_topk(
             raw,
             self.bank.caption_embeddings,
-            self.settings.prototype_candidate_pool,
+            self.settings.prototype_candidate_pool_max,
             self.settings.retrieval_chunk_size,
         )
         top_scores = top_scores.cpu()
@@ -609,16 +699,39 @@ class RetrievalGroundedPrototypes:
         retrieval_scores = mapped_cpu.new_zeros(
             (class_count, self.settings.prototype_retrieval_count),
         )
+        candidate_pool_used = torch.zeros(class_count, dtype=torch.int64)
+        deduplicated_candidate_count = torch.zeros(
+            class_count,
+            dtype=torch.int64,
+        )
+        threshold_valid_count = torch.zeros(
+            class_count,
+            dtype=torch.int64,
+        )
+        selected_retrieval_count = torch.zeros(
+            class_count,
+            dtype=torch.int64,
+        )
 
         for class_index in range(class_count):
-            scores, indices = deduplicate_by_image(
+            (
+                scores,
+                indices,
+                pool_used,
+                deduplicated_count,
+                threshold_count,
+            ) = select_adaptive_unique_image_candidates(
                 top_scores[class_index],
                 top_indices[class_index],
                 self.bank.image_ids,
+                initial_pool=self.settings.prototype_candidate_pool,
+                maximum_pool=self.settings.prototype_candidate_pool_max,
+                retrieval_count=self.settings.prototype_retrieval_count,
+                minimum_similarity=self.settings.retrieval_min_similarity,
             )
-            threshold_mask = scores >= self.settings.retrieval_min_similarity
-            scores = scores[threshold_mask]
-            indices = indices[threshold_mask]
+            candidate_pool_used[class_index] = pool_used
+            deduplicated_candidate_count[class_index] = deduplicated_count
+            threshold_valid_count[class_index] = threshold_count
             if len(scores) == 0:
                 continue
             routed = self.bank.routed_dino_embeddings[indices.cpu()].to(
@@ -640,6 +753,7 @@ class RetrievalGroundedPrototypes:
                 self.settings.prototype_confidence_scale,
             )
             selected_count = len(selected_scores)
+            selected_retrieval_count[class_index] = selected_count
             retrieval_indices[class_index, :selected_count] = selected_indices
             retrieval_scores[class_index, :selected_count] = selected_scores
 
@@ -691,6 +805,14 @@ class RetrievalGroundedPrototypes:
             confidence=confidence.to(mapped.device),
             retrieval_indices=retrieval_indices.to(mapped.device),
             retrieval_scores=retrieval_scores.to(mapped.device),
+            candidate_pool_used=candidate_pool_used.to(mapped.device),
+            deduplicated_candidate_count=(
+                deduplicated_candidate_count.to(mapped.device)
+            ),
+            threshold_valid_count=threshold_valid_count.to(mapped.device),
+            selected_retrieval_count=selected_retrieval_count.to(
+                mapped.device
+            ),
         )
         if not torch.isfinite(prototypes).all() or not torch.isfinite(
             confidence

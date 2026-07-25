@@ -8,8 +8,58 @@ import mmcv
 import torch
 
 from .dinotext_seg import DINOTextSegInference
+from utils import get_logger
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def _diagnostic_range(values):
+    values = values.detach().to(device="cpu", dtype=torch.float32)
+    if values.numel() == 0:
+        return "n/a"
+    return (
+        f"{values.min().item():.3g}/"
+        f"{values.mean().item():.3g}/"
+        f"{values.max().item():.3g}"
+    )
+
+
+def _log_rgtp_summary(generated, settings, classnames):
+    selected = generated.selected_retrieval_count.detach().cpu()
+    underfilled = selected < settings.prototype_retrieval_count
+    underfilled_indices = torch.nonzero(
+        underfilled,
+        as_tuple=False,
+    ).flatten().tolist()
+    underfilled_names = [
+        str(classnames[index])
+        for index in underfilled_indices
+        if index < len(classnames)
+    ]
+    valid_prototypes = generated.valid_mask.sum(dim=-1)
+    effective_beta = (
+        generated.confidence
+        * settings.prototype_fusion_weight
+        * generated.valid_mask.any(dim=-1).to(generated.confidence.dtype)
+    )
+    names = (
+        f"; underfilled_classes={','.join(underfilled_names)}"
+        if underfilled_names
+        else ""
+    )
+    get_logger().info(
+        "E6 RGTP summary (min/mean/max): "
+        f"candidate_pool={_diagnostic_range(generated.candidate_pool_used)}; "
+        "valid_unique="
+        f"{_diagnostic_range(generated.threshold_valid_count)}; "
+        f"selected={_diagnostic_range(selected)}; "
+        f"underfilled={len(underfilled_indices)}/{len(classnames)}; "
+        f"confidence={_diagnostic_range(generated.confidence)}; "
+        f"valid_prototypes={_diagnostic_range(valid_prototypes)}; "
+        f"effective_beta={_diagnostic_range(effective_beta)}"
+        f"{names}"
+    )
+
 
 def build_dinotext_seg_inference(
     model,
@@ -31,10 +81,11 @@ def build_dinotext_seg_inference(
             text_tokens,
             return_raw=True,
         )
-        model.build_retrieval_grounded_prototypes(
+        generated = model.build_retrieval_grounded_prototypes(
             raw_text_embedding,
             text_embedding,
         )
+        _log_rgtp_summary(generated, model.rgtp.settings, classnames)
     kwargs = dict(with_bg=with_bg)
     if hasattr(dset_cfg, "test_cfg"):
         kwargs["test_cfg"] = dset_cfg.test_cfg

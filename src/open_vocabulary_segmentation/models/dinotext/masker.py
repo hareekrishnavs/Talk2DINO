@@ -14,6 +14,7 @@ from models.builder import MODELS
 from models.dinotext.modules import FeatureEncoder
 
 import us
+from src.retrieval_grounded_prototypes import fuse_prototype_scores
 
 
 @MODELS.register_module()
@@ -304,32 +305,14 @@ class DINOTextMasker(nn.Module):
             image_feat,
             prototypes,
         )
-        final_score = base_score.clone()
-        for class_index in range(prototypes.shape[0]):
-            class_valid = valid_mask[class_index]
-            valid_count = int(class_valid.sum().item())
-            if valid_count == 0:
-                continue
-            class_scores = prototype_score[:, class_index, class_valid]
-            maximum = class_scores.amax(dim=1)
-            grounded_score = maximum + prototype_temperature * (
-                torch.logsumexp(
-                    (
-                        class_scores
-                        - maximum.unsqueeze(1)
-                    )
-                    / prototype_temperature,
-                    dim=1,
-                )
-                - torch.log(
-                    prototype_score.new_tensor(float(valid_count))
-                )
-            )
-            beta = prototype_fusion_weight * confidence[class_index]
-            final_score[:, class_index] = (
-                (1 - beta) * base_score[:, class_index]
-                + beta * grounded_score
-            )
+        final_score = fuse_prototype_scores(
+            base_score.permute(0, 2, 3, 1),
+            prototype_score.permute(0, 3, 4, 1, 2),
+            valid_mask,
+            confidence,
+            prototype_fusion_weight=prototype_fusion_weight,
+            prototype_temperature=prototype_temperature,
+        ).permute(0, 3, 1, 2)
 
         hard_mask, soft_mask = self.sim2mask(
             final_score,

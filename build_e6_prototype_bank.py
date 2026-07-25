@@ -449,6 +449,7 @@ def build_prototype_bank(
             "pass --overwrite explicitly"
         )
 
+    source_feature_sha256 = sha256_file(source_features_path)
     images, annotations = _load_source_archive(source_features_path)
     images_by_id, source_annotation_ids, source_annotation_image_ids = _index_source(
         images,
@@ -546,6 +547,11 @@ def build_prototype_bank(
             f"missing={missing_ids[:20]}, extra={extra_ids[:20]}"
         )
 
+    if sha256_file(source_features_path) != source_feature_sha256:
+        raise RuntimeError(
+            "source feature archive changed during bank construction: "
+            f"{source_features_path}"
+        )
     if sha256_file(model_config_path) != config_sha256:
         raise RuntimeError(
             f"E3 configuration changed during bank construction: {model_config_path}"
@@ -559,6 +565,7 @@ def build_prototype_bank(
         "complete": complete,
         "is_pilot": is_pilot,
         "source_feature_path": str(source_features_path),
+        "source_feature_sha256": source_feature_sha256,
         "source_image_count": source_image_count,
         "source_annotation_count": source_annotation_count,
         "selected_annotation_count": selected_annotation_count,
@@ -594,6 +601,7 @@ def build_prototype_bank(
         require_complete=True,
         expected_config_path=model_config_path,
         expected_checkpoint_path=checkpoint_path,
+        expected_source_features_path=source_features_path,
     )
     _publish_atomic(bank, output_path, overwrite=overwrite)
     return summary

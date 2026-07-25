@@ -3,6 +3,7 @@ model:
   retrieval_grounded_prototypes:
     bank_path: ${oc.env:TALK2DINO_PROTOTYPE_BANK}
     prototype_candidate_pool: 256
+    prototype_candidate_pool_max: 2048
     prototype_retrieval_count: 64
     retrieval_chunk_size: 32768
     retrieval_min_similarity: 0.18

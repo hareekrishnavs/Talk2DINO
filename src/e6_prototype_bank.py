@@ -19,7 +19,7 @@ import torch
 import torch.nn.functional as F
 
 
-FORMAT_VERSION = "talk2dino-e6-rgtp-v2"
+FORMAT_VERSION = "talk2dino-e6-rgtp-v3"
 EXPECTED_E3_CONFIG_NAME = (
     "vitb_mlp_infonce_paired_soft_routing_tau010.yaml"
 )
@@ -45,6 +45,7 @@ _REQUIRED_METADATA_KEYS = {
     "complete",
     "is_pilot",
     "source_feature_path",
+    "source_feature_sha256",
     "source_image_count",
     "source_annotation_count",
     "selected_annotation_count",
@@ -313,6 +314,7 @@ def validate_prototype_bank(
     require_complete: bool = True,
     expected_config_path: os.PathLike[str] | str | None = None,
     expected_checkpoint_path: os.PathLike[str] | str | None = None,
+    expected_source_features_path: os.PathLike[str] | str | None = None,
     norm_tolerance: float = DEFAULT_NORM_TOLERANCE,
 ) -> dict[str, Any]:
     """Validate an in-memory bank and return a compact validation summary."""
@@ -343,6 +345,22 @@ def validate_prototype_bank(
     metadata = bank["metadata"]
     if not isinstance(metadata, Mapping):
         raise PrototypeBankValidationError("metadata must be a mapping")
+    if "format_version" not in metadata:
+        raise PrototypeBankValidationError(
+            "metadata is missing keys: ['format_version']"
+        )
+    if metadata["format_version"] != FORMAT_VERSION:
+        legacy_hint = (
+            "; v1/v2 banks must be rebuilt"
+            if metadata["format_version"]
+            in {"talk2dino-e6-rgtp-v1", "talk2dino-e6-rgtp-v2"}
+            else ""
+        )
+        raise PrototypeBankValidationError(
+            "unsupported metadata.format_version: "
+            f"{metadata['format_version']!r}; expected {FORMAT_VERSION!r}"
+            f"{legacy_hint}"
+        )
     missing_metadata = sorted(_REQUIRED_METADATA_KEYS.difference(metadata))
     if missing_metadata:
         raise PrototypeBankValidationError(
@@ -353,11 +371,6 @@ def validate_prototype_bank(
     if unexpected_metadata:
         raise PrototypeBankValidationError(
             f"metadata has unknown keys: {unexpected_metadata}"
-        )
-    if metadata["format_version"] != FORMAT_VERSION:
-        raise PrototypeBankValidationError(
-            "unsupported metadata.format_version: "
-            f"{metadata['format_version']!r}; expected {FORMAT_VERSION!r}"
         )
     if type(metadata["complete"]) is not bool:
         raise PrototypeBankValidationError("metadata.complete must be a boolean")
@@ -509,6 +522,14 @@ def validate_prototype_bank(
         raise PrototypeBankValidationError(
             "metadata.e3_config_sha256 must be a lowercase SHA256 digest"
         )
+    source_feature_sha256 = metadata["source_feature_sha256"]
+    if (
+        not isinstance(source_feature_sha256, str)
+        or _HEX_SHA256.fullmatch(source_feature_sha256) is None
+    ):
+        raise PrototypeBankValidationError(
+            "metadata.source_feature_sha256 must be a lowercase SHA256 digest"
+        )
     if metadata["e3_checkpoint_name"] != EXPECTED_E3_CHECKPOINT_NAME:
         raise PrototypeBankValidationError(
             "metadata.e3_checkpoint_name does not identify the required E3 "
@@ -595,6 +616,20 @@ def validate_prototype_bank(
                 f"{expected_checkpoint_path.name!r}"
             )
 
+    if expected_source_features_path is not None:
+        expected_source_features_path = Path(expected_source_features_path)
+        if not expected_source_features_path.is_file():
+            raise PrototypeBankValidationError(
+                "expected source feature archive does not exist: "
+                f"{expected_source_features_path}"
+            )
+        expected_source_digest = sha256_file(expected_source_features_path)
+        if source_feature_sha256 != expected_source_digest:
+            raise PrototypeBankValidationError(
+                "prototype bank source feature SHA256 does not match the "
+                f"expected archive {expected_source_features_path}"
+            )
+
     return {
         "format_version": metadata["format_version"],
         "complete": metadata["complete"],
@@ -606,6 +641,7 @@ def validate_prototype_bank(
         "source_git_commit": source_git_commit,
         "source_git_dirty": source_git_dirty,
         "source_git_diff_sha256": source_git_diff_sha256,
+        "source_feature_sha256": source_feature_sha256,
         "e3_config_sha256": config_sha256,
         "checkpoint_sha256": checkpoint_sha256,
         "annotation_id_fingerprint": actual_fingerprint,
@@ -624,6 +660,7 @@ def load_prototype_bank(
     require_complete: bool = True,
     expected_config_path: os.PathLike[str] | str | None = None,
     expected_checkpoint_path: os.PathLike[str] | str | None = None,
+    expected_source_features_path: os.PathLike[str] | str | None = None,
     norm_tolerance: float = DEFAULT_NORM_TOLERANCE,
 ) -> dict[str, Any]:
     """Load a CPU bank, enforcing full/non-pilot safety by default."""
@@ -639,6 +676,7 @@ def load_prototype_bank(
         require_complete=require_complete,
         expected_config_path=expected_config_path,
         expected_checkpoint_path=expected_checkpoint_path,
+        expected_source_features_path=expected_source_features_path,
         norm_tolerance=norm_tolerance,
     )
     return bank

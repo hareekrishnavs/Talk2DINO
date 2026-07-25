@@ -45,6 +45,13 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Expected E3 checkpoint; verifies both its name and SHA256.",
     )
+    parser.add_argument(
+        "--source_features",
+        "--source-features",
+        type=Path,
+        default=None,
+        help="Expected source archive; verifies metadata.source_feature_sha256.",
+    )
     return parser.parse_args()
 
 
@@ -60,6 +67,7 @@ def main() -> None:
         require_complete=args.require_complete,
         expected_config_path=args.config,
         expected_checkpoint_path=args.checkpoint,
+        expected_source_features_path=args.source_features,
     )
     print(json.dumps(summary, indent=2, sort_keys=True))
 

@@ -1,4 +1,5 @@
 import copy
+import math
 import subprocess
 import sys
 from pathlib import Path
@@ -9,6 +10,7 @@ import torch.nn.functional as F
 import yaml
 
 import build_e6_prototype_bank as bank_builder
+import src.retrieval_grounded_prototypes as rgtp_module
 from build_e6_prototype_bank import build_prototype_bank, source_git_provenance
 from src.e6_prototype_bank import (
     FORMAT_VERSION,
@@ -32,6 +34,7 @@ from src.retrieval_grounded_prototypes import (
     fuse_prototype_scores,
     normalized_logsumexp,
     retrieval_confidence,
+    select_adaptive_unique_image_candidates,
 )
 
 
@@ -135,6 +138,7 @@ def bank_payload(
             "complete": complete,
             "is_pilot": pilot,
             "source_feature_path": "/synthetic/train.pth",
+            "source_feature_sha256": "9" * 64,
             "source_image_count": entries,
             "source_annotation_count": source_annotations,
             "selected_annotation_count": entries,
@@ -285,6 +289,51 @@ def test_bank_schema_shapes_dtypes_norms_and_finiteness():
     assert torch.isfinite(payload["routed_dino_embeddings"]).all()
 
 
+def test_source_feature_sha256_validation_and_identity(tmp_path):
+    source_path = tmp_path / "train.pth"
+    source_path.write_bytes(b"synthetic source archive")
+    payload = bank_payload()
+    payload["metadata"]["source_feature_sha256"] = sha256_file(source_path)
+    summary = validate_prototype_bank(
+        payload,
+        expected_source_features_path=source_path,
+    )
+    assert summary["source_feature_sha256"] == sha256_file(source_path)
+
+    first = PrototypeBank(
+        payload["caption_embeddings"],
+        payload["routed_dino_embeddings"],
+        payload["image_ids"],
+        payload["annotation_ids"],
+        payload["metadata"],
+    )
+    changed = copy.deepcopy(payload["metadata"])
+    changed["source_feature_sha256"] = "8" * 64
+    second = PrototypeBank(
+        payload["caption_embeddings"],
+        payload["routed_dino_embeddings"],
+        payload["image_ids"],
+        payload["annotation_ids"],
+        changed,
+    )
+    assert first.identity != second.identity
+
+
+def test_malformed_and_mismatched_source_feature_sha256_are_rejected(tmp_path):
+    malformed = bank_payload()
+    malformed["metadata"]["source_feature_sha256"] = "not-a-sha256"
+    with pytest.raises(PrototypeBankValidationError, match="source_feature"):
+        validate_prototype_bank(malformed)
+
+    source_path = tmp_path / "train.pth"
+    source_path.write_bytes(b"different archive")
+    with pytest.raises(PrototypeBankValidationError, match="source feature SHA256"):
+        validate_prototype_bank(
+            bank_payload(),
+            expected_source_features_path=source_path,
+        )
+
+
 def test_bank_validator_enforces_e3_identity_tau_and_int64_id_tensors():
     wrong_tau = bank_payload()
     wrong_tau["metadata"]["routing_temperature"] = 0.20
@@ -387,13 +436,11 @@ def test_clean_committed_bank_is_accepted(tmp_path):
     assert loaded["metadata"]["source_git_diff_sha256"] is None
 
 
-def test_ambiguous_legacy_bank_is_rejected():
+def test_v2_bank_is_explicitly_rejected():
     payload = bank_payload()
-    payload["metadata"]["format_version"] = "talk2dino-e6-rgtp-v1"
-    payload["metadata"].pop("e3_config_sha256")
-    payload["metadata"].pop("source_git_dirty")
-    payload["metadata"].pop("source_git_diff_sha256")
-    with pytest.raises(PrototypeBankValidationError, match="missing keys"):
+    payload["metadata"]["format_version"] = "talk2dino-e6-rgtp-v2"
+    payload["metadata"].pop("source_feature_sha256")
+    with pytest.raises(PrototypeBankValidationError, match="v1/v2 banks"):
         validate_prototype_bank(payload)
 
 
@@ -420,6 +467,7 @@ def test_builder_writes_atomic_compact_pilot_and_refuses_overwrite(
     assert summary["entries"] == 2
     assert summary["complete"] is True
     assert summary["is_pilot"] is True
+    assert summary["source_feature_sha256"] == sha256_file(source_path)
     assert not list(tmp_path.glob(".bank.pth.*.tmp"))
     with pytest.raises(FileExistsError):
         build_prototype_bank(
@@ -429,6 +477,45 @@ def test_builder_writes_atomic_compact_pilot_and_refuses_overwrite(
             checkpoint_path=checkpoint_path,
             max_annotations=2,
         )
+
+
+def test_source_archive_mutation_before_publication_fails(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        bank_builder,
+        "source_git_provenance",
+        lambda *args, **kwargs: clean_provenance(),
+    )
+    config_path, checkpoint_path, source_path = write_builder_inputs(tmp_path)
+    output_path = tmp_path / "mutated-source-bank.pth"
+    real_sha256_file = bank_builder.sha256_file
+    source_hash_calls = 0
+
+    def changing_source_digest(path):
+        nonlocal source_hash_calls
+        if Path(path).resolve() == source_path.resolve():
+            source_hash_calls += 1
+            if source_hash_calls > 1:
+                return "0" * 64
+        return real_sha256_file(path)
+
+    monkeypatch.setattr(
+        bank_builder,
+        "sha256_file",
+        changing_source_digest,
+    )
+    with pytest.raises(RuntimeError, match="source feature archive changed"):
+        build_prototype_bank(
+            source_features_path=source_path,
+            output_path=output_path,
+            model_config_path=config_path,
+            checkpoint_path=checkpoint_path,
+            batch_size=1,
+            max_annotations=2,
+        )
+    assert not output_path.exists()
 
 
 def test_explicit_dirty_pilot_bank_records_provenance(tmp_path, monkeypatch):
@@ -532,6 +619,133 @@ def test_repeated_image_ids_keep_highest_scoring_caption():
     )
     torch.testing.assert_close(kept_scores, torch.tensor([0.9, 0.7, 0.6]))
     torch.testing.assert_close(kept_indices, torch.tensor([1, 2, 3]))
+
+
+def test_adaptive_retrieval_matches_fixed_256_prefix_when_sufficient():
+    bank = runtime_bank(300)
+    raw = normalized(1, 512, 101)
+    mapped = normalized(1, 768, 102)
+    common = {
+        "prototype_candidate_pool": 256,
+        "prototype_retrieval_count": 64,
+        "retrieval_chunk_size": 71,
+        "retrieval_min_similarity": -1,
+    }
+    fixed = RetrievalGroundedPrototypes(
+        bank,
+        RGTPSettings(prototype_candidate_pool_max=256, **common),
+    ).generate(raw, mapped)
+    adaptive = RetrievalGroundedPrototypes(
+        bank,
+        RGTPSettings(prototype_candidate_pool_max=300, **common),
+    ).generate(raw, mapped)
+
+    torch.testing.assert_close(
+        adaptive.retrieval_indices,
+        fixed.retrieval_indices,
+    )
+    torch.testing.assert_close(adaptive.retrieval_scores, fixed.retrieval_scores)
+    torch.testing.assert_close(adaptive.prototypes, fixed.prototypes)
+    torch.testing.assert_close(adaptive.confidence, fixed.confidence)
+    torch.testing.assert_close(
+        adaptive.candidate_pool_used,
+        torch.tensor([256]),
+    )
+
+
+def test_repeated_images_force_adaptive_expansion_from_256_to_512():
+    scores = torch.linspace(1.0, 0.5, 512)
+    indices = torch.arange(512, dtype=torch.int64)
+    image_ids = torch.arange(512, dtype=torch.int64) // 8
+    result = select_adaptive_unique_image_candidates(
+        scores,
+        indices,
+        image_ids,
+        initial_pool=256,
+        maximum_pool=512,
+        retrieval_count=64,
+        minimum_similarity=0.0,
+    )
+    selected_scores, selected_indices, pool_used, deduplicated, valid = result
+    assert pool_used == 512
+    assert deduplicated == 64
+    assert valid == 64
+    assert len(selected_scores) == len(selected_indices) == 64
+
+
+def test_adaptive_expansion_uses_deterministic_doubling_prefixes(
+    monkeypatch,
+):
+    observed_prefixes = []
+    original = rgtp_module.deduplicate_by_image
+
+    def recording_deduplication(scores, indices, image_ids):
+        observed_prefixes.append(len(scores))
+        return original(scores, indices, image_ids)
+
+    monkeypatch.setattr(
+        rgtp_module,
+        "deduplicate_by_image",
+        recording_deduplication,
+    )
+    scores = torch.linspace(1.0, 0.5, 32)
+    indices = torch.arange(32, dtype=torch.int64)
+    select_adaptive_unique_image_candidates(
+        scores,
+        indices,
+        indices.clone(),
+        initial_pool=4,
+        maximum_pool=32,
+        retrieval_count=17,
+        minimum_similarity=0.0,
+    )
+    assert observed_prefixes == [4, 8, 16, 32]
+
+
+def test_adaptive_expansion_stops_when_prefix_tail_is_below_threshold():
+    scores = torch.cat((torch.full((50,), 0.8), torch.full((462,), 0.1)))
+    indices = torch.arange(512, dtype=torch.int64)
+    result = select_adaptive_unique_image_candidates(
+        scores,
+        indices,
+        indices.clone(),
+        initial_pool=256,
+        maximum_pool=512,
+        retrieval_count=64,
+        minimum_similarity=0.5,
+    )
+    selected_scores, _, pool_used, deduplicated, valid = result
+    assert pool_used == 256
+    assert deduplicated == 256
+    assert valid == len(selected_scores) == 50
+
+
+def test_adaptive_retrieval_stops_at_maximum_with_finite_fallback():
+    scores = torch.linspace(1.0, 0.5, 300)
+    indices = torch.arange(300, dtype=torch.int64)
+    image_ids = torch.arange(300, dtype=torch.int64) % 10
+    arguments = {
+        "initial_pool": 128,
+        "maximum_pool": 256,
+        "retrieval_count": 64,
+        "minimum_similarity": 0.0,
+    }
+    first = select_adaptive_unique_image_candidates(
+        scores,
+        indices,
+        image_ids,
+        **arguments,
+    )
+    second = select_adaptive_unique_image_candidates(
+        scores,
+        indices,
+        image_ids,
+        **arguments,
+    )
+    assert first[2:] == (256, 10, 10)
+    assert torch.equal(first[0], second[0])
+    assert torch.equal(first[1], second[1])
+    assert torch.isfinite(first[0]).all()
 
 
 def test_mmr_is_deterministic_and_selects_diverse_candidates():
@@ -653,6 +867,53 @@ def test_one_and_fewer_than_k_valid_prototypes_are_finite():
     assert torch.isfinite(torch.sigmoid(result)).all()
 
 
+def test_vectorized_fusion_matches_independent_mixed_validity_reference():
+    torch.manual_seed(61)
+    base = torch.randn(2, 3, 4)
+    prototype_scores = torch.randn(2, 3, 4, 3)
+    prototype_scores[..., 0, :] = 1e4
+    valid = torch.tensor(
+        [
+            [False, False, False],
+            [True, False, False],
+            [True, True, False],
+            [True, True, True],
+        ]
+    )
+    confidence = torch.tensor([0.9, 0.8, 0.7, 0.6])
+    actual = fuse_prototype_scores(
+        base,
+        prototype_scores,
+        valid,
+        confidence,
+        prototype_fusion_weight=0.25,
+        prototype_temperature=0.10,
+    )
+
+    expected = base.clone()
+    for class_index in range(4):
+        class_scores = prototype_scores[..., class_index, :][
+            ..., valid[class_index]
+        ]
+        if class_scores.shape[-1] == 0:
+            continue
+        grounded = 0.10 * (
+            torch.logsumexp(class_scores / 0.10, dim=-1)
+            - math.log(class_scores.shape[-1])
+        )
+        beta = 0.25 * confidence[class_index]
+        expected[..., class_index] = (
+            (1 - beta) * base[..., class_index] + beta * grounded
+        )
+
+    torch.testing.assert_close(actual, expected)
+    assert torch.equal(actual[..., 0], base[..., 0])
+    assert actual.shape == base.shape
+    assert actual.dtype == base.dtype
+    assert actual.device == base.device
+    assert torch.isfinite(actual).all()
+
+
 def test_generation_cache_and_projection_state_isolation():
     bank = runtime_bank(12, repeated_images=True)
     settings = RGTPSettings(
@@ -676,6 +937,14 @@ def test_generation_cache_and_projection_state_isolation():
     assert rgtp.cache_misses == 2
     assert first.prototypes.shape == (2, 3, 768)
     assert first.valid_mask.shape == (2, 3)
+    for diagnostic in (
+        first.candidate_pool_used,
+        first.deduplicated_candidate_count,
+        first.threshold_valid_count,
+        first.selected_retrieval_count,
+    ):
+        assert diagnostic.shape == (2,)
+        assert diagnostic.dtype == torch.int64
     assert first.valid_mask.sum(dim=-1).le(3).all()
     assert torch.isfinite(first.prototypes).all()
     assert torch.isfinite(first.confidence).all()
@@ -737,7 +1006,9 @@ def test_generation_no_candidate_and_single_candidate_paths_are_finite():
     assert torch.isfinite(none.prototypes).all()
 
 
-def test_masker_explicit_prototype_path_preserves_exact_fallbacks():
+def test_masker_explicit_prototype_path_preserves_exact_fallbacks(
+    monkeypatch,
+):
     segmentation_root = (
         Path(__file__).parents[1] / "src" / "open_vocabulary_segmentation"
     )
@@ -751,7 +1022,14 @@ def test_masker_explicit_prototype_path_preserves_exact_fallbacks():
     image = torch.randn(2, 6, 3, 4)
     text = normalized(4, 6, 40)
     prototypes = normalized(12, 6, 41).reshape(4, 3, 6)
-    valid = torch.ones(4, 3, dtype=torch.bool)
+    valid = torch.tensor(
+        [
+            [False, False, False],
+            [True, False, False],
+            [True, True, False],
+            [True, True, True],
+        ]
+    )
     confidence = torch.rand(4)
     baseline_mask, baseline_scores = masker.forward_seg(image, text)
     zero_mask, zero_scores = masker.forward_seg_with_prototypes(
@@ -774,6 +1052,15 @@ def test_masker_explicit_prototype_path_preserves_exact_fallbacks():
     assert torch.equal(empty_scores, baseline_scores)
     assert torch.equal(empty_mask, baseline_mask)
 
+    original_sigmoid = torch.sigmoid
+    sigmoid_calls = 0
+
+    def counting_sigmoid(value):
+        nonlocal sigmoid_calls
+        sigmoid_calls += 1
+        return original_sigmoid(value)
+
+    monkeypatch.setattr(torch, "sigmoid", counting_sigmoid)
     actual_mask, actual_scores = masker.forward_seg_with_prototypes(
         image,
         text,
@@ -783,6 +1070,7 @@ def test_masker_explicit_prototype_path_preserves_exact_fallbacks():
         prototype_temperature=0.10,
         prototype_fusion_weight=0.25,
     )
+    assert sigmoid_calls == 1
     normalized_image = F.normalize(image, dim=1)
     expected_base = torch.einsum(
         "b d h w, n d -> b n h w",
@@ -794,14 +1082,25 @@ def test_masker_explicit_prototype_path_preserves_exact_fallbacks():
         normalized_image,
         prototypes,
     )
-    expected_grounded = 0.10 * (
-        torch.logsumexp(expected_modes / 0.10, dim=2)
-        - torch.log(torch.tensor(3.0))
-    )
-    beta = 0.25 * confidence[None, :, None, None]
-    expected_scores = (1 - beta) * expected_base + beta * expected_grounded
+    expected_scores = expected_base.clone()
+    for class_index in range(4):
+        class_modes = expected_modes[:, class_index, valid[class_index]]
+        if class_modes.shape[1] == 0:
+            continue
+        expected_grounded = 0.10 * (
+            torch.logsumexp(class_modes / 0.10, dim=1)
+            - math.log(class_modes.shape[1])
+        )
+        beta = 0.25 * confidence[class_index]
+        expected_scores[:, class_index] = (
+            (1 - beta) * expected_base[:, class_index]
+            + beta * expected_grounded
+        )
     torch.testing.assert_close(actual_scores, expected_scores)
-    torch.testing.assert_close(actual_mask, torch.sigmoid(expected_scores))
+    assert torch.equal(actual_scores[:, 0], expected_base[:, 0])
+    torch.testing.assert_close(actual_mask, original_sigmoid(expected_scores))
+    assert torch.isfinite(actual_scores).all()
+    assert torch.isfinite(actual_mask).all()
 
 
 def test_e6_config_inherits_e3_without_experiment_contamination():
