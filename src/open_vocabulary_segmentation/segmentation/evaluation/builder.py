@@ -34,10 +34,10 @@ def build_seg_dataloader(dataset):
     data_loader = build_dataloader(
         dataset,
         samples_per_gpu=1,
-        workers_per_gpu=1,
+        workers_per_gpu=0,
         dist=True,
         shuffle=False,
-        persistent_workers=True,
+        persistent_workers=False,
         pin_memory=False,
     )
     return data_loader
