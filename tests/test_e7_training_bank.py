@@ -22,6 +22,7 @@ from src.e7_training_bank import (
     route_e7_annotation_batch,
     validate_e7_training_bank,
 )
+from train_e7_prototype_adapter import _publish_verified_checkpoint
 
 
 class SyntheticProjection(torch.nn.Module):
@@ -402,3 +403,91 @@ def test_mutated_provenance_preserves_existing_output(
         )
     assert output.read_bytes() == b"existing output"
     assert not list(tmp_path.glob(".bank.pth.*.tmp"))
+
+
+def test_unchanged_adapter_training_provenance_allows_publication(tmp_path):
+    repository = tmp_path / "adapter-clean"
+    initialized_repository(repository)
+    initial = source_git_provenance(repository)
+    output = tmp_path / "adapter.pth"
+    _publish_verified_checkpoint(
+        {"adapter": torch.tensor([1.0])},
+        output,
+        repository_root=repository,
+        initial_provenance=initial,
+        allow_dirty_source=False,
+    )
+    assert output.is_file()
+
+
+@pytest.mark.parametrize("mutation", ("tracked", "staged", "untracked"))
+@pytest.mark.parametrize("existing_checkpoint", (False, True))
+def test_adapter_training_source_mutation_rejects_publication_and_preserves_output(
+    tmp_path,
+    mutation,
+    existing_checkpoint,
+):
+    repository = tmp_path / f"adapter-{mutation}-{existing_checkpoint}"
+    tracked = initialized_repository(repository)
+    initial = source_git_provenance(repository)
+    output = tmp_path / f"adapter-{mutation}-{existing_checkpoint}.pth"
+    original_sha256 = None
+    original_bytes = None
+    if existing_checkpoint:
+        output.write_bytes(b"previous adapter checkpoint")
+        original_bytes = output.read_bytes()
+        original_sha256 = sha256_file(output)
+    if mutation == "untracked":
+        (repository / "new_adapter_source.py").write_text("NEW = True\n")
+    else:
+        tracked.write_text("VERSION = 2\n")
+        if mutation == "staged":
+            _git(repository, "add", "implementation.py")
+    with pytest.raises(
+        E7TrainingBankValidationError,
+        match="Git source provenance changed during E7 adapter training",
+    ):
+        _publish_verified_checkpoint(
+            {"adapter": torch.tensor([2.0])},
+            output,
+            repository_root=repository,
+            initial_provenance=initial,
+            allow_dirty_source=False,
+        )
+    if existing_checkpoint:
+        assert output.read_bytes() == original_bytes
+        assert sha256_file(output) == original_sha256
+    else:
+        assert not output.exists()
+    assert not list(tmp_path.glob(f".{output.name}.*.tmp"))
+
+
+def test_unchanged_dirty_pilot_fingerprint_is_required_for_publication(tmp_path):
+    repository = tmp_path / "adapter-dirty-pilot"
+    initialized_repository(repository)
+    dirty_source = repository / "pilot_source.py"
+    dirty_source.write_text("VERSION = 1\n")
+    initial = source_git_provenance(repository, allow_dirty_source=True)
+    output = tmp_path / "dirty-pilot-adapter.pth"
+    _publish_verified_checkpoint(
+        {"adapter": torch.tensor([1.0])},
+        output,
+        repository_root=repository,
+        initial_provenance=initial,
+        allow_dirty_source=True,
+    )
+    original = output.read_bytes()
+    dirty_source.write_text("VERSION = 2\n")
+    with pytest.raises(
+        E7TrainingBankValidationError,
+        match="Git source provenance changed during E7 adapter training",
+    ):
+        _publish_verified_checkpoint(
+            {"adapter": torch.tensor([2.0])},
+            output,
+            repository_root=repository,
+            initial_provenance=initial,
+            allow_dirty_source=True,
+        )
+    assert output.read_bytes() == original
+    assert not list(tmp_path.glob(f".{output.name}.*.tmp"))

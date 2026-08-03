@@ -15,7 +15,10 @@ from typing import Any, Mapping
 import torch
 import yaml
 
-from build_e7_training_bank import source_git_provenance
+from build_e7_training_bank import (
+    _require_unchanged_git_provenance,
+    source_git_provenance,
+)
 from src.e7_prototype_adapter import (
     ADAPTER_CHECKPOINT_FORMAT,
     RetrievalPrototypeAdapter,
@@ -364,6 +367,29 @@ def _checkpoint(
     }
 
 
+def _publish_verified_checkpoint(
+    payload: Mapping[str, Any],
+    output_path: Path,
+    *,
+    repository_root: Path,
+    initial_provenance: Mapping[str, Any],
+    allow_dirty_source: bool,
+) -> None:
+    """Publish only while adapter-training source provenance is unchanged."""
+
+    try:
+        _require_unchanged_git_provenance(
+            repository_root,
+            initial_provenance,
+            allow_dirty_source=allow_dirty_source,
+        )
+    except E7TrainingBankValidationError as error:
+        raise E7TrainingBankValidationError(
+            "Git source provenance changed during E7 adapter training"
+        ) from error
+    _atomic_save(payload, output_path)
+
+
 def train_adapter(
     *,
     config_path: Path,
@@ -380,8 +406,9 @@ def train_adapter(
     if output_path.exists() and not overwrite:
         raise FileExistsError(f"refusing to overwrite adapter checkpoint: {output_path}")
     config = _load_config(config_path)
+    repository_root = Path(__file__).resolve().parent
     provenance = source_git_provenance(
-        Path(__file__).resolve().parent,
+        repository_root,
         allow_dirty_source=allow_dirty_source,
     )
     if provenance["source_git_dirty"] and not (
@@ -483,7 +510,7 @@ def train_adapter(
             best_epoch = epoch
             stale_epochs = 0
             if config["save_best_model"]:
-                _atomic_save(
+                _publish_verified_checkpoint(
                     _checkpoint(
                         adapter,
                         config,
@@ -494,13 +521,16 @@ def train_adapter(
                         metric,
                     ),
                     output_path,
+                    repository_root=repository_root,
+                    initial_provenance=provenance,
+                    allow_dirty_source=allow_dirty_source,
                 )
         else:
             stale_epochs += 1
             if stale_epochs >= config["early_stopping_patience"]:
                 break
     if not config["save_best_model"]:
-        _atomic_save(
+        _publish_verified_checkpoint(
             _checkpoint(
                 adapter,
                 config,
@@ -511,6 +541,9 @@ def train_adapter(
                 history[-1]["validation"]["loss"],
             ),
             output_path,
+            repository_root=repository_root,
+            initial_provenance=provenance,
+            allow_dirty_source=allow_dirty_source,
         )
     return {
         "best_epoch": best_epoch,

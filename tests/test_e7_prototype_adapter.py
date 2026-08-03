@@ -1,3 +1,4 @@
+import copy
 import math
 from dataclasses import asdict
 from pathlib import Path
@@ -54,10 +55,14 @@ def pair_bank(*, split, commit="e" * 40, dirty=False):
         "metadata": {
             "format_version": FORMAT_VERSION,
             "split_name": split,
+            "source_feature_sha256": ("a" if split == "train" else "b") * 64,
+            "annotation_id_fingerprint": ("c" if split == "train" else "d") * 64,
+            "selected_annotation_count": 4,
             "source_git_commit": commit,
             "source_git_dirty": dirty,
-            "e3_config_sha256": "c" * 64,
-            "e3_checkpoint_sha256": "d" * 64,
+            "e3_config_sha256": "e" * 64,
+            "e3_checkpoint_sha256": "f" * 64,
+            "routing_temperature": 0.10,
             "dimensions": {
                 "caption_embeddings": 512,
                 "mapped_query_embeddings": 768,
@@ -570,6 +575,94 @@ def test_bank_pair_rejection_precedes_adapter_and_training_setup(
     assert constructed == []
 
 
+@pytest.mark.parametrize("save_best_model", (True, False))
+def test_train_adapter_uses_verified_publication_for_best_and_final_paths(
+    tmp_path,
+    monkeypatch,
+    save_best_model,
+):
+    config = {
+        "seed": 42,
+        "num_epochs": 1,
+        "batch_size": 2,
+        "learning_rate": 1e-4,
+        "weight_decay": 1e-4,
+        "optimizer": "AdamW",
+        "scheduler": "cosine",
+        "warmup_ratio": 0.05,
+        "amp_dtype": "bfloat16",
+        "save_best_model": save_best_model,
+        "early_stopping_patience": 2,
+        "adapter": asdict(small_config(retrieval_count=2)),
+        "retrieval": {
+            "queue_size": 4,
+            "candidate_pool": 4,
+            "retrieval_count": 2,
+            "retrieval_min_similarity": -1.0,
+        },
+        "loss": {
+            "logit_temperature": 0.07,
+            "prototype_temperature": 0.10,
+            "anchor_weight": 0.10,
+            "diversity_weight": 0.05,
+            "diversity_margin": 0.80,
+            "gate_weight": 0.001,
+        },
+    }
+    train = queue_bank(images=4, captions_per_image=1)
+    train["metadata"] = pair_bank(split="train")["metadata"]
+    validation = queue_bank(images=4, captions_per_image=1)
+    validation["metadata"] = pair_bank(split="val")["metadata"]
+    monkeypatch.setattr(training_module, "_load_config", lambda unused: config)
+    initial_provenance = {
+        "source_git_commit": "1" * 40,
+        "source_git_dirty": False,
+        "source_git_diff_sha256": None,
+    }
+    monkeypatch.setattr(
+        training_module,
+        "source_git_provenance",
+        lambda *args, **kwargs: dict(initial_provenance),
+    )
+    monkeypatch.setattr(
+        training_module,
+        "load_e7_training_bank",
+        lambda path, **kwargs: train
+        if kwargs["expected_split"] == "train"
+        else validation,
+    )
+    monkeypatch.setattr(
+        training_module,
+        "_run_epoch",
+        lambda **kwargs: {"loss": 1.0},
+    )
+    publications = []
+
+    def capture_publication(payload, output_path, **kwargs):
+        publications.append((payload, output_path, kwargs))
+
+    monkeypatch.setattr(
+        training_module,
+        "_publish_verified_checkpoint",
+        capture_publication,
+    )
+    output = tmp_path / "adapter.pth"
+    training_module.train_adapter(
+        config_path=tmp_path / "config.yaml",
+        train_bank_path=tmp_path / "train.pth",
+        validation_bank_path=tmp_path / "val.pth",
+        output_path=output,
+        device="cpu",
+    )
+    assert len(publications) == 1
+    payload, published_path, kwargs = publications[0]
+    assert published_path == output
+    assert payload["epoch"] == 0
+    assert kwargs["initial_provenance"] == initial_provenance
+    assert kwargs["allow_dirty_source"] is False
+    assert kwargs["repository_root"] == Path(training_module.__file__).resolve().parent
+
+
 def checkpoint_payload(adapter, architecture):
     train_identity = {
         "format_version": "talk2dino-e7-training-bank-v1",
@@ -601,6 +694,64 @@ def checkpoint_payload(adapter, architecture):
         "epoch": 2,
         "best_validation_metric": 1.25,
     }
+
+
+@pytest.mark.parametrize(
+    ("corruption", "message"),
+    (
+        ("validation_source_commit", "source_git_commit"),
+        ("validation_e3_config", "e3_config_sha256"),
+        ("validation_e3_checkpoint", "e3_checkpoint_sha256"),
+        ("top_level_e3_config", "e3_identity.config_sha256"),
+        ("top_level_e3_checkpoint", "e3_identity.checkpoint_sha256"),
+        ("validation_format", "incompatible bank format"),
+        ("validation_routing_temperature", "incompatible routing temperature"),
+    ),
+)
+def test_checkpoint_internal_identity_corruption_precedes_adapter_loading(
+    tmp_path,
+    monkeypatch,
+    corruption,
+    message,
+):
+    architecture = small_config()
+    source_adapter = RetrievalPrototypeAdapter(architecture)
+    payload = copy.deepcopy(checkpoint_payload(source_adapter, architecture))
+    if corruption == "validation_source_commit":
+        payload["validation_bank_identity"]["source_git_commit"] = "f" * 40
+    elif corruption == "validation_e3_config":
+        payload["validation_bank_identity"]["e3_config_sha256"] = "f" * 64
+    elif corruption == "validation_e3_checkpoint":
+        payload["validation_bank_identity"]["e3_checkpoint_sha256"] = "f" * 64
+    elif corruption == "top_level_e3_config":
+        payload["e3_identity"]["config_sha256"] = "f" * 64
+    elif corruption == "top_level_e3_checkpoint":
+        payload["e3_identity"]["checkpoint_sha256"] = "f" * 64
+    elif corruption == "validation_format":
+        payload["validation_bank_identity"]["format_version"] = "invalid-format"
+    elif corruption == "validation_routing_temperature":
+        payload["validation_bank_identity"]["routing_temperature"] = 0.20
+    path = tmp_path / f"{corruption}.pth"
+    torch.save(payload, path)
+    construction_calls = []
+    state_load_calls = []
+
+    class UnexpectedAdapter:
+        def __init__(self, *args, **kwargs):
+            construction_calls.append(True)
+
+        def load_state_dict(self, *args, **kwargs):
+            state_load_calls.append(True)
+
+    monkeypatch.setattr(
+        adapter_module,
+        "RetrievalPrototypeAdapter",
+        UnexpectedAdapter,
+    )
+    with pytest.raises(ValueError, match=message):
+        load_e7_adapter_checkpoint(path)
+    assert construction_calls == []
+    assert state_load_calls == []
 
 
 def test_production_loader_rejects_non_768_checkpoint_before_construction(

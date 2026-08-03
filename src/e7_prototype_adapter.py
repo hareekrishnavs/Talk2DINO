@@ -794,10 +794,6 @@ def validate_e7_adapter_checkpoint(
     for value in e3_identity.values():
         if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
             raise ValueError("checkpoint E3 identity contains an invalid SHA256")
-    if expected_e3_identity is not None and dict(checkpoint["e3_identity"]) != dict(expected_e3_identity):
-        raise ValueError("adapter E3 identity is incompatible")
-    if expected_train_bank_identity is not None and dict(checkpoint["train_bank_identity"]) != dict(expected_train_bank_identity):
-        raise ValueError("adapter retrieval-bank identity is incompatible")
     for name in ("train_bank_identity", "validation_bank_identity"):
         identity = checkpoint[name]
         if not isinstance(identity, Mapping) or set(identity) != _BANK_IDENTITY_KEYS:
@@ -834,6 +830,42 @@ def validate_e7_adapter_checkpoint(
         raise ValueError("train_bank_identity must identify the train split")
     if checkpoint["validation_bank_identity"]["split_name"] != "val":
         raise ValueError("validation_bank_identity must identify the val split")
+    train_identity = checkpoint["train_bank_identity"]
+    validation_identity = checkpoint["validation_bank_identity"]
+    for field_name in (
+        "source_git_commit",
+        "e3_config_sha256",
+        "e3_checkpoint_sha256",
+        "format_version",
+        "routing_temperature",
+    ):
+        if train_identity[field_name] != validation_identity[field_name]:
+            raise ValueError(
+                "train and validation bank identities are incompatible for "
+                f"{field_name}"
+            )
+    for bank_name, identity in (
+        ("train_bank_identity", train_identity),
+        ("validation_bank_identity", validation_identity),
+    ):
+        if identity["e3_config_sha256"] != e3_identity["config_sha256"]:
+            raise ValueError(
+                f"{bank_name}.e3_config_sha256 does not match "
+                "e3_identity.config_sha256"
+            )
+        if identity["e3_checkpoint_sha256"] != e3_identity["checkpoint_sha256"]:
+            raise ValueError(
+                f"{bank_name}.e3_checkpoint_sha256 does not match "
+                "e3_identity.checkpoint_sha256"
+            )
+    if expected_e3_identity is not None and dict(e3_identity) != dict(
+        expected_e3_identity
+    ):
+        raise ValueError("adapter E3 identity is incompatible")
+    if expected_train_bank_identity is not None and dict(train_identity) != dict(
+        expected_train_bank_identity
+    ):
+        raise ValueError("adapter retrieval-bank identity is incompatible")
     provenance = checkpoint["source_git_provenance"]
     if not isinstance(provenance, Mapping) or set(provenance) != {
         "source_git_commit", "source_git_dirty", "source_git_diff_sha256"
