@@ -396,6 +396,7 @@ def train_adapter(
     train_bank_path: Path,
     validation_bank_path: Path,
     output_path: Path,
+    last_output_path: Path | None = None,
     device: str = "cuda",
     allow_pilot_banks: bool = False,
     allow_dirty_source: bool = False,
@@ -406,6 +407,19 @@ def train_adapter(
     if output_path.exists() and not overwrite:
         raise FileExistsError(f"refusing to overwrite adapter checkpoint: {output_path}")
     config = _load_config(config_path)
+    if last_output_path is not None:
+        if last_output_path.resolve() == output_path.resolve():
+            raise ValueError("best and last adapter checkpoint paths must differ")
+        if not config["save_best_model"]:
+            raise ValueError(
+                "last_output_path requires save_best_model: true so output_path "
+                "remains the best checkpoint"
+            )
+        if last_output_path.exists() and not overwrite:
+            raise FileExistsError(
+                "refusing to overwrite last adapter checkpoint: "
+                f"{last_output_path}"
+            )
     repository_root = Path(__file__).resolve().parent
     provenance = source_git_provenance(
         repository_root,
@@ -545,11 +559,30 @@ def train_adapter(
             initial_provenance=provenance,
             allow_dirty_source=allow_dirty_source,
         )
+    elif last_output_path is not None:
+        _publish_verified_checkpoint(
+            _checkpoint(
+                adapter,
+                config,
+                train_bank,
+                validation_bank,
+                provenance,
+                len(history) - 1,
+                history[-1]["validation"]["loss"],
+            ),
+            last_output_path,
+            repository_root=repository_root,
+            initial_provenance=provenance,
+            allow_dirty_source=allow_dirty_source,
+        )
     return {
         "best_epoch": best_epoch,
         "best_validation_loss": best_metric,
         "epochs_completed": len(history),
         "checkpoint": str(output_path),
+        "last_checkpoint": (
+            str(last_output_path) if last_output_path is not None else None
+        ),
     }
 
 
@@ -559,6 +592,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--train_bank", required=True, type=Path)
     parser.add_argument("--validation_bank", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument(
+        "--last_output",
+        type=Path,
+        help="optional final-epoch checkpoint; --output remains the best checkpoint",
+    )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--allow_pilot_banks", action="store_true")
     parser.add_argument("--allow_dirty_source", action="store_true")
@@ -575,6 +613,7 @@ def main() -> None:
         train_bank_path=args.train_bank,
         validation_bank_path=args.validation_bank,
         output_path=args.output,
+        last_output_path=args.last_output,
         device=args.device,
         allow_pilot_banks=args.allow_pilot_banks,
         allow_dirty_source=args.allow_dirty_source,

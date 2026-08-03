@@ -575,11 +575,20 @@ def test_bank_pair_rejection_precedes_adapter_and_training_setup(
     assert constructed == []
 
 
-@pytest.mark.parametrize("save_best_model", (True, False))
+@pytest.mark.parametrize(
+    ("save_best_model", "save_last", "expected_names"),
+    (
+        (True, False, ("adapter.pth",)),
+        (False, False, ("adapter.pth",)),
+        (True, True, ("adapter.pth", "adapter-last.pth")),
+    ),
+)
 def test_train_adapter_uses_verified_publication_for_best_and_final_paths(
     tmp_path,
     monkeypatch,
     save_best_model,
+    save_last,
+    expected_names,
 ):
     config = {
         "seed": 42,
@@ -647,20 +656,21 @@ def test_train_adapter_uses_verified_publication_for_best_and_final_paths(
         capture_publication,
     )
     output = tmp_path / "adapter.pth"
+    last_output = tmp_path / "adapter-last.pth" if save_last else None
     training_module.train_adapter(
         config_path=tmp_path / "config.yaml",
         train_bank_path=tmp_path / "train.pth",
         validation_bank_path=tmp_path / "val.pth",
         output_path=output,
+        last_output_path=last_output,
         device="cpu",
     )
-    assert len(publications) == 1
-    payload, published_path, kwargs = publications[0]
-    assert published_path == output
-    assert payload["epoch"] == 0
-    assert kwargs["initial_provenance"] == initial_provenance
-    assert kwargs["allow_dirty_source"] is False
-    assert kwargs["repository_root"] == Path(training_module.__file__).resolve().parent
+    assert tuple(path.name for _, path, _ in publications) == expected_names
+    for payload, _, kwargs in publications:
+        assert payload["epoch"] == 0
+        assert kwargs["initial_provenance"] == initial_provenance
+        assert kwargs["allow_dirty_source"] is False
+        assert kwargs["repository_root"] == Path(training_module.__file__).resolve().parent
 
 
 def checkpoint_payload(adapter, architecture):
