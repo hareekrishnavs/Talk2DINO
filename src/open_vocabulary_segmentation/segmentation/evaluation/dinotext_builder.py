@@ -61,6 +61,17 @@ def _log_rgtp_summary(generated, settings, classnames):
     )
 
 
+def _log_e7_summary(generated, settings, classnames):
+    del classnames
+    get_logger().info(
+        "E7 learned RPA summary (min/mean/max): "
+        f"retrieval_count={_diagnostic_range(generated.retrieval_count)}; "
+        f"alpha={_diagnostic_range(generated.alpha)}; "
+        f"beta={_diagnostic_range(generated.beta)}; "
+        f"temperature={settings.prototype_temperature}"
+    )
+
+
 def build_dinotext_seg_inference(
     model,
     dataset,
@@ -74,18 +85,29 @@ def build_dinotext_seg_inference(
     else:
         classnames = dataset.dataset.CLASSES
     text_tokens = model.build_dataset_class_tokens(config.evaluate.template, classnames)
-    if getattr(model, "rgtp", None) is None:
+    has_e6 = getattr(model, "rgtp", None) is not None
+    has_e7 = getattr(model, "learned_rpa", None) is not None
+    if not has_e6 and not has_e7:
         text_embedding = model.build_text_embedding(text_tokens)
     else:
         raw_text_embedding, text_embedding = model.build_text_embedding(
             text_tokens,
             return_raw=True,
         )
-        generated = model.build_retrieval_grounded_prototypes(
-            raw_text_embedding,
-            text_embedding,
-        )
-        _log_rgtp_summary(generated, model.rgtp.settings, classnames)
+        if has_e7:
+            generated = model.build_learned_retrieval_prototypes(
+                raw_text_embedding,
+                text_embedding,
+            )
+            _log_e7_summary(
+                generated, model.learned_rpa.settings, classnames
+            )
+        else:
+            generated = model.build_retrieval_grounded_prototypes(
+                raw_text_embedding,
+                text_embedding,
+            )
+            _log_rgtp_summary(generated, model.rgtp.settings, classnames)
     kwargs = dict(with_bg=with_bg)
     if hasattr(dset_cfg, "test_cfg"):
         kwargs["test_cfg"] = dset_cfg.test_cfg

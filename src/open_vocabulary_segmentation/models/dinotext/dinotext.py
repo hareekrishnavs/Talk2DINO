@@ -28,6 +28,10 @@ from src.retrieval_grounded_prototypes import (
     RGTPSettings,
     RetrievalGroundedPrototypes,
 )
+from src.e7_prototype_adapter import (
+    LearnedRetrievalSettings,
+    load_learned_retrieval_prototypes,
+)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -49,7 +53,9 @@ class DINOText(nn.Module):
             self, model_name, resize_dim, clip_model_name, proj_class, proj_name, proj_model, avg_self_attn_token=False, disentangled_self_attn_token=True, pre_trained=True,
             unfreeze_last_text_layer=False, is_eval=True, use_avg_text_token=False, keep_cls=False, keep_end_seq=False, with_bg_clean=False,
             weight_dir=DEFAULT_WEIGHT_DIR, backbone_weights=None, clip_model_path=None,
-            retrieval_grounded_prototypes=None, **kwargs
+            retrieval_grounded_prototypes=None,
+            learned_retrieval_prototypes=None,
+            **kwargs
     ):
         super().__init__()
         self.feats = {}
@@ -155,6 +161,38 @@ class DINOText(nn.Module):
                     "evaluation projection checkpoint"
                 )
             self.rgtp = RetrievalGroundedPrototypes(bank, settings)
+
+        self.learned_rpa = None
+        self.learned_rpa_context = None
+        self.learned_rpa_has_effect = False
+        if learned_retrieval_prototypes is not None:
+            if self.rgtp is not None:
+                raise ValueError("E6 RGTP and E7 learned RPA are mutually exclusive")
+            if not pre_trained:
+                raise ValueError(
+                    "learned retrieval prototypes require the frozen E3 projection"
+                )
+            if not isinstance(learned_retrieval_prototypes, dict):
+                raise TypeError(
+                    "learned_retrieval_prototypes must be a configuration mapping"
+                )
+            learned_config = dict(learned_retrieval_prototypes)
+            try:
+                bank_path = learned_config.pop("bank_path")
+                adapter_path = learned_config.pop("adapter_path")
+            except KeyError as error:
+                raise ValueError(
+                    "learned_retrieval_prototypes requires bank_path and adapter_path"
+                ) from error
+            settings = LearnedRetrievalSettings.from_mapping(learned_config)
+            self.learned_rpa = load_learned_retrieval_prototypes(
+                bank_path,
+                adapter_path,
+                settings,
+                e3_config_sha256=sha256_file(projection_config_path),
+                e3_checkpoint_sha256=sha256_file(projection_checkpoint_path),
+                device=device,
+            )
         
         self.masker = DINOTextMasker(similarity_type="cosine")
         self.masker = self.masker.eval()
@@ -335,6 +373,23 @@ class DINOText(nn.Module):
         )
         return self.rgtp_context
 
+    @torch.no_grad()
+    def build_learned_retrieval_prototypes(
+        self,
+        raw_text_embeddings,
+        mapped_text_embeddings,
+    ):
+        if self.learned_rpa is None:
+            raise RuntimeError("E7 learned retrieval prototypes are not enabled")
+        self.learned_rpa_context = self.learned_rpa.generate(
+            raw_text_embeddings,
+            mapped_text_embeddings,
+        )
+        self.learned_rpa_has_effect = bool(
+            torch.any(self.learned_rpa_context.beta).detach().cpu()
+        )
+        return self.learned_rpa_context
+
     def apply_pamr(self, image, mask):
         image = F.interpolate(image, mask.shape[-2:], mode="bilinear", align_corners=True)
         if self.pamr is None:
@@ -405,13 +460,13 @@ class DINOText(nn.Module):
         image_feat = image_feat.reshape(b, np_h, np_w, c).permute(0, 3, 1, 2)
         
         self_attn, self_attn_maps = self.process_self_attention(self.feats['self_attn'], batch_size, num_tokens + self.num_global_tokens, self.num_attn_heads, embed_dim, self.scale, self.num_global_tokens, ret_self_attn_maps=True)
-        if self.rgtp is None:
+        if self.rgtp is None and self.learned_rpa is None:
             mask, simmap = self.masker.forward_seg(
                 image_feat,
                 text_emb,
                 hard=False,
             )
-        else:
+        elif self.rgtp is not None:
             if self.rgtp_context is None:
                 raise RuntimeError(
                     "RGTP class prototypes must be built before mask generation"
@@ -428,6 +483,31 @@ class DINOText(nn.Module):
                 ),
                 hard=False,
             )
+        else:
+            if self.learned_rpa_context is None:
+                raise RuntimeError(
+                    "E7 class prototypes must be built before mask generation"
+                )
+            if not self.learned_rpa_has_effect:
+                # Exact E3 fallback for beta_max=0 or an all-empty retrieval.
+                mask, simmap = self.masker.forward_seg(
+                    image_feat,
+                    text_emb,
+                    hard=False,
+                )
+            else:
+                mask, simmap = self.masker.forward_seg_with_prototypes(
+                    image_feat,
+                    text_emb,
+                    self.learned_rpa_context.prototypes,
+                    self.learned_rpa_context.valid_mask,
+                    self.learned_rpa_context.beta,
+                    prototype_temperature=(
+                        self.learned_rpa.settings.prototype_temperature
+                    ),
+                    prototype_fusion_weight=1.0,
+                    hard=False,
+                )
         
         if self.with_bg_clean:
             mask = self.similarity_assignment_weighted(mask, image_feat, self_attn_maps, text_emb, lambda_bg)
