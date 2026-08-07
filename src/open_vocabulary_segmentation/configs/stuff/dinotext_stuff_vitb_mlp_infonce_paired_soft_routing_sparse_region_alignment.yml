@@ -4,3 +4,5 @@ model:
     adapter_path: ${oc.env:TALK2DINO_E9_ADAPTER}
     adapter_sha256: ${oc.env:TALK2DINO_E9_ADAPTER_SHA256}
     source_git_commit: ${oc.env:TALK2DINO_E9_SOURCE_GIT_COMMIT}
+    dino_source_commit: ${oc.env:TALK2DINO_E9_DINO_SOURCE_COMMIT}
+    dino_checkpoint_sha256: ${oc.env:TALK2DINO_E9_DINO_CHECKPOINT_SHA256}

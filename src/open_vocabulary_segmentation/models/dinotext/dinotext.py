@@ -22,7 +22,7 @@ from datasets import get_template
 from src.model import ProjectionLayer, VisualProjectionLayer, CLIPLastLayer, DoubleMLP
 from src.e6_prototype_bank import sha256_file
 from src.hooks import average_text_tokens, get_vit_out, feats
-from src.local_weights import DEFAULT_WEIGHT_DIR, load_local_clip, load_local_vision_backbone, load_state_dict_from_local_file, resolve_weight_path
+from src.local_weights import DEFAULT_WEIGHT_DIR, DINO_MODEL_INFO, load_local_clip, load_local_vision_backbone, load_state_dict_from_local_file, resolve_weight_path
 from src.retrieval_grounded_prototypes import (
     PrototypeBank,
     RGTPSettings,
@@ -36,7 +36,11 @@ from src.e8_balanced_retrieval_adapter import (
     BalancedRetrievalSettings,
     load_balanced_retrieval_prototypes,
 )
-from src.e9_sparse_region_alignment import load_e9_adapter
+from src.e9_sparse_region_alignment import (
+    E9ValidationError,
+    load_e9_adapter,
+    validate_e9_dino_identity,
+)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -78,10 +82,14 @@ class DINOText(nn.Module):
         if sparse_region_alignment is not None:
             if not isinstance(sparse_region_alignment, dict) or set(
                 sparse_region_alignment
-            ) != {"adapter_path", "adapter_sha256", "source_git_commit"}:
+            ) != {
+                "adapter_path", "adapter_sha256", "source_git_commit",
+                "dino_source_commit", "dino_checkpoint_sha256",
+            }:
                 raise ValueError(
                     "sparse_region_alignment must contain exactly adapter_path, "
-                    "adapter_sha256, and source_git_commit"
+                    "adapter_sha256, source_git_commit, dino_source_commit, "
+                    "and dino_checkpoint_sha256"
                 )
         retrieval_mode_count = sum(
             option is not None
@@ -103,6 +111,32 @@ class DINOText(nn.Module):
         if sparse_region_alignment is not None:
             if not pre_trained:
                 raise ValueError("E9 requires the frozen E3 projection")
+            runtime_dino_identity = validate_e9_dino_identity({
+                "model": model_name,
+                "source_commit": sparse_region_alignment[
+                    "dino_source_commit"
+                ],
+                "checkpoint_sha256": sparse_region_alignment[
+                    "dino_checkpoint_sha256"
+                ],
+            }, "expected runtime DINO identity")
+            _, default_dino_weights, _ = DINO_MODEL_INFO[
+                runtime_dino_identity["model"]
+            ]
+            resolved_dino_weights = resolve_weight_path(
+                backbone_weights or default_dino_weights, weight_dir
+            )
+            if not os.path.isfile(resolved_dino_weights):
+                raise FileNotFoundError(
+                    "Missing local E9 DINO backbone weights: "
+                    f"{resolved_dino_weights}"
+                )
+            actual_dino_sha256 = sha256_file(resolved_dino_weights)
+            if actual_dino_sha256 != runtime_dino_identity["checkpoint_sha256"]:
+                raise E9ValidationError(
+                    "runtime DINO checkpoint SHA256 does not match the externally "
+                    "expected E9 identity"
+                )
             self.sparse_region_adapter = load_e9_adapter(
                 sparse_region_alignment["adapter_path"],
                 device=device,
@@ -119,6 +153,7 @@ class DINOText(nn.Module):
                 expected_source_git_commit=sparse_region_alignment[
                     "source_git_commit"
                 ],
+                expected_dino_identity=runtime_dino_identity,
             )
         self.feats = {}
         self.model_name = model_name

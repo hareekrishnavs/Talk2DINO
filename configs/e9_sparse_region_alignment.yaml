@@ -25,3 +25,4 @@ anchor_weight: 0.10
 attention_support_weight: 0.02
 gate_weight: 0.001
 pair_chunk_size: 32
+gate_prior_feature_version: max-valid-normalized-attention-v1

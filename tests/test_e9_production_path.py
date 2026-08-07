@@ -1,7 +1,10 @@
+import copy
 import hashlib
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
@@ -9,12 +12,28 @@ import train_e9_sparse_region_alignment as training
 from src.e9_sparse_region_alignment import (
     CANONICAL_E9_TRAINING_CONFIG,
     E9_ADAPTER_CHECKPOINT_FORMAT,
+    E9_EPOCH_DIAGNOSTIC_KEYS,
     E9ValidationError,
     SparseRegionAlignmentAdapter,
     SparseRegionAlignmentConfig,
     load_e9_adapter,
     validate_e9_checkpoint,
 )
+from src.e9_spatial_bank import (
+    ATTENTION_PRIOR_VERSION,
+    CANONICAL_EXTRACTION,
+    E9_SPATIAL_BANK_FORMAT,
+    EXPECTED_GEOMETRY,
+    GLOBAL_TOKEN_HANDLING,
+    POOLING_VERSION,
+)
+
+
+DINO_IDENTITY = {
+    "model": "dinov2_vitb14_reg",
+    "source_commit": "6" * 40,
+    "checkpoint_sha256": "9" * 64,
+}
 
 
 def digest(path):
@@ -72,8 +91,14 @@ def identity(split):
 
 
 def spatial_identity(split):
+    extraction = {
+        "annotation_path": f"/synthetic/{split}.json",
+        "data_dir": f"/synthetic/{split}",
+        **CANONICAL_EXTRACTION,
+        "backbone_weights_sha256": DINO_IDENTITY["checkpoint_sha256"],
+    }
     return {
-        "format_version": "talk2dino-e9-spatial-bank-v1",
+        "format_version": E9_SPATIAL_BANK_FORMAT,
         "split": split,
         "manifest_sha256": ("7" if split == "train" else "8") * 64,
         "source_feature_sha256": [("9" if split == "train" else "a") * 64],
@@ -84,7 +109,30 @@ def spatial_identity(split):
         "source_git_commit": "e" * 40,
         "source_git_dirty": False,
         "source_git_diff_sha256": None,
+        "dino_identity": dict(DINO_IDENTITY),
+        "extraction": extraction,
+        "geometry": dict(EXPECTED_GEOMETRY),
+        "pooling_version": POOLING_VERSION,
+        "attention_prior_version": ATTENTION_PRIOR_VERSION,
+        "global_token_handling": GLOBAL_TOKEN_HANDLING,
     }
+
+
+def diagnostic_summary():
+    values = {key: 0.1 for key in E9_EPOCH_DIAGNOSTIC_KEYS}
+    values.update({
+        "loss": 1.0,
+        "nce_loss": 0.9,
+        "gamma_min": 0.01,
+        "gamma_mean": 0.02,
+        "gamma_max": 0.03,
+        "peak_activation_elements": 1_024.0,
+        "retained_autograd_activation_elements": 4_096.0,
+        "duplicate_image_batch_violations": 0.0,
+        "nonfinite_counts": 0.0,
+        "train_validation_image_overlap_violations": 0.0,
+    })
+    return {"train": dict(values), "validation": dict(values)}
 
 
 def payload(*, embedding_dim=8, production=False):
@@ -163,7 +211,7 @@ def payload(*, embedding_dim=8, production=False):
             "source_git_dirty": False,
             "source_git_diff_sha256": None,
         },
-        "diagnostic_summary": {"validation": {"loss": 1.0}},
+        "diagnostic_summary": diagnostic_summary(),
     }
 
 
@@ -195,6 +243,130 @@ def test_closed_checkpoint_schemas_reject_unknown_keys(mutation, match):
         validate_e9_checkpoint(value, require_production=False)
 
 
+def test_gate_prior_feature_version_is_exact_and_legacy_semantics_are_rejected():
+    value = payload()
+    value["training_config"]["gate_prior_feature_version"] = "raw-prior-v1"
+    with pytest.raises(E9ValidationError, match="gate_prior_feature_version"):
+        validate_e9_checkpoint(value, require_production=False)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        lambda value: value["diagnostic_summary"].pop("train"),
+        lambda value: value["diagnostic_summary"].update({"other": {}}),
+        lambda value: value["diagnostic_summary"]["train"].pop("loss"),
+        lambda value: value["diagnostic_summary"]["train"].update(
+            {"unknown": 1.0}
+        ),
+        lambda value: value["diagnostic_summary"]["train"].update(
+            {"loss": torch.tensor(1.0)}
+        ),
+        lambda value: value["diagnostic_summary"]["train"].update(
+            {"loss": {"nested": 1.0}}
+        ),
+        lambda value: value["diagnostic_summary"]["train"].update(
+            {"loss": [1.0]}
+        ),
+        lambda value: value["diagnostic_summary"]["train"].update(
+            {"loss": np.array([1.0])}
+        ),
+        lambda value: value["diagnostic_summary"]["train"].update(
+            {"loss": np.float64(1.0)}
+        ),
+        lambda value: value["diagnostic_summary"]["train"].update(
+            {"loss": True}
+        ),
+        lambda value: value["diagnostic_summary"]["train"].update(
+            {"loss": float("nan")}
+        ),
+        lambda value: value["diagnostic_summary"]["train"].update(
+            {"loss": float("inf")}
+        ),
+        lambda value: value["diagnostic_summary"]["train"].update(
+            {"loss": -float("inf")}
+        ),
+        lambda value: value["diagnostic_summary"]["train"].update(
+            {"loss": "x" * 1_000_000}
+        ),
+    ),
+)
+def test_diagnostic_summary_is_closed_before_adapter_construction(
+    tmp_path, monkeypatch, mutation
+):
+    value = copy.deepcopy(payload(production=True))
+    mutation(value)
+    path = tmp_path / "adapter.pth"
+    torch.save(value, path)
+    counts = {"construct": 0, "load_state": 0}
+
+    class InstrumentedAdapter(SparseRegionAlignmentAdapter):
+        def __init__(self, *args, **kwargs):
+            counts["construct"] += 1
+            super().__init__(*args, **kwargs)
+
+        def load_state_dict(self, *args, **kwargs):
+            counts["load_state"] += 1
+            return super().load_state_dict(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "src.e9_sparse_region_alignment.SparseRegionAlignmentAdapter",
+        InstrumentedAdapter,
+    )
+    with pytest.raises(E9ValidationError, match="diagnostic summary"):
+        load_e9_adapter(
+            path,
+            expected_checkpoint_sha256=digest(path),
+            expected_source_git_commit="4" * 40,
+            expected_dino_identity=DINO_IDENTITY,
+        )
+    assert counts == {"construct": 0, "load_state": 0}
+
+
+def test_run_epoch_and_checkpoint_validator_share_exact_diagnostic_keys():
+    architecture = SparseRegionAlignmentConfig(
+        embedding_dim=8, bottleneck_dim=4, dropout=0,
+        residual_max=0.25, gamma_max=0.3, gate_hidden_dim=4,
+    )
+    adapter = SparseRegionAlignmentAdapter(architecture)
+    query = {
+        "mapped_query_embeddings": torch.randn(2, 8),
+        "image_ids": torch.tensor([10, 11], dtype=torch.int64),
+        "annotation_ids": torch.tensor([100, 101], dtype=torch.int64),
+    }
+    patches = {
+        image_id: torch.randn(4, 8)
+        for image_id in query["image_ids"].tolist()
+    }
+    priors = {
+        image_id: torch.full((4,), 0.25)
+        for image_id in query["image_ids"].tolist()
+    }
+    spatial = SimpleNamespace(
+        get=lambda image_id: (patches[image_id], priors[image_id])
+    )
+    config = {
+        "mil_top_k": 2,
+        "mil_temperature": 0.1,
+        "attention_selection_weight": 0.05,
+        "pair_chunk_size": 1,
+        "infonce_temperature": 0.07,
+        "anchor_weight": 0.1,
+        "attention_support_weight": 0.02,
+        "gate_weight": 0.001,
+    }
+    result = training._run_epoch(
+        adapter, query, spatial, [[0, 1]], config, torch.device("cpu"),
+        optimizer=None, max_batches=None,
+    )
+    assert set(result) == E9_EPOCH_DIAGNOSTIC_KEYS
+    value = payload()
+    value["diagnostic_summary"] = {
+        "train": dict(result), "validation": dict(result)
+    }
+    validate_e9_checkpoint(value, require_production=False)
+
+
 def test_adapter_state_shape_contract_rejects_before_construction(
     tmp_path, monkeypatch
 ):
@@ -219,6 +391,7 @@ def test_adapter_state_shape_contract_rejects_before_construction(
         load_e9_adapter(
             path, expected_checkpoint_sha256=digest(path),
             expected_source_git_commit="4" * 40,
+            expected_dino_identity=DINO_IDENTITY,
         )
     assert constructions == 0
 
@@ -301,6 +474,7 @@ def test_clean_canonical_production_checkpoint_is_accepted():
         expected_source_git_commit=value["source_git_provenance"][
             "source_git_commit"
         ],
+        expected_dino_identity=DINO_IDENTITY,
     )
     assert result["production_eligible"] and result["canonical_experiment"]
 
@@ -308,6 +482,12 @@ def test_clean_canonical_production_checkpoint_is_accepted():
 @pytest.mark.parametrize(
     "mutation,match",
     (
+        (
+            lambda value: value.update({
+                "format_version": "talk2dino-e9-sparse-region-adapter-v1"
+            }),
+            "unsupported E9 checkpoint format",
+        ),
         (
             lambda value: value["training_config"].update(
                 {"pooled_grid_width": 8}
@@ -360,6 +540,54 @@ def test_clean_canonical_production_checkpoint_is_accepted():
             ),
             "source Git identity mismatch",
         ),
+        (
+            lambda value: value["spatial_bank_identities"]["train"][
+                "dino_identity"
+            ].update({"model": "dinov2_vitl14_reg"}),
+            "DINO.*model",
+        ),
+        (
+            lambda value: value["spatial_bank_identities"]["validation"][
+                "dino_identity"
+            ].update({"source_commit": "7" * 40}),
+            "DINO identities differ",
+        ),
+        (
+            lambda value: value["spatial_bank_identities"]["train"][
+                "dino_identity"
+            ].update({"checkpoint_sha256": "8" * 64}),
+            "checkpoint mismatch",
+        ),
+        (
+            lambda value: value["spatial_bank_identities"]["train"][
+                "extraction"
+            ].update({"resize_dim": 224}),
+            "canonical extraction identity mismatch",
+        ),
+        (
+            lambda value: value["spatial_bank_identities"]["train"].update(
+                {"pooling_version": "other"}
+            ),
+            "pooling version mismatch",
+        ),
+        (
+            lambda value: value["spatial_bank_identities"]["train"].update(
+                {"attention_prior_version": "other"}
+            ),
+            "attention-prior version mismatch",
+        ),
+        (
+            lambda value: value["spatial_bank_identities"]["train"].update(
+                {"global_token_handling": "other"}
+            ),
+            "global-token handling mismatch",
+        ),
+        (
+            lambda value: value["spatial_bank_identities"]["train"].update(
+                {"format_version": "talk2dino-e9-spatial-bank-v1"}
+            ),
+            "unsupported spatial-bank identity",
+        ),
     ),
 )
 def test_production_identity_mutations_fail_before_adapter_construction(
@@ -389,6 +617,7 @@ def test_production_identity_mutations_fail_before_adapter_construction(
             path,
             expected_checkpoint_sha256=digest(path),
             expected_source_git_commit="4" * 40,
+            expected_dino_identity=DINO_IDENTITY,
         )
     assert counts == {"construct": 0, "load_state": 0}
 
@@ -422,8 +651,41 @@ def test_stale_external_checkpoint_digest_fails_before_load_or_construction(
             path,
             expected_checkpoint_sha256=stale,
             expected_source_git_commit="4" * 40,
+            expected_dino_identity=DINO_IDENTITY,
         )
     assert counts == {"load": 0, "construct": 0}
+
+
+def test_external_dino_identity_mismatch_fails_before_adapter_construction(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "adapter.pth"
+    torch.save(payload(production=True), path)
+    counts = {"construct": 0, "load_state": 0}
+
+    class InstrumentedAdapter(SparseRegionAlignmentAdapter):
+        def __init__(self, *args, **kwargs):
+            counts["construct"] += 1
+            super().__init__(*args, **kwargs)
+
+        def load_state_dict(self, *args, **kwargs):
+            counts["load_state"] += 1
+            return super().load_state_dict(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "src.e9_sparse_region_alignment.SparseRegionAlignmentAdapter",
+        InstrumentedAdapter,
+    )
+    expected = dict(DINO_IDENTITY)
+    expected["checkpoint_sha256"] = "0" * 64
+    with pytest.raises(E9ValidationError, match="runtime DINO identity mismatch"):
+        load_e9_adapter(
+            path,
+            expected_checkpoint_sha256=digest(path),
+            expected_source_git_commit="4" * 40,
+            expected_dino_identity=expected,
+        )
+    assert counts == {"construct": 0, "load_state": 0}
 
 
 def test_atomic_refusal_preserves_existing_and_cleans_temporary(tmp_path, monkeypatch):

@@ -21,7 +21,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Mapping, Sequence
+from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
 import torch
 import torch.nn.functional as F
@@ -34,7 +34,7 @@ from src.e6_prototype_bank import sha256_file
 from src.e6_prototype_bank import annotation_id_set_fingerprint
 
 
-E9_SPATIAL_BANK_FORMAT = "talk2dino-e9-spatial-bank-v1"
+E9_SPATIAL_BANK_FORMAT = "talk2dino-e9-spatial-bank-v2"
 E5_STREAMING_FORMAT = 1
 MANIFEST_NAME = "manifest.json"
 SOURCE_RECORD_KEYS = {
@@ -62,12 +62,12 @@ BUILDER_CONFIG_KEYS = {
     "source_selected_annotations", "source_max_images", "source_is_pilot",
     "source_complete",
 }
-DINO_IDENTITY_KEYS = {"model", "source_commit", "checkpoint_identity"}
+DINO_IDENTITY_KEYS = {"model", "source_commit", "checkpoint_sha256"}
 EXTRACTION_KEYS = {
     "annotation_path", "data_dir", "model", "resize_dim", "crop_dim",
     "patch_count", "embedding_dim", "attention_heads",
     "attention_map_format", "patch_tokens_dtype", "self_attn_maps_dtype",
-    "disentangled_self_attn_dtype",
+    "disentangled_self_attn_dtype", "backbone_weights_sha256",
 }
 MANIFEST_KEYS = {
     "format_version",
@@ -382,6 +382,16 @@ def _source_manifest(source: Path, *, require_complete: bool = True) -> dict[str
     extraction = manifest["extraction_config"]
     if not isinstance(extraction, Mapping):
         raise E9SpatialBankValidationError("source extraction_config must be a mapping")
+    if "backbone_weights_sha256" not in extraction:
+        raise E9SpatialBankValidationError(
+            "source extraction_config is missing required "
+            "backbone_weights_sha256; regenerate E5 dense features with exact "
+            "DINO weight identity"
+        )
+    _require_sha256(
+        extraction["backbone_weights_sha256"],
+        "source extraction backbone_weights_sha256",
+    )
     mismatches = {
         key: (extraction.get(key), expected_value)
         for key, expected_value in CANONICAL_EXTRACTION.items()
@@ -695,10 +705,9 @@ def validate_e9_spatial_bank(
     if dino_identity["model"] != "dinov2_vitb14_reg":
         raise E9SpatialBankValidationError("DINO model identity mismatch")
     _require_git_commit(dino_identity["source_commit"], "DINO source commit")
-    if dino_identity["checkpoint_identity"] is not None:
-        _require_sha256(
-            dino_identity["checkpoint_identity"], "DINO checkpoint identity"
-        )
+    _require_sha256(
+        dino_identity["checkpoint_sha256"], "DINO checkpoint identity"
+    )
     extraction_mismatches = {
         key: (extraction.get(key), expected)
         for key, expected in CANONICAL_EXTRACTION.items()
@@ -715,6 +724,13 @@ def validate_e9_spatial_bank(
             )
     if extraction["model"] != dino_identity["model"]:
         raise E9SpatialBankValidationError("DINO/extraction model identity mismatch")
+    if (
+        extraction["backbone_weights_sha256"]
+        != dino_identity["checkpoint_sha256"]
+    ):
+        raise E9SpatialBankValidationError(
+            "DINO/extraction checkpoint identity mismatch"
+        )
     _require_git_commit(manifest["source_git_commit"], "E9 source Git commit")
     if manifest["source_git_dirty"]:
         _require_sha256(
@@ -901,7 +917,13 @@ def validate_e9_spatial_bank(
     }
 
 
-def _publish_directory(staging: Path, output: Path, *, overwrite: bool) -> None:
+def _publish_directory(
+    staging: Path,
+    output: Path,
+    *,
+    overwrite: bool,
+    final_verification: Callable[[], None],
+) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     if output.exists() and not overwrite:
         raise FileExistsError(f"refusing to overwrite E9 spatial bank: {output}")
@@ -910,15 +932,23 @@ def _publish_directory(staging: Path, output: Path, *, overwrite: bool) -> None:
         # first and the manifest is linked last, making the manifest the
         # publication boundary while preventing a concurrent builder from
         # clobbering this target.
-        output.mkdir()
+        try:
+            output.mkdir()
+        except FileExistsError as error:
+            raise FileExistsError(
+                f"refusing to overwrite E9 spatial bank: {output}"
+            ) from error
         try:
             names = sorted(
                 path.name for path in staging.iterdir()
                 if path.name != MANIFEST_NAME
-            ) + [MANIFEST_NAME]
+            )
             for name in names:
                 os.link(staging / name, output / name)
                 _fsync_file(output / name)
+            final_verification()
+            os.link(staging / MANIFEST_NAME, output / MANIFEST_NAME)
+            _fsync_file(output / MANIFEST_NAME)
             _fsync_directory(output)
             _fsync_directory(output.parent)
         except Exception:
@@ -930,14 +960,23 @@ def _publish_directory(staging: Path, output: Path, *, overwrite: bool) -> None:
     backup = output.with_name(f".{output.name}.backup-{os.getpid()}")
     if backup.exists():
         raise FileExistsError(f"stale E9 publication backup exists: {backup}")
+    had_output = output.exists()
     if output.exists():
         os.rename(output, backup)
     try:
+        final_verification()
         os.rename(staging, output)
         _fsync_directory(output.parent)
     except Exception:
-        if backup.exists() and not output.exists():
+        if output.exists():
+            shutil.rmtree(output)
+        if backup.exists():
             os.rename(backup, output)
+        elif had_output:
+            raise RuntimeError(
+                "E9 pilot overwrite could not restore the previous output"
+            )
+        _fsync_directory(output.parent)
         raise
     if backup.exists():
         shutil.rmtree(backup)
@@ -949,6 +988,8 @@ def build_e9_spatial_bank(
     output: os.PathLike[str] | str,
     *,
     split: str,
+    expected_dino_source_commit: str,
+    expected_dino_checkpoint_sha256: str,
     shard_rows: int = 128,
     max_images: int | None = None,
     overwrite: bool = False,
@@ -961,6 +1002,12 @@ def build_e9_spatial_bank(
         raise ValueError("shard_rows must be a positive integer")
     if max_images is not None and (isinstance(max_images, bool) or not isinstance(max_images, int) or max_images <= 0):
         raise ValueError("max_images must be a positive integer")
+    _require_git_commit(
+        expected_dino_source_commit, "expected DINO source commit"
+    )
+    _require_sha256(
+        expected_dino_checkpoint_sha256, "expected DINO checkpoint"
+    )
     source = Path(source).resolve()
     output = Path(output).resolve()
     repository_root = Path(repository_root or Path(__file__).parents[1]).resolve()
@@ -979,6 +1026,24 @@ def build_e9_spatial_bank(
     manifest_source = _source_manifest(source)
     if manifest_source["split"] != split:
         raise E9SpatialBankValidationError("source split mismatch")
+    extraction_source = manifest_source["extraction_config"]
+    if manifest_source["source_commit"] != expected_dino_source_commit:
+        raise E9SpatialBankValidationError(
+            "dense source DINO extractor commit does not match the expected "
+            "DINO source commit"
+        )
+    if (
+        extraction_source["backbone_weights_sha256"]
+        != expected_dino_checkpoint_sha256
+    ):
+        raise E9SpatialBankValidationError(
+            "dense source DINO checkpoint SHA256 does not match the expected "
+            "DINO checkpoint"
+        )
+    if extraction_source["model"] != "dinov2_vitb14_reg":
+        raise E9SpatialBankValidationError(
+            "dense source DINO model must be dinov2_vitb14_reg"
+        )
     source_images = int(manifest_source["source_images"])
     source_annotations = int(manifest_source["source_annotations"])
     available_images = int(manifest_source["selected_images"])
@@ -1162,7 +1227,7 @@ def build_e9_spatial_bank(
             "dino_identity": {
                 "model": extraction["model"],
                 "source_commit": manifest_source["source_commit"],
-                "checkpoint_identity": extraction.get("backbone_weights_sha256"),
+                "checkpoint_sha256": extraction["backbone_weights_sha256"],
             },
             "extraction": extraction,
             "geometry": dict(EXPECTED_GEOMETRY),
@@ -1196,24 +1261,31 @@ def build_e9_spatial_bank(
         # provenance/publication boundary.
         validate_e9_spatial_bank(staging, require_production=False)
 
-        # Final boundary: after every serialization/fsync and staging check,
-        # immediately before publication, recheck every input and then Git.
-        for source_path, digest in initial_hashes.items():
-            if sha256_file(source_path) != digest:
-                raise E9SpatialBankValidationError(
-                    f"source artifact changed during serialization: {source_path}"
+        def final_verification() -> None:
+            for source_path, digest in initial_hashes.items():
+                if sha256_file(source_path) != digest:
+                    raise E9SpatialBankValidationError(
+                        "source artifact changed during spatial-bank "
+                        f"publication: {source_path}"
+                    )
+            try:
+                _require_unchanged_git_provenance(
+                    repository_root,
+                    provenance,
+                    allow_dirty_source=allow_dirty_source,
                 )
-        try:
-            _require_unchanged_git_provenance(
-                repository_root,
-                provenance,
-                allow_dirty_source=allow_dirty_source,
-            )
-        except ValueError as error:
-            raise E9SpatialBankValidationError(
-                "E9 Git source provenance changed during serialization"
-            ) from error
-        _publish_directory(staging, output, overwrite=overwrite)
+            except ValueError as error:
+                raise E9SpatialBankValidationError(
+                    "E9 Git source provenance changed during spatial-bank "
+                    "publication"
+                ) from error
+
+        _publish_directory(
+            staging,
+            output,
+            overwrite=overwrite,
+            final_verification=final_verification,
+        )
         staging = None
         return {**validate_e9_spatial_bank(output, require_production=False), "estimated_bytes": estimated_bytes}
     finally:

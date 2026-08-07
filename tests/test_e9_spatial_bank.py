@@ -3,6 +3,7 @@ import copy
 import io
 import json
 import math
+import subprocess
 import tarfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +14,9 @@ import torch.nn.functional as F
 
 import src.e9_spatial_bank as e9
 from train_e9_sparse_region_alignment import select_query_rows_for_spatial
+
+DINO_SOURCE_COMMIT = "a" * 40
+DINO_CHECKPOINT_SHA256 = "b" * 64
 
 
 def sha(path):
@@ -67,8 +71,9 @@ def make_source(root: Path, records):
             "patch_tokens_dtype": "float16",
             "self_attn_maps_dtype": "float16",
             "disentangled_self_attn_dtype": "float32",
+            "backbone_weights_sha256": DINO_CHECKPOINT_SHA256,
         },
-        "source_commit": "a" * 40,
+        "source_commit": DINO_SOURCE_COMMIT,
         "source_images": len(records),
         "source_annotations": len(records),
         "selected_images": len(records),
@@ -97,6 +102,42 @@ def make_source(root: Path, records):
     }
     (root / "manifest.json").write_text(json.dumps(manifest))
     return root
+
+
+def build_spatial_bank(source, output, **kwargs):
+    return e9.build_e9_spatial_bank(
+        source,
+        output,
+        expected_dino_source_commit=DINO_SOURCE_COMMIT,
+        expected_dino_checkpoint_sha256=DINO_CHECKPOINT_SHA256,
+        **kwargs,
+    )
+
+
+def git_repo(root):
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(
+        ["git", "-C", str(root), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(root), "config", "user.name", "Test"],
+        check=True,
+    )
+    tracked = root / "source.py"
+    tracked.write_text("clean\n")
+    subprocess.run(["git", "-C", str(root), "add", "source.py"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-qm", "base"], check=True)
+    return tracked
+
+
+def tree_hashes(root):
+    return {
+        path.relative_to(root).as_posix(): sha(path)
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
 
 
 def test_source_geometry_and_independent_pooling():
@@ -169,7 +210,7 @@ def test_complete_source_record_contract_rejects_malformed_annotation_fields():
 def test_build_validate_lazy_load_and_closed_manifest(tmp_path):
     source = make_source(tmp_path / "source", [source_record(9), source_record(3)])
     output = tmp_path / "bank"
-    result = e9.build_e9_spatial_bank(
+    result = build_spatial_bank(
         source, output, split="train", shard_rows=1, max_images=2,
         allow_dirty_source=True,
     )
@@ -217,13 +258,13 @@ def test_full_bank_is_production_eligible_and_incomplete_is_rejected(
     monkeypatch.setattr(
         e9, "_require_unchanged_git_provenance", lambda *args, **kwargs: clean
     )
-    result = e9.build_e9_spatial_bank(source, output, split="train")
+    result = build_spatial_bank(source, output, split="train")
     assert result["complete"] and result["production_eligible"]
     manifest = json.loads((output / "manifest.json").read_text())
     assert manifest["source_images"] == manifest["selected_images"] == 1
     assert not manifest["is_pilot"]
     with pytest.raises(ValueError, match="immutable.*new output path"):
-        e9.build_e9_spatial_bank(
+        build_spatial_bank(
             source, output, split="train", overwrite=True
         )
 
@@ -240,6 +281,49 @@ def test_full_bank_is_production_eligible_and_incomplete_is_rejected(
         e9.validate_e9_spatial_bank(output, require_production=False)
 
 
+@pytest.mark.parametrize("field", ("source_commit", "checkpoint_sha256"))
+def test_builder_requires_exact_external_dino_identity_before_staging(
+    tmp_path, field
+):
+    source = make_source(tmp_path / "source", [source_record(2)])
+    output = tmp_path / "bank"
+    kwargs = {
+        "expected_dino_source_commit": DINO_SOURCE_COMMIT,
+        "expected_dino_checkpoint_sha256": DINO_CHECKPOINT_SHA256,
+    }
+    kwargs[
+        "expected_dino_source_commit"
+        if field == "source_commit"
+        else "expected_dino_checkpoint_sha256"
+    ] = "c" * (40 if field == "source_commit" else 64)
+    with pytest.raises(e9.E9SpatialBankValidationError, match="DINO"):
+        e9.build_e9_spatial_bank(
+            source, output, split="train", max_images=1,
+            allow_dirty_source=True, **kwargs,
+        )
+    assert not output.exists()
+    assert not list(tmp_path.glob(".bank.e9-*"))
+
+
+def test_builder_rejects_source_without_dino_checkpoint_identity(tmp_path):
+    source = make_source(tmp_path / "source", [source_record(2)])
+    manifest_path = source / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["extraction_config"].pop("backbone_weights_sha256")
+    manifest_path.write_text(json.dumps(manifest))
+    output = tmp_path / "bank"
+    with pytest.raises(
+        e9.E9SpatialBankValidationError,
+        match="missing required backbone_weights_sha256",
+    ):
+        build_spatial_bank(
+            source, output, split="train", max_images=1,
+            allow_dirty_source=True,
+        )
+    assert not output.exists()
+    assert not list(tmp_path.glob(".bank.e9-*"))
+
+
 def test_forged_partial_full_bank_is_rejected(tmp_path, monkeypatch):
     source = make_source(tmp_path / "source", [source_record(2)])
     output = tmp_path / "bank"
@@ -252,7 +336,7 @@ def test_forged_partial_full_bank_is_rejected(tmp_path, monkeypatch):
     monkeypatch.setattr(
         e9, "_require_unchanged_git_provenance", lambda *args, **kwargs: clean
     )
-    e9.build_e9_spatial_bank(source, output, split="train")
+    build_spatial_bank(source, output, split="train")
     manifest = json.loads((output / "manifest.json").read_text())
     manifest["source_images"] = 100
     manifest["dataset_identity"]["source_image_count"] = 100
@@ -283,13 +367,16 @@ def test_canonical_spatial_contract_and_provenance_values_are_closed(
     monkeypatch.setattr(
         e9, "_require_unchanged_git_provenance", lambda *args, **kwargs: clean
     )
-    e9.build_e9_spatial_bank(source, output, split="train")
+    build_spatial_bank(source, output, split="train")
     base = json.loads((output / "manifest.json").read_text())
     mutations = (
+        lambda value: value.update({
+            "format_version": "talk2dino-e9-spatial-bank-v1"
+        }),
         lambda value: value.update({"source_feature_format": "unknown"}),
         lambda value: value["dino_identity"].update({"model": "other"}),
         lambda value: value["dino_identity"].update({"source_commit": "A" * 40}),
-        lambda value: value["dino_identity"].update({"checkpoint_identity": "x"}),
+        lambda value: value["dino_identity"].update({"checkpoint_sha256": "x"}),
         lambda value: value["extraction"].update({"resize_dim": 224}),
         lambda value: value["geometry"].update({"source_grid_width": 31}),
         lambda value: value["dtypes"].update({"serialized_patch_embeddings": "float32"}),
@@ -314,7 +401,7 @@ def test_duplicate_source_image_ids_are_rejected(tmp_path):
     )
     output = tmp_path / "bank"
     with pytest.raises(e9.E9SpatialBankValidationError, match="duplicate source"):
-        e9.build_e9_spatial_bank(
+        build_spatial_bank(
             source, output, split="train", max_images=2,
             allow_dirty_source=True,
         )
@@ -334,7 +421,7 @@ def test_failed_publication_preserves_existing_output_and_cleans_staging(tmp_pat
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("mutated")),
     )
     with pytest.raises(RuntimeError, match="mutated"):
-        e9.build_e9_spatial_bank(
+        build_spatial_bank(
             source, output, split="train", max_images=1, overwrite=True,
             allow_dirty_source=True,
         )
@@ -354,12 +441,113 @@ def test_source_mutation_during_shard_serialization_prevents_publication(tmp_pat
 
     monkeypatch.setattr(e9.torch, "save", mutating_save)
     with pytest.raises(e9.E9SpatialBankValidationError, match="source artifact changed"):
-        e9.build_e9_spatial_bank(
+        build_spatial_bank(
             source, output, split="train", max_images=1,
             allow_dirty_source=True,
         )
     assert not output.exists()
     assert not list(tmp_path.glob(".bank.e9-*"))
+
+
+@pytest.mark.parametrize(
+    "mutation_kind", ("unstaged", "staged", "untracked", "source_artifact")
+)
+def test_manifest_boundary_rejects_mutation_after_nonmanifest_link(
+    tmp_path, monkeypatch, mutation_kind
+):
+    repository = tmp_path / "repo"
+    tracked = git_repo(repository)
+    source = make_source(tmp_path / "source", [source_record(12)])
+    source_shard = source / "train-000000.tar"
+    output = tmp_path / "bank"
+    original_link = e9.os.link
+    mutation_seen = False
+    linked_names = []
+
+    def mutate_after_link(source_path, destination_path):
+        nonlocal mutation_seen
+        original_link(source_path, destination_path)
+        linked_names.append(Path(source_path).name)
+        if Path(source_path).name == e9.MANIFEST_NAME or mutation_seen:
+            return
+        mutation_seen = True
+        if mutation_kind == "untracked":
+            (repository / "new.py").write_text("new\n")
+        elif mutation_kind == "source_artifact":
+            source_shard.write_bytes(source_shard.read_bytes() + b"mutation")
+        else:
+            tracked.write_text(f"{mutation_kind}\n")
+            if mutation_kind == "staged":
+                subprocess.run(
+                    ["git", "-C", str(repository), "add", "source.py"],
+                    check=True,
+                )
+
+    monkeypatch.setattr(e9.os, "link", mutate_after_link)
+    with pytest.raises(
+        e9.E9SpatialBankValidationError,
+        match="publication|provenance",
+    ):
+        build_spatial_bank(
+            source, output, split="train", max_images=1,
+            repository_root=repository,
+        )
+    assert mutation_seen
+    assert e9.MANIFEST_NAME not in linked_names
+    assert not output.exists()
+    assert not list(tmp_path.glob(".bank.e9-*"))
+    assert not list(tmp_path.glob(".bank.backup-*"))
+
+
+@pytest.mark.parametrize(
+    "mutation_kind", ("unstaged", "staged", "untracked", "source_artifact")
+)
+def test_manifest_boundary_failed_pilot_overwrite_restores_existing_tree(
+    tmp_path, monkeypatch, mutation_kind
+):
+    repository = tmp_path / "repo"
+    tracked = git_repo(repository)
+    source = make_source(tmp_path / "source", [source_record(13)])
+    source_shard = source / "train-000000.tar"
+    output = tmp_path / "bank"
+    output.mkdir()
+    (output / "manifest.json").write_bytes(b"existing manifest")
+    (output / "existing-shard.pth").write_bytes(b"existing shard")
+    before = tree_hashes(output)
+    original_rename = e9.os.rename
+    mutation_seen = False
+
+    def mutate_after_backup(source_path, destination_path):
+        nonlocal mutation_seen
+        original_rename(source_path, destination_path)
+        if Path(source_path) != output or mutation_seen:
+            return
+        mutation_seen = True
+        if mutation_kind == "untracked":
+            (repository / "new.py").write_text("new\n")
+        elif mutation_kind == "source_artifact":
+            source_shard.write_bytes(source_shard.read_bytes() + b"mutation")
+        else:
+            tracked.write_text(f"{mutation_kind}\n")
+            if mutation_kind == "staged":
+                subprocess.run(
+                    ["git", "-C", str(repository), "add", "source.py"],
+                    check=True,
+                )
+
+    monkeypatch.setattr(e9.os, "rename", mutate_after_backup)
+    with pytest.raises(
+        e9.E9SpatialBankValidationError,
+        match="publication|provenance",
+    ):
+        build_spatial_bank(
+            source, output, split="train", max_images=1, overwrite=True,
+            repository_root=repository,
+        )
+    assert mutation_seen
+    assert tree_hashes(output) == before
+    assert not list(tmp_path.glob(".bank.e9-*"))
+    assert not list(tmp_path.glob(".bank.backup-*"))
 
 
 def test_atomic_create_if_absent_refuses_existing_target(tmp_path):
@@ -372,8 +560,39 @@ def test_atomic_create_if_absent_refuses_existing_target(tmp_path):
     marker = output / "marker"
     marker.write_bytes(b"existing")
     with pytest.raises(FileExistsError, match="refusing to overwrite"):
-        e9._publish_directory(staging, output, overwrite=False)
+        e9._publish_directory(
+            staging, output, overwrite=False, final_verification=lambda: None
+        )
     assert marker.read_bytes() == b"existing"
+
+
+def test_atomic_create_if_absent_preserves_concurrent_directory_winner(
+    tmp_path, monkeypatch
+):
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    (staging / "train-000000.pth").write_bytes(b"shard")
+    (staging / "manifest.json").write_bytes(b"manifest")
+    output = tmp_path / "output"
+    original_mkdir = Path.mkdir
+    injected = False
+
+    def concurrent_mkdir(path, *args, **kwargs):
+        nonlocal injected
+        if path == output and not injected:
+            injected = True
+            original_mkdir(path)
+            (path / "winner").write_bytes(b"concurrent")
+            raise FileExistsError(path)
+        return original_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", concurrent_mkdir)
+    with pytest.raises(FileExistsError, match="refusing to overwrite"):
+        e9._publish_directory(
+            staging, output, overwrite=False, final_verification=lambda: None
+        )
+    assert (output / "winner").read_bytes() == b"concurrent"
+    assert not (output / "manifest.json").exists()
 
 
 def test_train_validation_overlap_is_rejected():

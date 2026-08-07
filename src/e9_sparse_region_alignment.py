@@ -13,8 +13,19 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from src.e6_prototype_bank import sha256_file
+from src.e9_spatial_bank import (
+    ATTENTION_PRIOR_VERSION,
+    CANONICAL_EXTRACTION,
+    DINO_IDENTITY_KEYS,
+    E9_SPATIAL_BANK_FORMAT,
+    EXPECTED_GEOMETRY,
+    EXTRACTION_KEYS,
+    GLOBAL_TOKEN_HANDLING,
+    POOLING_VERSION,
+)
 
-E9_ADAPTER_CHECKPOINT_FORMAT = "talk2dino-e9-sparse-region-adapter-v1"
+E9_ADAPTER_CHECKPOINT_FORMAT = "talk2dino-e9-sparse-region-adapter-v2"
+GATE_PRIOR_FEATURE_VERSION = "max-valid-normalized-attention-v1"
 E9_CHECKPOINT_KEYS = {
     "format_version",
     "adapter_state_dict",
@@ -55,6 +66,7 @@ TRAINING_CONFIG_KEYS = {
     "pooled_grid_width", "mil_top_k", "mil_temperature",
     "infonce_temperature", "attention_selection_weight", "anchor_weight",
     "attention_support_weight", "gate_weight", "pair_chunk_size",
+    "gate_prior_feature_version",
 }
 E7_IDENTITY_KEYS = {
     "format_version", "split_name", "bank_sha256", "source_feature_sha256",
@@ -69,6 +81,8 @@ SPATIAL_IDENTITY_KEYS = {
     "format_version", "split", "manifest_sha256", "source_feature_sha256",
     "dataset_identity", "complete", "is_pilot", "production_eligible",
     "source_git_commit", "source_git_dirty", "source_git_diff_sha256",
+    "dino_identity", "extraction", "geometry", "pooling_version",
+    "attention_prior_version", "global_token_handling",
 }
 DATASET_IDENTITY_KEYS = {
     "split", "source_image_count", "source_annotation_count",
@@ -111,7 +125,44 @@ CANONICAL_E9_TRAINING_CONFIG = {
     "attention_support_weight": 0.02,
     "gate_weight": 0.001,
     "pair_chunk_size": 32,
+    "gate_prior_feature_version": GATE_PRIOR_FEATURE_VERSION,
 }
+
+E9_EPOCH_DIAGNOSTIC_KEYS = frozenset({
+    "loss",
+    "nce_loss",
+    "anchor_text_loss",
+    "anchor_patch_loss",
+    "anchor_loss",
+    "attention_support_loss",
+    "gate_loss",
+    "gamma_min",
+    "gamma_mean",
+    "gamma_max",
+    "text_residual_gate_min",
+    "text_residual_gate_mean",
+    "text_residual_gate_max",
+    "patch_residual_gate_min",
+    "patch_residual_gate_mean",
+    "patch_residual_gate_max",
+    "positive_image_score",
+    "negative_image_score",
+    "positive_minus_negative_margin",
+    "positive_base_patch_score",
+    "positive_adapted_patch_score",
+    "positive_final_patch_score",
+    "selected_region_attention_mass",
+    "selected_region_responsibility_entropy",
+    "unique_selected_patch_count",
+    "top_k_index_diversity",
+    "query_residual_angle",
+    "patch_residual_angle",
+    "peak_activation_elements",
+    "retained_autograd_activation_elements",
+    "duplicate_image_batch_violations",
+    "nonfinite_counts",
+    "train_validation_image_overlap_violations",
+})
 
 
 class E9ValidationError(ValueError):
@@ -122,6 +173,27 @@ def _require_sha256(value: Any, label: str) -> str:
     if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
         raise E9ValidationError(f"{label} must be a lowercase SHA256 digest")
     return value
+
+
+def validate_e9_dino_identity(
+    value: Mapping[str, Any], label: str = "E9 DINO identity"
+) -> dict[str, str]:
+    """Validate the closed DINOv2 extraction/runtime identity."""
+
+    if not isinstance(value, Mapping) or set(value) != DINO_IDENTITY_KEYS:
+        raise E9ValidationError(f"{label} closed schema mismatch")
+    result = dict(value)
+    if result["model"] != "dinov2_vitb14_reg":
+        raise E9ValidationError(f"{label} model must be dinov2_vitb14_reg")
+    if (
+        not isinstance(result["source_commit"], str)
+        or _GIT_COMMIT.fullmatch(result["source_commit"]) is None
+    ):
+        raise E9ValidationError(
+            f"{label} source_commit must be 40 lowercase hexadecimal characters"
+        )
+    _require_sha256(result["checkpoint_sha256"], f"{label} checkpoint_sha256")
+    return result
 
 
 def validate_e9_training_config(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -170,6 +242,11 @@ def validate_e9_training_config(value: Mapping[str, Any]) -> dict[str, Any]:
         or result["amp_dtype"] != "bfloat16"
     ):
         raise E9ValidationError("unsupported E9 optimizer/scheduler/AMP configuration")
+    if result["gate_prior_feature_version"] != GATE_PRIOR_FEATURE_VERSION:
+        raise E9ValidationError(
+            "gate_prior_feature_version must equal "
+            f"{GATE_PRIOR_FEATURE_VERSION}"
+        )
     SparseRegionAlignmentConfig.from_mapping({
         key: result[key]
         for key in (
@@ -197,6 +274,55 @@ def _finite_bound(name: str, value: Any, *, lower: float, upper: float | None = 
         raise E9ValidationError(f"{name} must be finite")
     if float(value) < lower or (upper is not None and float(value) > upper):
         raise E9ValidationError(f"{name} must be in [{lower}, {upper}]")
+
+
+def max_valid_normalized_attention(
+    attention_priors: torch.Tensor,
+    valid_patch_mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Return detached, grid-invariant attention support in ``[0, 1]``.
+
+    Invalid patches are removed before each image's maximum is calculated.  A
+    row with no positive valid support is represented by exact zeros.
+    """
+
+    if (
+        not torch.is_tensor(attention_priors)
+        or attention_priors.ndim != 2
+        or not attention_priors.is_floating_point()
+    ):
+        raise E9ValidationError("attention_priors must be floating point [J,P]")
+    if valid_patch_mask is None:
+        valid_patch_mask = torch.ones_like(attention_priors, dtype=torch.bool)
+    if (
+        not torch.is_tensor(valid_patch_mask)
+        or valid_patch_mask.shape != attention_priors.shape
+        or valid_patch_mask.dtype != torch.bool
+        or valid_patch_mask.device != attention_priors.device
+    ):
+        raise E9ValidationError(
+            "valid_patch_mask must be boolean [J,P] on the attention device"
+        )
+    priors = attention_priors.detach().to(dtype=torch.float32)
+    if not torch.isfinite(priors).all() or torch.any(priors < 0):
+        raise E9ValidationError("attention priors must be finite and nonnegative")
+    valid_priors = torch.where(valid_patch_mask, priors, torch.zeros_like(priors))
+    maxima = valid_priors.amax(dim=-1, keepdim=True)
+    feature = torch.where(
+        maxima > 0,
+        valid_priors / maxima.clamp_min(torch.finfo(valid_priors.dtype).tiny),
+        torch.zeros_like(valid_priors),
+    )
+    feature = torch.where(valid_patch_mask, feature, torch.zeros_like(feature))
+    if (
+        not torch.isfinite(feature).all()
+        or torch.any(feature < 0)
+        or torch.any(feature > 1)
+    ):
+        raise E9ValidationError(
+            "max-valid-normalized attention feature must be finite in [0,1]"
+        )
+    return feature
 
 
 @dataclass(frozen=True)
@@ -335,6 +461,7 @@ class SparseRegionAlignmentAdapter(nn.Module):
         attention_priors: torch.Tensor,
         valid_patch_mask: torch.Tensor | None = None,
         precomputed_base_score: torch.Tensor | None = None,
+        precomputed_prior_feature: torch.Tensor | None = None,
     ) -> SparseRegionScoreOutput:
         query_count = base_queries.shape[0]
         image_count, patch_count, dimension = base_patches.shape
@@ -360,6 +487,32 @@ class SparseRegionAlignmentAdapter(nn.Module):
             prior_sums, torch.ones_like(prior_sums), atol=2e-3, rtol=2e-3
         ):
             raise E9ValidationError("attention priors must sum to one per image")
+        if precomputed_prior_feature is None:
+            prior_feature = max_valid_normalized_attention(
+                attention_priors, valid_patch_mask
+            )
+        else:
+            if (
+                precomputed_prior_feature.shape != attention_priors.shape
+                or precomputed_prior_feature.device != attention_priors.device
+            ):
+                raise E9ValidationError(
+                    "precomputed_prior_feature must have shape [J,P] on the "
+                    "attention device"
+                )
+            prior_feature = precomputed_prior_feature.detach().to(
+                dtype=torch.float32
+            )
+            if (
+                not torch.isfinite(prior_feature).all()
+                or torch.any(prior_feature < 0)
+                or torch.any(prior_feature > 1)
+                or torch.any(prior_feature[~valid_patch_mask] != 0)
+            ):
+                raise E9ValidationError(
+                    "precomputed_prior_feature must be finite in [0,1] and "
+                    "zero on invalid patches"
+                )
         if precomputed_base_score is None:
             base = torch.einsum(
                 "id,jpd->ijp",
@@ -375,7 +528,7 @@ class SparseRegionAlignmentAdapter(nn.Module):
         adapted = torch.einsum(
             "id,jpd->ijp", representations.query, representations.patches
         )
-        prior = attention_priors.detach().float()[None].expand(query_count, -1, -1)
+        prior = prior_feature[None].expand(query_count, -1, -1)
         gate_input = torch.stack((base, adapted, adapted - base, prior), dim=-1)
         gamma = self.config.gamma_max * torch.sigmoid(
             self.compatibility_gate(gate_input).squeeze(-1)
@@ -471,9 +624,8 @@ def compute_chunked_mil_scores(
         )
     if torch.any(valid_patch_mask.sum(dim=-1) < mil_top_k):
         raise E9ValidationError("each image must contain at least mil_top_k valid patches")
-    priors = attention_priors.detach().float()
-    scaled_prior = priors / priors.amax(dim=-1, keepdim=True).clamp_min(
-        torch.finfo(priors.dtype).tiny
+    prior_feature = max_valid_normalized_attention(
+        attention_priors, valid_patch_mask
     )
     reps = adapter.representations(
         mapped_queries, patch_embeddings, inputs_normalized=inputs_normalized
@@ -516,13 +668,16 @@ def compute_chunked_mil_scores(
         scored = adapter.score_from_representations(
             mapped_queries[start:stop], patch_embeddings, local_reps,
             attention_priors, valid_patch_mask,
+            precomputed_prior_feature=prior_feature,
         )
-        selection = scored.final_score + attention_selection_weight * scaled_prior[None]
+        selection = (
+            scored.final_score + attention_selection_weight * prior_feature[None]
+        )
         selection = selection.masked_fill(~valid_patch_mask[None], -torch.inf)
         indices = torch.topk(selection.detach(), mil_top_k, dim=-1, sorted=True).indices
         selected = torch.gather(scored.final_score, -1, indices)
         selected_attention = torch.gather(
-            scaled_prior[None].expand(stop - start, -1, -1), -1, indices
+            prior_feature[None].expand(stop - start, -1, -1), -1, indices
         )
         image_score = mil_temperature * torch.logsumexp(
             selected / mil_temperature, dim=-1
@@ -678,6 +833,73 @@ def _validate_dataset_identity(value: Any, expected_split: str, label: str) -> N
         _require_sha256(identity[key], f"{label}.{key}")
 
 
+def _validate_spatial_scientific_identity(
+    spatial: Mapping[str, Any], label: str
+) -> tuple[dict[str, str], dict[str, Any]]:
+    dino = validate_e9_dino_identity(spatial["dino_identity"], f"{label} DINO")
+    extraction = dict(
+        _closed_mapping(
+            spatial["extraction"], EXTRACTION_KEYS, f"{label} extraction"
+        )
+    )
+    mismatches = {
+        key: (extraction.get(key), expected)
+        for key, expected in CANONICAL_EXTRACTION.items()
+        if extraction.get(key) != expected
+    }
+    if mismatches:
+        raise E9ValidationError(
+            f"{label} canonical extraction identity mismatch: {mismatches}"
+        )
+    for key in ("annotation_path", "data_dir"):
+        if not isinstance(extraction[key], str) or not extraction[key]:
+            raise E9ValidationError(f"{label} extraction.{key} must be nonempty")
+    _require_sha256(
+        extraction["backbone_weights_sha256"],
+        f"{label} extraction backbone_weights_sha256",
+    )
+    if extraction["model"] != dino["model"]:
+        raise E9ValidationError(f"{label} DINO/extraction model mismatch")
+    if extraction["backbone_weights_sha256"] != dino["checkpoint_sha256"]:
+        raise E9ValidationError(f"{label} DINO/extraction checkpoint mismatch")
+    if spatial["geometry"] != EXPECTED_GEOMETRY:
+        raise E9ValidationError(f"{label} geometry mismatch")
+    if spatial["pooling_version"] != POOLING_VERSION:
+        raise E9ValidationError(f"{label} pooling version mismatch")
+    if spatial["attention_prior_version"] != ATTENTION_PRIOR_VERSION:
+        raise E9ValidationError(f"{label} attention-prior version mismatch")
+    if spatial["global_token_handling"] != GLOBAL_TOKEN_HANDLING:
+        raise E9ValidationError(f"{label} global-token handling mismatch")
+    return dino, extraction
+
+
+def _validate_diagnostic_summary(value: Any) -> dict[str, dict[str, float]]:
+    summary = _closed_mapping(
+        value, {"train", "validation"}, "diagnostic summary"
+    )
+    result: dict[str, dict[str, float]] = {}
+    for split in ("train", "validation"):
+        diagnostics = _closed_mapping(
+            summary[split],
+            set(E9_EPOCH_DIAGNOSTIC_KEYS),
+            f"diagnostic summary {split}",
+        )
+        converted: dict[str, float] = {}
+        for key, item in diagnostics.items():
+            if type(item) not in (int, float):
+                raise E9ValidationError(
+                    f"diagnostic summary {split}.{key} must be a Python scalar"
+                )
+            scalar = float(item)
+            if not math.isfinite(scalar):
+                raise E9ValidationError(
+                    f"diagnostic summary {split}.{key} must be finite"
+                )
+            converted[key] = scalar
+        result[split] = converted
+    return result
+
+
 def _expected_adapter_state_shapes(
     architecture: SparseRegionAlignmentConfig,
 ) -> dict[str, tuple[int, ...]]:
@@ -714,6 +936,7 @@ def validate_e9_checkpoint(
     expected_e3_identity: Mapping[str, Any] | None = None,
     expected_checkpoint_path: str | Path | None = None,
     expected_source_git_commit: str | None = None,
+    expected_dino_identity: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Validate generic schema first, then the canonical production identity."""
 
@@ -786,6 +1009,8 @@ def validate_e9_checkpoint(
         checkpoint["source_feature_identities"], {"train", "validation"},
         "source-feature identities",
     )
+    validated_dino: dict[str, dict[str, str]] = {}
+    validated_extraction: dict[str, dict[str, Any]] = {}
     for split_key, split_name in (("train", "train"), ("validation", "val")):
         query = _closed_mapping(
             query_identities[split_key], E7_IDENTITY_KEYS,
@@ -826,7 +1051,7 @@ def validate_e9_checkpoint(
             spatial_identities[split_key], SPATIAL_IDENTITY_KEYS,
             f"{split_key} spatial identity",
         )
-        if spatial["format_version"] != "talk2dino-e9-spatial-bank-v1":
+        if spatial["format_version"] != E9_SPATIAL_BANK_FORMAT:
             raise E9ValidationError("unsupported spatial-bank identity")
         if spatial["split"] != split_name:
             raise E9ValidationError(f"{split_key} spatial-bank split mismatch")
@@ -848,6 +1073,11 @@ def validate_e9_checkpoint(
             spatial["dataset_identity"], split_name,
             f"{split_key} spatial dataset identity",
         )
+        dino, extraction = _validate_spatial_scientific_identity(
+            spatial, f"{split_key} spatial identity"
+        )
+        validated_dino[split_key] = dino
+        validated_extraction[split_key] = extraction
         query_dataset = {
             "split": split_name,
             "source_image_count": query["source_image_count"],
@@ -919,6 +1149,28 @@ def validate_e9_checkpoint(
         if spatial["production_eligible"] != derived_spatial_eligible:
             raise E9ValidationError(f"forged {split_key} spatial eligibility")
 
+    if validated_dino["train"] != validated_dino["validation"]:
+        raise E9ValidationError("train/validation DINO identities differ")
+    invariant_extraction_keys = EXTRACTION_KEYS.difference(
+        {"annotation_path", "data_dir"}
+    )
+    if any(
+        validated_extraction["train"][key]
+        != validated_extraction["validation"][key]
+        for key in invariant_extraction_keys
+    ):
+        raise E9ValidationError(
+            "train/validation invariant extraction identities differ"
+        )
+    for key in (
+        "geometry", "pooling_version", "attention_prior_version",
+        "global_token_handling",
+    ):
+        if spatial_identities["train"][key] != spatial_identities["validation"][key]:
+            raise E9ValidationError(
+                f"train/validation spatial {key} identities differ"
+            )
+
     e3_identity = _closed_mapping(
         checkpoint["e3_identity"], {"config_sha256", "checkpoint_sha256"},
         "E3 identity",
@@ -935,8 +1187,7 @@ def validate_e9_checkpoint(
     ):
         raise E9ValidationError("incompatible train/validation E3 identities")
 
-    if not isinstance(checkpoint["diagnostic_summary"], Mapping):
-        raise E9ValidationError("diagnostic_summary must be a mapping")
+    _validate_diagnostic_summary(checkpoint["diagnostic_summary"])
     if isinstance(checkpoint["epoch"], bool) or not isinstance(checkpoint["epoch"], int) or checkpoint["epoch"] <= 0:
         raise E9ValidationError("checkpoint epoch must be positive")
     metric = checkpoint["best_validation_metric"]
@@ -991,6 +1242,14 @@ def validate_e9_checkpoint(
             raise E9ValidationError("E9 source Git identity mismatch")
     elif require_production:
         raise E9ValidationError("production E9 requires an expected source Git commit")
+    if expected_dino_identity is not None:
+        expected_dino = validate_e9_dino_identity(
+            expected_dino_identity, "expected runtime DINO identity"
+        )
+        if validated_dino["train"] != expected_dino:
+            raise E9ValidationError("E9 checkpoint/runtime DINO identity mismatch")
+    elif require_production:
+        raise E9ValidationError("production E9 requires an expected DINO identity")
     if expected_checkpoint_path is not None and not Path(expected_checkpoint_path).is_file():
         raise E9ValidationError("E9 checkpoint path does not exist")
     return {
@@ -1008,6 +1267,7 @@ def load_e9_adapter(
     expected_e3_identity: Mapping[str, Any] | None = None,
     expected_checkpoint_sha256: str | None = None,
     expected_source_git_commit: str | None = None,
+    expected_dino_identity: Mapping[str, Any] | None = None,
 ) -> SparseRegionAlignmentAdapter:
     path = Path(path)
     if require_production and expected_checkpoint_sha256 is None:
@@ -1027,6 +1287,7 @@ def load_e9_adapter(
         expected_e3_identity=expected_e3_identity,
         expected_checkpoint_path=path,
         expected_source_git_commit=expected_source_git_commit,
+        expected_dino_identity=expected_dino_identity,
     )
     adapter = SparseRegionAlignmentAdapter(result["architecture"])
     adapter.load_state_dict(checkpoint["adapter_state_dict"], strict=True)
@@ -1037,6 +1298,8 @@ def load_e9_adapter(
 __all__ = [
     "E9_ADAPTER_CHECKPOINT_FORMAT",
     "CANONICAL_E9_TRAINING_CONFIG",
+    "E9_EPOCH_DIAGNOSTIC_KEYS",
+    "GATE_PRIOR_FEATURE_VERSION",
     "E9ValidationError",
     "SparseRegionAlignmentConfig",
     "SparseRegionAlignmentAdapter",
@@ -1044,9 +1307,11 @@ __all__ = [
     "SparseRegionScoreOutput",
     "E9MILOutput",
     "compute_chunked_mil_scores",
+    "max_valid_normalized_attention",
     "symmetric_infonce",
     "compute_e9_loss",
     "validate_e9_training_config",
     "validate_e9_checkpoint",
+    "validate_e9_dino_identity",
     "load_e9_adapter",
 ]

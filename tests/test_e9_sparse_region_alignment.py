@@ -10,6 +10,7 @@ from src.e9_sparse_region_alignment import (
     SparseRegionAlignmentConfig,
     compute_chunked_mil_scores,
     compute_e9_loss,
+    max_valid_normalized_attention,
     symmetric_infonce,
 )
 
@@ -91,6 +92,82 @@ def test_invalid_attention_prior_is_rejected():
     priors[0] *= 0.5
     with pytest.raises(E9ValidationError, match="sum to one"):
         model(query, patches, priors)
+
+
+def test_gate_prior_feature_is_grid_invariant_for_16x16_and_32x32():
+    model = adapter().eval()
+    query = normalized((1, 8), 21)
+    coarse_patches = normalized((1, 256, 8), 22)
+    coarse_logits = torch.linspace(-3, 4, 256).reshape(1, 16, 16)
+    coarse_prior = torch.softmax(coarse_logits.flatten(1), dim=-1)
+    raw_prior = (
+        (coarse_prior.reshape(1, 16, 16) / 4)
+        .repeat_interleave(2, dim=1)
+        .repeat_interleave(2, dim=2)
+        .flatten(1)
+    )
+    raw_patches = (
+        coarse_patches.reshape(1, 16, 16, 8)
+        .repeat_interleave(2, dim=1)
+        .repeat_interleave(2, dim=2)
+        .reshape(1, 1024, 8)
+    )
+
+    coarse_feature = max_valid_normalized_attention(coarse_prior)
+    raw_feature = max_valid_normalized_attention(raw_prior)
+    expected_feature = (
+        coarse_feature.reshape(1, 16, 16)
+        .repeat_interleave(2, dim=1)
+        .repeat_interleave(2, dim=2)
+        .flatten(1)
+    )
+    torch.testing.assert_close(raw_feature, expected_feature)
+    assert not torch.allclose(raw_prior, expected_feature)
+
+    coarse = model(query, coarse_patches, coarse_prior)
+    raw = model(query, raw_patches, raw_prior)
+    expected_gamma = (
+        coarse.gamma.reshape(1, 1, 16, 16)
+        .repeat_interleave(2, dim=2)
+        .repeat_interleave(2, dim=3)
+        .flatten(2)
+    )
+    expected_final = (
+        coarse.final_score.reshape(1, 1, 16, 16)
+        .repeat_interleave(2, dim=2)
+        .repeat_interleave(2, dim=3)
+        .flatten(2)
+    )
+    torch.testing.assert_close(raw.gamma, expected_gamma)
+    torch.testing.assert_close(raw.final_score, expected_final)
+
+
+def test_gate_prior_feature_uniform_invalid_and_zero_support_cases():
+    feature_256 = max_valid_normalized_attention(
+        torch.full((1, 256), 1 / 256)
+    )
+    feature_1024 = max_valid_normalized_attention(
+        torch.full((1, 1024), 1 / 1024)
+    )
+    assert torch.equal(feature_256, torch.ones_like(feature_256))
+    assert torch.equal(feature_1024, torch.ones_like(feature_1024))
+
+    valid = torch.tensor([[True, True, False]])
+    first = max_valid_normalized_attention(
+        torch.tensor([[0.1, 0.2, 0.7]], requires_grad=True), valid
+    )
+    second = max_valid_normalized_attention(
+        torch.tensor([[0.1, 0.2, 99.0]]), valid
+    )
+    assert torch.equal(first, torch.tensor([[0.5, 1.0, 0.0]]))
+    assert torch.equal(first, second)
+    assert not first.requires_grad
+
+    zero = max_valid_normalized_attention(
+        torch.tensor([[0.0, 0.0, 1.0]]), valid
+    )
+    assert torch.equal(zero, torch.zeros_like(zero))
+    assert torch.isfinite(zero).all()
 
 
 def test_gamma_zero_is_bitwise_exact_e3():

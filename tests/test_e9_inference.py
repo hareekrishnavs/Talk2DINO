@@ -1,3 +1,4 @@
+import hashlib
 import inspect
 import sys
 from pathlib import Path
@@ -120,6 +121,10 @@ def test_e9_configuration_is_isolated_and_uses_external_artifact_binding():
             "adapter_path": "${oc.env:TALK2DINO_E9_ADAPTER}",
             "adapter_sha256": "${oc.env:TALK2DINO_E9_ADAPTER_SHA256}",
             "source_git_commit": "${oc.env:TALK2DINO_E9_SOURCE_GIT_COMMIT}",
+            "dino_source_commit": "${oc.env:TALK2DINO_E9_DINO_SOURCE_COMMIT}",
+            "dino_checkpoint_sha256": (
+                "${oc.env:TALK2DINO_E9_DINO_CHECKPOINT_SHA256}"
+            ),
         }
     }
     serialized = path.read_text().lower()
@@ -145,6 +150,8 @@ def test_inference_grid_rejects_incompatible_patch_count():
             {
                 "adapter_path": "x", "adapter_sha256": "a" * 64,
                 "source_git_commit": "b" * 40,
+                "dino_source_commit": "c" * 40,
+                "dino_checkpoint_sha256": "d" * 64,
             },
             {"balanced_retrieval_prototypes": {}},
             "mutually exclusive",
@@ -166,3 +173,55 @@ def test_invalid_e9_configuration_fails_before_model_construction(
             sparse_region_alignment=sparse,
             **extra,
         )
+
+
+@pytest.mark.parametrize(
+    "model_name,expected_digest",
+    (
+        ("dinov2_vitb14_reg", "0" * 64),
+        ("dinov2_vitb14_reg", "not-a-digest"),
+        ("dinov2_vitl14_reg", "0" * 64),
+    ),
+)
+def test_runtime_dino_identity_fails_before_adapter_or_backbone_construction(
+    tmp_path, monkeypatch, model_name, expected_digest
+):
+    module()
+    from models.dinotext import dinotext
+
+    weights = tmp_path / "dino.pth"
+    weights.write_bytes(b"tiny synthetic DINO identity probe")
+    actual = hashlib.sha256(weights.read_bytes()).hexdigest()
+    if expected_digest == "0" * 64 and model_name == "dinov2_vitb14_reg":
+        assert actual != expected_digest
+    counts = {"adapter": 0, "backbone": 0}
+
+    def adapter_loader(*args, **kwargs):
+        counts["adapter"] += 1
+        raise AssertionError("adapter construction must not run")
+
+    def backbone_loader(*args, **kwargs):
+        counts["backbone"] += 1
+        raise AssertionError("DINO construction must not run")
+
+    monkeypatch.setattr(dinotext, "load_e9_adapter", adapter_loader)
+    monkeypatch.setattr(dinotext, "load_local_vision_backbone", backbone_loader)
+    sparse = {
+        "adapter_path": "unused",
+        "adapter_sha256": "a" * 64,
+        "source_git_commit": "b" * 40,
+        "dino_source_commit": "c" * 40,
+        "dino_checkpoint_sha256": expected_digest,
+    }
+    with pytest.raises((ValueError, RuntimeError), match="DINO|SHA256|digest|model"):
+        dinotext.DINOText(
+            model_name=model_name,
+            resize_dim=448,
+            clip_model_name="construction-must-not-run",
+            proj_class="construction-must-not-run",
+            proj_name="construction-must-not-run",
+            proj_model="construction-must-not-run",
+            backbone_weights=str(weights),
+            sparse_region_alignment=sparse,
+        )
+    assert counts == {"adapter": 0, "backbone": 0}

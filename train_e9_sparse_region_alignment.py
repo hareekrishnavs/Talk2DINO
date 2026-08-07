@@ -25,6 +25,7 @@ from src.e7_training_bank import load_e7_training_bank
 from src.e9_sparse_region_alignment import (
     CANONICAL_E9_TRAINING_CONFIG,
     E9_ADAPTER_CHECKPOINT_FORMAT,
+    E9_EPOCH_DIAGNOSTIC_KEYS,
     SparseRegionAlignmentAdapter,
     SparseRegionAlignmentConfig,
     compute_chunked_mil_scores,
@@ -93,6 +94,12 @@ def _spatial_identity(bank: E9SpatialBank) -> dict[str, Any]:
         "source_git_commit": manifest["source_git_commit"],
         "source_git_dirty": manifest["source_git_dirty"],
         "source_git_diff_sha256": manifest["source_git_diff_sha256"],
+        "dino_identity": dict(manifest["dino_identity"]),
+        "extraction": dict(manifest["extraction"]),
+        "geometry": dict(manifest["geometry"]),
+        "pooling_version": manifest["pooling_version"],
+        "attention_prior_version": manifest["attention_prior_version"],
+        "global_token_handling": manifest["global_token_handling"],
     }
 
 
@@ -133,6 +140,24 @@ def _require_input_identity_relationships(
             or query["e3_checkpoint_sha256"] != e3_identity["checkpoint_sha256"]
         ):
             raise ValueError(f"{split_key} E3 identity mismatch")
+    if spatial_identities["train"]["dino_identity"] != spatial_identities["validation"]["dino_identity"]:
+        raise ValueError("train/validation DINO identities differ")
+    for key in (
+        "geometry", "pooling_version", "attention_prior_version",
+        "global_token_handling",
+    ):
+        if spatial_identities["train"][key] != spatial_identities["validation"][key]:
+            raise ValueError(f"train/validation spatial {key} identities differ")
+    for key in spatial_identities["train"]["extraction"]:
+        if key in {"annotation_path", "data_dir"}:
+            continue
+        if (
+            spatial_identities["train"]["extraction"][key]
+            != spatial_identities["validation"]["extraction"][key]
+        ):
+            raise ValueError(
+                "train/validation invariant extraction identities differ"
+            )
 
 
 def load_e9_training_config(path: str | Path) -> dict[str, Any]:
@@ -327,6 +352,10 @@ def _run_epoch(
     result["duplicate_image_batch_violations"] = float(duplicate_violations)
     result["nonfinite_counts"] = 0.0
     result["train_validation_image_overlap_violations"] = 0.0
+    if set(result) != E9_EPOCH_DIAGNOSTIC_KEYS:
+        raise RuntimeError(
+            "E9 trainer diagnostic keys drifted from the checkpoint schema"
+        )
     return result
 
 
