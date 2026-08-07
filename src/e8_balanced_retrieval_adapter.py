@@ -71,6 +71,40 @@ def _closed_dataclass_from_mapping(cls, value: Mapping[str, Any], label: str):
 
 
 @dataclass(frozen=True)
+class E8InferenceAblationSettings:
+    """Closed, inference-only settings for the E8 mechanism ablation."""
+
+    prototype_source: str = "anchored_prototypes"
+    reliability_mode: str = "entropy"
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.prototype_source, str)
+            or self.prototype_source
+            not in {"anchored_prototypes", "mode_vectors"}
+        ):
+            raise ValueError(
+                "prototype_source must be 'anchored_prototypes' or "
+                "'mode_vectors'"
+            )
+        if (
+            not isinstance(self.reliability_mode, str)
+            or self.reliability_mode not in {"entropy", "constant_one"}
+        ):
+            raise ValueError(
+                "reliability_mode must be 'entropy' or 'constant_one'"
+            )
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]):
+        return _closed_dataclass_from_mapping(
+            cls,
+            value,
+            "E8 inference ablation settings",
+        )
+
+
+@dataclass(frozen=True)
 class BalancedRetrievalPrototypeAdapterConfig:
     """Closed architecture configuration for the E8 adapter."""
 
@@ -767,6 +801,7 @@ def compute_e8_scores(
     prototype_valid_mask: torch.Tensor | None = None,
     precomputed_base_score: torch.Tensor | None = None,
     targets_are_normalized: bool = False,
+    reliability_mode: str = "entropy",
 ) -> E8ScoreOutput:
     """Compute E8 target-conditioned fusion for arbitrary Q and J counts.
 
@@ -778,6 +813,13 @@ def compute_e8_scores(
 
     _finite_positive("prototype_temperature", prototype_temperature)
     _finite_positive("responsibility_temperature", responsibility_temperature)
+    if (
+        not isinstance(reliability_mode, str)
+        or reliability_mode not in {"entropy", "constant_one"}
+    ):
+        raise ValueError(
+            "reliability_mode must be 'entropy' or 'constant_one'"
+        )
     if (
         not torch.is_tensor(mapped_queries)
         or mapped_queries.ndim != 2
@@ -896,6 +938,11 @@ def compute_e8_scores(
         float(responsibility_temperature),
         prototype_valid_mask,
     )
+    if reliability_mode == "constant_one":
+        reliability = valid_rows[:, None].expand(
+            -1,
+            target.shape[0],
+        ).to(dtype=prototype_score.dtype)
     effective_beta = beta_value[:, None] * reliability
     effective_beta = torch.where(
         valid_rows[:, None], effective_beta, torch.zeros_like(effective_beta)
@@ -2060,6 +2107,19 @@ class BalancedPrototypeBatch:
     retrieval_count: torch.Tensor
 
 
+def select_e8_scoring_vectors(
+    generated: BalancedPrototypeBatch,
+    settings: E8InferenceAblationSettings,
+) -> torch.Tensor:
+    """Select an existing E8 tensor without changing prototype generation."""
+
+    if not isinstance(settings, E8InferenceAblationSettings):
+        raise TypeError("settings must be E8InferenceAblationSettings")
+    if settings.prototype_source == "anchored_prototypes":
+        return generated.prototypes
+    return generated.mode_vectors
+
+
 class BalancedRetrievalPrototypes:
     """One-time class retrieval followed by the frozen balanced E8 adapter."""
 
@@ -2251,6 +2311,7 @@ __all__ = [
     "E8_TRAINING_CONFIG_KEYS",
     "E8_RETRIEVAL_CONFIG_KEYS",
     "E8_LOSS_CONFIG_KEYS",
+    "E8InferenceAblationSettings",
     "BalancedRetrievalPrototypeAdapterConfig",
     "E8LossConfig",
     "BalancedAdapterOutput",
@@ -2272,6 +2333,7 @@ __all__ = [
     "load_e8_adapter_checkpoint",
     "BalancedRetrievalSettings",
     "BalancedPrototypeBatch",
+    "select_e8_scoring_vectors",
     "BalancedRetrievalPrototypes",
     "load_balanced_retrieval_prototypes",
 ]

@@ -10,9 +10,12 @@ import torch.nn.functional as F
 import yaml
 
 from src.e8_balanced_retrieval_adapter import (
+    BalancedPrototypeBatch,
     BalancedRetrievalPrototypes,
     BalancedRetrievalSettings,
+    E8InferenceAblationSettings,
     compute_e8_scores,
+    select_e8_scoring_vectors,
 )
 
 
@@ -53,6 +56,7 @@ def independent_spatial_reference(
     *,
     prototype_temperature,
     responsibility_temperature,
+    reliability_mode="entropy",
 ):
     image = F.normalize(image.float(), dim=1)
     text = F.normalize(text.float(), dim=-1)
@@ -84,7 +88,9 @@ def independent_spatial_reference(
                         prototype_scores / responsibility_temperature,
                         dim=0,
                     )
-                    if prototype_count == 1:
+                    if reliability_mode == "constant_one":
+                        local_reliability = torch.ones_like(base)
+                    elif prototype_count == 1:
                         local_reliability = torch.ones_like(base)
                     else:
                         entropy = -torch.sum(
@@ -107,6 +113,201 @@ def independent_spatial_reference(
                         batch_index, class_index, row, column
                     ] = local_reliability
     return final, reliability
+
+
+def ablation_batch():
+    prototypes = normalized((3 * 2, 5), 101).reshape(3, 2, 5)
+    modes = normalized((3 * 2, 5), 102).reshape(3, 2, 5)
+    return BalancedPrototypeBatch(
+        prototypes=prototypes,
+        mode_vectors=modes,
+        alpha=torch.tensor([[0.1, 0.2], [0.2, 0.3], [0.3, 0.1]]),
+        beta=torch.tensor([0.05, 0.20, 0.30]),
+        candidate_assignments=torch.ones(3, 4, 2) / 2,
+        candidate_weights=torch.ones(3, 4) / 4,
+        slot_mass=torch.ones(3, 2) / 2,
+        valid_mask=torch.tensor(
+            [[True, True], [True, True], [False, False]]
+        ),
+        retrieval_indices=torch.tensor(
+            [[1, 2, 3, 4], [5, 6, 7, 8], [-1, -1, -1, -1]]
+        ),
+        retrieval_scores=torch.tensor(
+            [[0.9, 0.8, 0.7, 0.6], [0.8, 0.7, 0.6, 0.5], [0, 0, 0, 0]]
+        ),
+        retrieval_count=torch.tensor([4, 4, 0]),
+    )
+
+
+def test_ablation_settings_are_strict_and_default_to_finalized_e8():
+    assert E8InferenceAblationSettings() == E8InferenceAblationSettings(
+        prototype_source="anchored_prototypes",
+        reliability_mode="entropy",
+    )
+    with pytest.raises(ValueError, match="missing"):
+        E8InferenceAblationSettings.from_mapping(
+            {"prototype_source": "mode_vectors"}
+        )
+    with pytest.raises(ValueError, match="unknown"):
+        E8InferenceAblationSettings.from_mapping(
+            {
+                "prototype_source": "mode_vectors",
+                "reliability_mode": "entropy",
+                "extra": True,
+            }
+        )
+    with pytest.raises(ValueError, match="prototype_source"):
+        E8InferenceAblationSettings("unknown", "entropy")
+    with pytest.raises(ValueError, match="reliability_mode"):
+        E8InferenceAblationSettings("anchored_prototypes", "unknown")
+
+
+def test_scoring_vector_selection_changes_only_the_selected_tensor():
+    generated = ablation_batch()
+    beta = generated.beta
+    indices = generated.retrieval_indices
+    scores = generated.retrieval_scores
+    valid = generated.valid_mask
+
+    anchored = select_e8_scoring_vectors(
+        generated,
+        E8InferenceAblationSettings("anchored_prototypes", "entropy"),
+    )
+    modes = select_e8_scoring_vectors(
+        generated,
+        E8InferenceAblationSettings("mode_vectors", "constant_one"),
+    )
+
+    assert anchored is generated.prototypes
+    assert modes is generated.mode_vectors
+    assert not torch.equal(anchored, modes)
+    assert generated.beta is beta
+    assert generated.retrieval_indices is indices
+    assert generated.retrieval_scores is scores
+    assert generated.valid_mask is valid
+
+
+def test_omitted_ablation_is_bitwise_finalized_e8():
+    query = normalized((3, 5), 103)
+    targets = normalized((7, 5), 104)
+    prototypes = normalized((3 * 2, 5), 105).reshape(3, 2, 5)
+    beta = torch.tensor([0.05, 0.20, 0.30])
+    default = compute_e8_scores(query, targets, prototypes, beta)
+    explicit = compute_e8_scores(
+        query,
+        targets,
+        prototypes,
+        beta,
+        reliability_mode="entropy",
+    )
+    for name, value in vars(default).items():
+        assert torch.equal(value, getattr(explicit, name)), name
+
+
+@pytest.mark.parametrize(
+    "prototype_source,reliability_mode",
+    (
+        ("anchored_prototypes", "entropy"),
+        ("anchored_prototypes", "constant_one"),
+        ("mode_vectors", "entropy"),
+        ("mode_vectors", "constant_one"),
+    ),
+)
+def test_all_four_ablation_cells_match_independent_spatial_reference(
+    prototype_source,
+    reliability_mode,
+    monkeypatch,
+):
+    module = masker_module()
+    image = normalized((1 * 2 * 3, 5), 106).reshape(1, 2, 3, 5).permute(
+        0, 3, 1, 2
+    )
+    text = normalized((3, 5), 107)
+    generated = ablation_batch()
+    settings = E8InferenceAblationSettings(
+        prototype_source,
+        reliability_mode,
+    )
+    scoring_vectors = select_e8_scoring_vectors(generated, settings)
+    valid = torch.ones_like(generated.valid_mask)
+    original_normalize = module.us.normalize
+    original_einsum = torch.einsum
+    original_sigmoid = torch.sigmoid
+    image_normalizations = 0
+    base_score_computations = 0
+    sigmoid_calls = 0
+
+    def counting_normalize(value, *args, **kwargs):
+        nonlocal image_normalizations
+        if value is image:
+            image_normalizations += 1
+        return original_normalize(value, *args, **kwargs)
+
+    def counting_einsum(equation, *args, **kwargs):
+        nonlocal base_score_computations
+        if equation == "b c h w, n c -> b n h w":
+            base_score_computations += 1
+        return original_einsum(equation, *args, **kwargs)
+
+    def counting_sigmoid(value):
+        nonlocal sigmoid_calls
+        sigmoid_calls += 1
+        return original_sigmoid(value)
+
+    monkeypatch.setattr(module.us, "normalize", counting_normalize)
+    monkeypatch.setattr(torch, "einsum", counting_einsum)
+    monkeypatch.setattr(torch, "sigmoid", counting_sigmoid)
+    actual = module.DINOTextMasker().forward_seg_with_balanced_prototypes(
+        image,
+        text,
+        scoring_vectors,
+        valid,
+        generated.beta,
+        prototype_temperature=0.10,
+        responsibility_temperature=0.10,
+        reliability_mode=reliability_mode,
+    )[1]
+    assert image_normalizations == 1
+    assert base_score_computations == 1
+    assert sigmoid_calls == 1
+    expected, _ = independent_spatial_reference(
+        image,
+        text,
+        scoring_vectors,
+        generated.beta,
+        prototype_temperature=0.10,
+        responsibility_temperature=0.10,
+        reliability_mode=reliability_mode,
+    )
+    torch.testing.assert_close(actual, expected, atol=2e-6, rtol=2e-6)
+
+
+def test_constant_one_changes_only_reliability_and_respects_no_retrieval():
+    text = normalized((3, 5), 108)
+    targets = normalized((7, 5), 109)
+    prototypes = normalized((3 * 2, 5), 110).reshape(3, 2, 5)
+    beta = torch.tensor([0.05, 0.20, 0.30])
+    valid = torch.tensor([[True, True], [True, False], [False, False]])
+    entropy = compute_e8_scores(
+        text,
+        targets,
+        prototypes,
+        beta,
+        prototype_valid_mask=valid,
+        reliability_mode="entropy",
+    )
+    constant = compute_e8_scores(
+        text,
+        targets,
+        prototypes,
+        beta,
+        prototype_valid_mask=valid,
+        reliability_mode="constant_one",
+    )
+    assert torch.equal(constant.responsibility, entropy.responsibility)
+    assert torch.equal(constant.reliability[:2], torch.ones(2, 7))
+    assert torch.equal(constant.reliability[2], torch.zeros(7))
+    assert torch.equal(constant.final_score[2], constant.base_score[2])
 
 
 def test_spatial_target_conditioned_fusion_matches_loop_and_has_one_sigmoid(
@@ -230,6 +431,78 @@ def test_beta_zero_and_no_retrieval_are_bitwise_e3(monkeypatch):
     assert torch.equal(zero_mask, baseline_mask)
     assert torch.equal(empty_score, baseline_score)
     assert torch.equal(empty_mask, baseline_mask)
+
+
+@pytest.mark.parametrize(
+    "prototype_source,reliability_mode",
+    (
+        ("anchored_prototypes", "entropy"),
+        ("anchored_prototypes", "constant_one"),
+        ("mode_vectors", "entropy"),
+        ("mode_vectors", "constant_one"),
+    ),
+)
+def test_every_ablation_cell_preserves_exact_e3_controls(
+    prototype_source,
+    reliability_mode,
+):
+    module = masker_module()
+    masker = module.DINOTextMasker()
+    image = normalized((1 * 2 * 2, 5), 111).reshape(1, 2, 2, 5).permute(
+        0, 3, 1, 2
+    )
+    text = normalized((3, 5), 112)
+    generated = ablation_batch()
+    vectors = select_e8_scoring_vectors(
+        generated,
+        E8InferenceAblationSettings(prototype_source, reliability_mode),
+    )
+    baseline_mask, baseline_score = masker.forward_seg(image, text)
+    zero_mask, zero_score = masker.forward_seg_with_balanced_prototypes(
+        image,
+        text,
+        vectors,
+        torch.ones_like(generated.valid_mask),
+        torch.zeros_like(generated.beta),
+        reliability_mode=reliability_mode,
+    )
+    empty_mask, empty_score = masker.forward_seg_with_balanced_prototypes(
+        image,
+        text,
+        vectors,
+        torch.zeros_like(generated.valid_mask),
+        generated.beta,
+        reliability_mode=reliability_mode,
+    )
+    assert torch.equal(zero_score, baseline_score)
+    assert torch.equal(zero_mask, baseline_mask)
+    assert torch.equal(empty_score, baseline_score)
+    assert torch.equal(empty_mask, baseline_mask)
+
+
+@pytest.mark.parametrize("reliability_mode", ("entropy", "constant_one"))
+def test_mixed_fallback_rows_are_exact_e3_for_each_reliability_mode(
+    reliability_mode,
+):
+    query = normalized((4, 5), 113)
+    targets = normalized((6, 5), 114)
+    vectors = normalized((4 * 2, 5), 115).reshape(4, 2, 5)
+    beta = torch.tensor([0.30, 0.00, 0.30, 0.20])
+    valid = torch.tensor(
+        [[True, True], [True, True], [False, False], [True, True]]
+    )
+    result = compute_e8_scores(
+        query,
+        targets,
+        vectors,
+        beta,
+        prototype_valid_mask=valid,
+        reliability_mode=reliability_mode,
+    )
+    assert torch.equal(result.final_score[1], result.base_score[1])
+    assert torch.equal(result.final_score[2], result.base_score[2])
+    assert torch.equal(result.effective_beta[1], torch.zeros(6))
+    assert torch.equal(result.effective_beta[2], torch.zeros(6))
 
 
 def test_mixed_active_and_fallback_classes_are_bitwise_e3(monkeypatch):
@@ -448,6 +721,57 @@ def test_e8_inference_diagnostics_use_null_for_all_empty(monkeypatch):
     assert "prototype_pairwise_cosine=null" in messages[0]
 
 
+@pytest.mark.parametrize(
+    "settings,expected_cosine",
+    (
+        (
+            E8InferenceAblationSettings(
+                "anchored_prototypes",
+                "constant_one",
+            ),
+            1.0,
+        ),
+        (
+            E8InferenceAblationSettings("mode_vectors", "entropy"),
+            0.0,
+        ),
+    ),
+)
+def test_e8_logging_identifies_ablation_and_actual_scoring_vectors(
+    monkeypatch,
+    settings,
+    expected_cosine,
+):
+    builder = dinotext_builder_module()
+    generated = diagnostic_batch()
+    generated.prototypes = generated.prototypes.clone()
+    generated.prototypes[0] = torch.tensor([[1.0, 0.0], [1.0, 0.0]])
+    diagnostics = builder._e8_diagnostic_values(generated, settings)
+    torch.testing.assert_close(
+        diagnostics["scoring_vector_pairwise_cosine"],
+        torch.tensor([expected_cosine]),
+    )
+    messages = []
+    monkeypatch.setattr(
+        builder,
+        "get_logger",
+        lambda: SimpleNamespace(info=messages.append),
+    )
+    builder._log_e8_summary(
+        generated,
+        SimpleNamespace(
+            prototype_temperature=0.10,
+            responsibility_temperature=0.10,
+        ),
+        ["one", "two", "three"],
+        settings,
+    )
+    assert len(messages) == 1
+    assert f"prototype_source={settings.prototype_source}" in messages[0]
+    assert f"reliability_mode={settings.reliability_mode}" in messages[0]
+    assert "scoring_vector_pairwise_cosine=" in messages[0]
+
+
 def test_e8_generation_cache_identity_binds_every_inference_input():
     raw = normalized((2, 4), 40)
     mapped = normalized((2, 5), 41)
@@ -528,6 +852,70 @@ def test_e6_e7_e8_are_rejected_before_model_construction(enabled):
         )
 
 
+@pytest.mark.parametrize(
+    "ablation,balanced,match",
+    (
+        (
+            {
+                "prototype_source": "mode_vectors",
+                "reliability_mode": "entropy",
+            },
+            None,
+            "allowed only",
+        ),
+        (
+            {"prototype_source": "mode_vectors"},
+            {},
+            "missing",
+        ),
+        (
+            {
+                "prototype_source": "mode_vectors",
+                "reliability_mode": "entropy",
+                "unknown": 1,
+            },
+            {},
+            "unknown",
+        ),
+        (
+            {
+                "prototype_source": "not-a-source",
+                "reliability_mode": "entropy",
+            },
+            {},
+            "prototype_source",
+        ),
+        (
+            {
+                "prototype_source": "mode_vectors",
+                "reliability_mode": "not-a-mode",
+            },
+            {},
+            "reliability_mode",
+        ),
+    ),
+)
+def test_invalid_ablation_configuration_fails_before_model_construction(
+    ablation,
+    balanced,
+    match,
+):
+    masker_module()
+    from models.dinotext.dinotext import DINOText
+
+    with pytest.raises(ValueError, match=match):
+        DINOText(
+            model_name="construction-must-not-run",
+            resize_dim=1,
+            clip_model_name="construction-must-not-run",
+            proj_class="construction-must-not-run",
+            proj_name="construction-must-not-run",
+            proj_model="construction-must-not-run",
+            balanced_retrieval_prototypes=balanced,
+            balanced_retrieval_ablation=ablation,
+        )
+
+
 def test_e8_configuration_is_separate_and_closed():
     root = Path("src/open_vocabulary_segmentation/configs/stuff")
     path = root / (
@@ -562,3 +950,51 @@ def test_e8_configuration_is_separate_and_closed():
         "mask",
     ):
         assert forbidden not in serialized
+
+
+def test_all_four_ablation_configurations_are_closed_and_distinct():
+    root = Path("src/open_vocabulary_segmentation/configs/stuff")
+    stem = (
+        "dinotext_stuff_vitb_mlp_infonce_paired_soft_routing_"
+        "balanced_retrieval_fusion"
+    )
+    expected = {
+        f"{stem}.yml": E8InferenceAblationSettings(),
+        f"{stem}_r0.yml": E8InferenceAblationSettings(
+            "anchored_prototypes",
+            "constant_one",
+        ),
+        f"{stem}_modes.yml": E8InferenceAblationSettings(
+            "mode_vectors",
+            "entropy",
+        ),
+        f"{stem}_modes_r0.yml": E8InferenceAblationSettings(
+            "mode_vectors",
+            "constant_one",
+        ),
+    }
+    identities = set()
+    for name, settings in expected.items():
+        config = yaml.safe_load((root / name).read_text())
+        if name == f"{stem}.yml":
+            assert "balanced_retrieval_ablation" not in config["model"]
+            actual = E8InferenceAblationSettings()
+        else:
+            assert config["_base_"] == f"{stem}.yml"
+            assert set(config) == {"_base_", "model"}
+            assert set(config["model"]) == {
+                "balanced_retrieval_ablation"
+            }
+            actual = E8InferenceAblationSettings.from_mapping(
+                config["model"]["balanced_retrieval_ablation"]
+            )
+        assert actual == settings
+        identities.add((actual.prototype_source, actual.reliability_mode))
+    assert len(identities) == 4
+
+    training_source = Path("train_e8_balanced_retrieval_adapter.py").read_text()
+    training_config = Path("configs/e8_balanced_retrieval_fusion.yaml").read_text()
+    assert "balanced_retrieval_ablation" not in training_source
+    assert "constant_one" not in training_source
+    assert "balanced_retrieval_ablation" not in training_config
+    assert "constant_one" not in training_config

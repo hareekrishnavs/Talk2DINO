@@ -8,6 +8,10 @@ import mmcv
 import torch
 
 from .dinotext_seg import DINOTextSegInference
+from src.e8_balanced_retrieval_adapter import (
+    E8InferenceAblationSettings,
+    select_e8_scoring_vectors,
+)
 from utils import get_logger
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -101,7 +105,7 @@ def _pairwise_cosines(values, valid_mask=None):
     )]
 
 
-def _e8_diagnostic_values(generated):
+def _e8_diagnostic_values(generated, ablation_settings=None):
     """Return collapse diagnostics from retrieval-valid rows only.
 
     Retrieval eligibility is defined identically to training: a strictly
@@ -109,6 +113,12 @@ def _e8_diagnostic_values(generated):
     can report the documented ``null`` sentinel rather than fabricated zeros.
     """
 
+    if ablation_settings is None:
+        ablation_settings = E8InferenceAblationSettings()
+    scoring_vectors = select_e8_scoring_vectors(
+        generated,
+        ablation_settings,
+    )
     retrieval_count = generated.retrieval_count.detach()
     eligible = retrieval_count > 0
     slot_mass = generated.slot_mass.detach().float()[eligible]
@@ -140,12 +150,23 @@ def _e8_diagnostic_values(generated):
             prototypes,
             prototype_valid_mask,
         ),
+        "scoring_vector_pairwise_cosine": _pairwise_cosines(
+            scoring_vectors.detach()[eligible],
+            prototype_valid_mask,
+        ),
     }
 
 
-def _log_e8_summary(generated, settings, classnames):
+def _log_e8_summary(
+    generated,
+    settings,
+    classnames,
+    ablation_settings=None,
+):
+    if ablation_settings is None:
+        ablation_settings = E8InferenceAblationSettings()
     retrieval_count = generated.retrieval_count.detach()
-    diagnostics = _e8_diagnostic_values(generated)
+    diagnostics = _e8_diagnostic_values(generated, ablation_settings)
     valid_rows = diagnostics["eligible"]
     fallback = (~valid_rows) | (generated.beta.detach() == 0)
     fallback_indices = torch.nonzero(
@@ -164,7 +185,10 @@ def _log_e8_summary(generated, settings, classnames):
         else ""
     )
     get_logger().info(
-        "E8 balanced retrieval summary (min/mean/max): "
+        "E8 balanced retrieval ablation: "
+        f"prototype_source={ablation_settings.prototype_source}; "
+        f"reliability_mode={ablation_settings.reliability_mode}; "
+        "summary (min/mean/max): "
         f"retrieval_count={_diagnostic_range(retrieval_count)}; "
         f"alpha={_e8_diagnostic_range(diagnostics['alpha'])}; "
         f"beta={_e8_diagnostic_range(diagnostics['beta'])}; "
@@ -175,6 +199,8 @@ def _log_e8_summary(generated, settings, classnames):
         f"{_e8_diagnostic_range(diagnostics['mode_pairwise_cosine'])}; "
         "prototype_pairwise_cosine="
         f"{_e8_diagnostic_range(diagnostics['prototype_pairwise_cosine'])}; "
+        "scoring_vector_pairwise_cosine="
+        f"{_e8_diagnostic_range(diagnostics['scoring_vector_pairwise_cosine'])}; "
         f"fallback={len(fallback_indices)}/{len(classnames)}; "
         f"prototype_temperature={settings.prototype_temperature}; "
         "responsibility_temperature="
@@ -220,6 +246,7 @@ def build_dinotext_seg_inference(
                 generated,
                 model.balanced_rpa.settings,
                 classnames,
+                model.balanced_retrieval_ablation,
             )
         elif has_e7:
             generated = model.build_learned_retrieval_prototypes(

@@ -333,6 +333,7 @@ class DINOTextMasker(nn.Module):
         *,
         prototype_temperature=0.10,
         responsibility_temperature=0.10,
+        reliability_mode="entropy",
         deterministic=True,
         hard=False,
     ):
@@ -343,6 +344,13 @@ class DINOTextMasker(nn.Module):
         ):
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be finite and strictly positive")
+        if (
+            not isinstance(reliability_mode, str)
+            or reliability_mode not in {"entropy", "constant_one"}
+        ):
+            raise ValueError(
+                "reliability_mode must be 'entropy' or 'constant_one'"
+            )
         if image_feat.ndim != 4:
             raise ValueError("image features must have shape [B, D, H, W]")
         if text_emb.ndim != 2:
@@ -425,6 +433,7 @@ class DINOTextMasker(nn.Module):
             prototype_valid_mask=valid_mask,
             precomputed_base_score=flat_base_score,
             targets_are_normalized=True,
+            reliability_mode=reliability_mode,
         )
         fused_score = (
             scores.final_score.reshape(

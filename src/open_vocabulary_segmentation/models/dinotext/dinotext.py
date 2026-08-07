@@ -33,8 +33,10 @@ from src.e7_prototype_adapter import (
     load_learned_retrieval_prototypes,
 )
 from src.e8_balanced_retrieval_adapter import (
+    E8InferenceAblationSettings,
     BalancedRetrievalSettings,
     load_balanced_retrieval_prototypes,
+    select_e8_scoring_vectors,
 )
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -60,9 +62,28 @@ class DINOText(nn.Module):
             retrieval_grounded_prototypes=None,
             learned_retrieval_prototypes=None,
             balanced_retrieval_prototypes=None,
+            balanced_retrieval_ablation=None,
             **kwargs
     ):
         super().__init__()
+        if (
+            balanced_retrieval_ablation is not None
+            and balanced_retrieval_prototypes is None
+        ):
+            raise ValueError(
+                "balanced_retrieval_ablation is allowed only when "
+                "balanced_retrieval_prototypes is enabled"
+            )
+        if balanced_retrieval_ablation is None:
+            self.balanced_retrieval_ablation = (
+                E8InferenceAblationSettings()
+            )
+        else:
+            self.balanced_retrieval_ablation = (
+                E8InferenceAblationSettings.from_mapping(
+                    balanced_retrieval_ablation
+                )
+            )
         retrieval_mode_count = sum(
             option is not None
             for option in (
@@ -609,11 +630,15 @@ class DINOText(nn.Module):
                     hard=False,
                 )
             else:
+                scoring_vectors = select_e8_scoring_vectors(
+                    self.balanced_rpa_context,
+                    self.balanced_retrieval_ablation,
+                )
                 mask, simmap = (
                     self.masker.forward_seg_with_balanced_prototypes(
                         image_feat,
                         text_emb,
-                        self.balanced_rpa_context.prototypes,
+                        scoring_vectors,
                         self.balanced_rpa_context.valid_mask,
                         self.balanced_rpa_context.beta,
                         prototype_temperature=(
@@ -622,6 +647,10 @@ class DINOText(nn.Module):
                         responsibility_temperature=(
                             self.balanced_rpa.settings
                             .responsibility_temperature
+                        ),
+                        reliability_mode=(
+                            self.balanced_retrieval_ablation
+                            .reliability_mode
                         ),
                         hard=False,
                     )

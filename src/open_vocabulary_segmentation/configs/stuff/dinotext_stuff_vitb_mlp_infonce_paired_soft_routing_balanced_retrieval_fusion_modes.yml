@@ -1,0 +1,5 @@
+_base_: dinotext_stuff_vitb_mlp_infonce_paired_soft_routing_balanced_retrieval_fusion.yml
+model:
+  balanced_retrieval_ablation:
+    prototype_source: mode_vectors
+    reliability_mode: entropy
