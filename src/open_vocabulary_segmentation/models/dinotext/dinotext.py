@@ -36,8 +36,19 @@ from src.e8_balanced_retrieval_adapter import (
     BalancedRetrievalSettings,
     load_balanced_retrieval_prototypes,
 )
+from src.e9_sparse_region_alignment import load_e9_adapter
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def _square_grid_side(patch_count):
+    side = int(sqrt(patch_count))
+    if side * side != patch_count:
+        raise ValueError(
+            f"projected patch count {patch_count} does not form a square "
+            "inference grid"
+        )
+    return side
 
 
 @MODELS.register_module()
@@ -60,21 +71,54 @@ class DINOText(nn.Module):
             retrieval_grounded_prototypes=None,
             learned_retrieval_prototypes=None,
             balanced_retrieval_prototypes=None,
+            sparse_region_alignment=None,
             **kwargs
     ):
         super().__init__()
+        if sparse_region_alignment is not None:
+            if not isinstance(sparse_region_alignment, dict) or set(
+                sparse_region_alignment
+            ) != {"adapter_path", "adapter_sha256", "source_git_commit"}:
+                raise ValueError(
+                    "sparse_region_alignment must contain exactly adapter_path, "
+                    "adapter_sha256, and source_git_commit"
+                )
         retrieval_mode_count = sum(
             option is not None
             for option in (
                 retrieval_grounded_prototypes,
                 learned_retrieval_prototypes,
                 balanced_retrieval_prototypes,
+                sparse_region_alignment,
             )
         )
         if retrieval_mode_count > 1:
             raise ValueError(
-                "E6 RGTP, E7 learned RPA, and E8 balanced retrieval are "
+                "E6, E7, E8, and E9 inference modes are "
                 "mutually exclusive"
+            )
+        projection_config_path = os.path.join('configs', f"{proj_class}.yaml")
+        projection_checkpoint_path = os.path.join("weights", f"{proj_name}.pth")
+        self.sparse_region_adapter = None
+        if sparse_region_alignment is not None:
+            if not pre_trained:
+                raise ValueError("E9 requires the frozen E3 projection")
+            self.sparse_region_adapter = load_e9_adapter(
+                sparse_region_alignment["adapter_path"],
+                device=device,
+                require_production=True,
+                expected_e3_identity={
+                    "config_sha256": sha256_file(projection_config_path),
+                    "checkpoint_sha256": sha256_file(
+                        projection_checkpoint_path
+                    ),
+                },
+                expected_checkpoint_sha256=sparse_region_alignment[
+                    "adapter_sha256"
+                ],
+                expected_source_git_commit=sparse_region_alignment[
+                    "source_git_commit"
+                ],
             )
         self.feats = {}
         self.model_name = model_name
@@ -127,7 +171,6 @@ class DINOText(nn.Module):
             self.clip_model.text_projection.requires_grad = True
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
-        projection_config_path = os.path.join('configs', f"{proj_class}.yaml")
         with open(projection_config_path, 'r') as config_file:
             config = yaml.safe_load(config_file)['model']
             
@@ -137,7 +180,6 @@ class DINOText(nn.Module):
             self.clip_model.transformer.resblocks[-2].register_forward_hook(self.get_clip_second_last_dense_out)
         
             
-        projection_checkpoint_path = os.path.join("weights", f"{proj_name}.pth")
         if pre_trained:
             self.proj.load_state_dict(torch.load(projection_checkpoint_path, 'cpu'))
         self.proj.to(device)
@@ -539,8 +581,9 @@ class DINOText(nn.Module):
             image_feat = self.proj.project_dino(image_feat.float())
         if type(self.proj) == DoubleMLP:
             image_feat = self.proj.project_visual(image_feat.float())
+        projected_patch_tokens = image_feat
         b, np, c = image_feat.shape
-        np_h = np_w = int(sqrt(np))
+        np_h = np_w = _square_grid_side(np)
         image_feat = image_feat.reshape(b, np_h, np_w, c).permute(0, 3, 1, 2)
         
         self_attn, self_attn_maps = self.process_self_attention(self.feats['self_attn'], batch_size, num_tokens + self.num_global_tokens, self.num_attn_heads, embed_dim, self.scale, self.num_global_tokens, ret_self_attn_maps=True)
@@ -548,10 +591,26 @@ class DINOText(nn.Module):
             self.rgtp is None
             and self.learned_rpa is None
             and self.balanced_rpa is None
+            and self.sparse_region_adapter is None
         ):
             mask, simmap = self.masker.forward_seg(
                 image_feat,
                 text_emb,
+                hard=False,
+            )
+        elif self.sparse_region_adapter is not None:
+            attention_prior = self_attn_maps.softmax(dim=-1).mean(dim=1)
+            attention_prior = attention_prior / attention_prior.sum(
+                dim=-1, keepdim=True
+            ).clamp_min(torch.finfo(attention_prior.dtype).tiny)
+            patch_grid = projected_patch_tokens.reshape(
+                b, np_h, np_w, c
+            ).permute(0, 3, 1, 2)
+            mask, simmap = self.masker.forward_seg_with_sparse_region_alignment(
+                patch_grid,
+                text_emb,
+                attention_prior,
+                self.sparse_region_adapter,
                 hard=False,
             )
         elif self.rgtp is not None:

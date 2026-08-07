@@ -1,0 +1,6 @@
+_base_: dinotext_stuff_vitb_mlp_infonce_paired_soft_routing_tau010.yml
+model:
+  sparse_region_alignment:
+    adapter_path: ${oc.env:TALK2DINO_E9_ADAPTER}
+    adapter_sha256: ${oc.env:TALK2DINO_E9_ADAPTER_SHA256}
+    source_git_commit: ${oc.env:TALK2DINO_E9_SOURCE_GIT_COMMIT}

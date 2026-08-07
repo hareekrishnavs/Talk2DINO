@@ -15,6 +15,7 @@ from models.dinotext.modules import FeatureEncoder
 
 import us
 from src.e8_balanced_retrieval_adapter import compute_e8_scores
+from src.e9_sparse_region_alignment import SparseRegionAlignmentAdapter
 from src.retrieval_grounded_prototypes import fuse_prototype_scores
 
 
@@ -456,6 +457,58 @@ class DINOTextMasker(nn.Module):
         )
         mask = hard_mask if hard else soft_mask
         return mask, final_score
+
+    @torch.no_grad()
+    def forward_seg_with_sparse_region_alignment(
+        self,
+        image_feat,
+        text_emb,
+        attention_priors,
+        adapter: SparseRegionAlignmentAdapter,
+        *,
+        deterministic=True,
+        hard=False,
+    ):
+        """E9 pointwise current-image scoring with one exact E3 base."""
+        if image_feat.ndim != 4:
+            raise ValueError("image features must have shape [B,D,H,W]")
+        batch, dimension, height, width = image_feat.shape
+        if text_emb.ndim != 2 or text_emb.shape[1] != dimension:
+            raise ValueError("text embeddings must have shape [C,D]")
+        if attention_priors.shape != (batch, height * width):
+            raise ValueError("attention priors must have shape [B,H*W]")
+        # Same single normalization and exact base equation as forward_seg.
+        image_feat = us.normalize(image_feat, dim=1)
+        text_emb = text_emb.to(device=image_feat.device, dtype=image_feat.dtype)
+        base_score = torch.einsum(
+            "b c h w, n c -> b n h w", image_feat, text_emb
+        )
+        patches = image_feat.permute(0, 2, 3, 1).reshape(
+            batch, height * width, dimension
+        )
+        reps = adapter.representations(
+            text_emb, patches, inputs_normalized=True
+        )
+        scored = adapter.score_from_representations(
+            text_emb,
+            patches,
+            reps,
+            attention_priors,
+            precomputed_base_score=base_score.permute(1, 0, 2, 3).reshape(
+                text_emb.shape[0], batch, height * width
+            ),
+        )
+        final_score = scored.final_score.reshape(
+            text_emb.shape[0], batch, height, width
+        ).permute(1, 0, 2, 3)
+        # Preserve the exact E3 layout/value wherever gamma is zero.
+        gamma = scored.gamma.reshape(
+            text_emb.shape[0], batch, height, width
+        ).permute(1, 0, 2, 3)
+        selected = torch.empty_like(base_score)
+        torch.where(gamma == 0, base_score, final_score, out=selected)
+        hard_mask, soft_mask = self.sim2mask(selected, deterministic=deterministic)
+        return (hard_mask if hard else soft_mask), selected
 
 
 @MODELS.register_module()

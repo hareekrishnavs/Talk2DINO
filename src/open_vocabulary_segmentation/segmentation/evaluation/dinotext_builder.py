@@ -199,12 +199,20 @@ def build_dinotext_seg_inference(
     has_e6 = getattr(model, "rgtp", None) is not None
     has_e7 = getattr(model, "learned_rpa", None) is not None
     has_e8 = getattr(model, "balanced_rpa", None) is not None
-    if sum((has_e6, has_e7, has_e8)) > 1:
+    has_e9 = getattr(model, "sparse_region_adapter", None) is not None
+    if sum((has_e6, has_e7, has_e8, has_e9)) > 1:
         raise ValueError(
-            "E6 RGTP, E7 learned RPA, and E8 balanced retrieval are "
+            "E6, E7, E8, and E9 inference modes are "
             "mutually exclusive"
         )
-    if not has_e6 and not has_e7 and not has_e8:
+    if has_e9:
+        text_embedding = model.build_text_embedding(text_tokens)
+        get_logger().info(
+            "E9 sparse region alignment enabled: current-image patches only; "
+            f"gamma_max={model.sparse_region_adapter.config.gamma_max}; "
+            f"residual_max={model.sparse_region_adapter.config.residual_max}"
+        )
+    elif not has_e6 and not has_e7 and not has_e8:
         text_embedding = model.build_text_embedding(text_tokens)
     else:
         raw_text_embedding, text_embedding = model.build_text_embedding(
