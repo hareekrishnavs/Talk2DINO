@@ -1,0 +1,47 @@
+seed: 42
+num_epochs: 30
+batch_size: 512
+learning_rate: 0.0001
+weight_decay: 0.0001
+optimizer: AdamW
+scheduler: cosine
+warmup_ratio: 0.05
+amp_dtype: bfloat16
+save_best_model: true
+early_stopping_patience: 5
+
+adapter:
+  embedding_dim: 768
+  num_prototypes: 3
+  num_attention_heads: 8
+  num_cross_attention_layers: 2
+  ffn_dim: 1536
+  dropout: 0.10
+  alpha_max: 0.35
+  beta_max: 0.30
+  retrieval_count: 64
+  assignment_temperature: 0.07
+  retrieval_weight_temperature: 0.07
+  responsibility_temperature: 0.10
+  separation_margin: 0.50
+  alpha_advantage_scale: 0.10
+  beta_advantage_scale: 0.10
+
+retrieval:
+  queue_size: 16384
+  candidate_pool: 256
+  retrieval_count: 64
+  retrieval_min_similarity: 0.18
+
+loss:
+  logit_temperature: 0.07
+  prototype_temperature: 0.10
+  anchor_weight: 0.10
+  coverage_weight: 0.10
+  balance_weight: 0.05
+  sharpness_weight: 0.02
+  separation_weight: 0.05
+  alpha_calibration_weight: 0.05
+  beta_calibration_weight: 0.10
+  corrupt_abstention_weight: 0.10
+  beta_usage_weight: 0.001

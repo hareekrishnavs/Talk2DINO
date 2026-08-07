@@ -14,6 +14,7 @@ from models.builder import MODELS
 from models.dinotext.modules import FeatureEncoder
 
 import us
+from src.e8_balanced_retrieval_adapter import compute_e8_scores
 from src.retrieval_grounded_prototypes import fuse_prototype_scores
 
 
@@ -314,6 +315,141 @@ class DINOTextMasker(nn.Module):
             prototype_temperature=prototype_temperature,
         ).permute(0, 3, 1, 2)
 
+        hard_mask, soft_mask = self.sim2mask(
+            final_score,
+            deterministic=deterministic,
+        )
+        mask = hard_mask if hard else soft_mask
+        return mask, final_score
+
+    @torch.no_grad()
+    def forward_seg_with_balanced_prototypes(
+        self,
+        image_feat,
+        text_emb,
+        prototypes,
+        valid_mask,
+        beta,
+        *,
+        prototype_temperature=0.10,
+        responsibility_temperature=0.10,
+        deterministic=True,
+        hard=False,
+    ):
+        """E8 target-conditioned fusion followed by exactly one sigmoid."""
+        for name, value in (
+            ("prototype_temperature", prototype_temperature),
+            ("responsibility_temperature", responsibility_temperature),
+        ):
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be finite and strictly positive")
+        if image_feat.ndim != 4:
+            raise ValueError("image features must have shape [B, D, H, W]")
+        if text_emb.ndim != 2:
+            raise ValueError("text embeddings must have shape [C, D]")
+        if prototypes.ndim != 3:
+            raise ValueError("prototypes must have shape [C, K, D]")
+        class_count, prototype_count, embedding_dim = prototypes.shape
+        if text_emb.shape != (class_count, embedding_dim):
+            raise ValueError(
+                "text embeddings and prototypes must have matching [C, D]"
+            )
+        if image_feat.shape[1] != embedding_dim:
+            raise ValueError(
+                "image features and prototypes must have the same embedding "
+                "dimension"
+            )
+        if valid_mask.shape != (class_count, prototype_count):
+            raise ValueError("valid_mask must have shape [C, K]")
+        if valid_mask.dtype != torch.bool:
+            raise ValueError("valid_mask must be boolean")
+        if beta.shape != (class_count,):
+            raise ValueError("beta must have shape [C]")
+        if not torch.is_tensor(beta) or not beta.is_floating_point():
+            raise ValueError("beta must be a floating-point tensor")
+        if not torch.isfinite(beta).all() or torch.any((beta < 0) | (beta > 1)):
+            raise ValueError("beta must be finite and in [0, 1]")
+
+        has_valid_prototype = valid_mask.any(dim=-1)
+        if not torch.any(beta * has_valid_prototype.to(beta.dtype)):
+            # Do not even normalize or recompute E3 scores in the exact-control
+            # branch. This preserves bitwise-identical scores and masks.
+            return self.forward_seg(
+                image_feat,
+                text_emb,
+                deterministic=deterministic,
+                hard=hard,
+            )
+
+        # This is the one and only image normalization in the E8 inference
+        # path. It is the same operation used by ``forward_seg`` (E3).
+        image_feat = us.normalize(image_feat, dim=1)
+        text_emb = text_emb.to(
+            device=image_feat.device,
+            dtype=image_feat.dtype,
+        )
+        prototypes = prototypes.to(
+            device=image_feat.device,
+            dtype=image_feat.dtype,
+        )
+        valid_mask = valid_mask.to(device=image_feat.device)
+        beta = beta.to(device=image_feat.device, dtype=image_feat.dtype)
+        if not all(
+            torch.isfinite(value).all()
+            for value in (image_feat, text_emb, prototypes)
+        ):
+            raise ValueError("E8 inference embeddings must be finite")
+
+        batch_size, _, height, width = image_feat.shape
+        # Compute the E3 control exactly once and reuse this tensor in E8.
+        base_score = torch.einsum(
+            "b c h w, n c -> b n h w",
+            image_feat,
+            text_emb,
+        )
+        spatial_targets = image_feat.permute(0, 2, 3, 1).reshape(
+            batch_size * height * width,
+            embedding_dim,
+        )
+        flat_base_score = base_score.permute(1, 0, 2, 3).reshape(
+            class_count,
+            batch_size * height * width,
+        )
+        scores = compute_e8_scores(
+            text_emb,
+            spatial_targets,
+            prototypes,
+            beta,
+            prototype_temperature=prototype_temperature,
+            responsibility_temperature=responsibility_temperature,
+            prototype_valid_mask=valid_mask,
+            precomputed_base_score=flat_base_score,
+            targets_are_normalized=True,
+        )
+        fused_score = (
+            scores.final_score.reshape(
+                class_count,
+                batch_size,
+                height,
+                width,
+            )
+            .permute(1, 0, 2, 3)
+        )
+        effective_beta = scores.effective_beta.reshape(
+            class_count,
+            batch_size,
+            height,
+            width,
+        ).permute(1, 0, 2, 3)
+        # Preserve E3's score layout as well as its values. Some elementwise
+        # CPU kernels can otherwise differ by a final bit across layouts.
+        final_score = torch.empty_like(base_score)
+        torch.where(
+            effective_beta == 0,
+            base_score,
+            fused_score,
+            out=final_score,
+        )
         hard_mask, soft_mask = self.sim2mask(
             final_score,
             deterministic=deterministic,

@@ -32,6 +32,10 @@ from src.e7_prototype_adapter import (
     LearnedRetrievalSettings,
     load_learned_retrieval_prototypes,
 )
+from src.e8_balanced_retrieval_adapter import (
+    BalancedRetrievalSettings,
+    load_balanced_retrieval_prototypes,
+)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -55,9 +59,23 @@ class DINOText(nn.Module):
             weight_dir=DEFAULT_WEIGHT_DIR, backbone_weights=None, clip_model_path=None,
             retrieval_grounded_prototypes=None,
             learned_retrieval_prototypes=None,
+            balanced_retrieval_prototypes=None,
             **kwargs
     ):
         super().__init__()
+        retrieval_mode_count = sum(
+            option is not None
+            for option in (
+                retrieval_grounded_prototypes,
+                learned_retrieval_prototypes,
+                balanced_retrieval_prototypes,
+            )
+        )
+        if retrieval_mode_count > 1:
+            raise ValueError(
+                "E6 RGTP, E7 learned RPA, and E8 balanced retrieval are "
+                "mutually exclusive"
+            )
         self.feats = {}
         self.model_name = model_name
         # loading the model
@@ -191,6 +209,46 @@ class DINOText(nn.Module):
                 settings,
                 e3_config_sha256=sha256_file(projection_config_path),
                 e3_checkpoint_sha256=sha256_file(projection_checkpoint_path),
+                device=device,
+            )
+
+        self.balanced_rpa = None
+        self.balanced_rpa_context = None
+        self.balanced_rpa_has_effect = False
+        if balanced_retrieval_prototypes is not None:
+            if self.rgtp is not None or self.learned_rpa is not None:
+                raise ValueError(
+                    "E8 balanced retrieval, E7 learned RPA, and E6 RGTP "
+                    "are mutually exclusive"
+                )
+            if not pre_trained:
+                raise ValueError(
+                    "balanced retrieval prototypes require the frozen E3 "
+                    "projection"
+                )
+            if not isinstance(balanced_retrieval_prototypes, dict):
+                raise TypeError(
+                    "balanced_retrieval_prototypes must be a configuration "
+                    "mapping"
+                )
+            balanced_config = dict(balanced_retrieval_prototypes)
+            try:
+                bank_path = balanced_config.pop("bank_path")
+                adapter_path = balanced_config.pop("adapter_path")
+            except KeyError as error:
+                raise ValueError(
+                    "balanced_retrieval_prototypes requires bank_path and "
+                    "adapter_path"
+                ) from error
+            settings = BalancedRetrievalSettings.from_mapping(balanced_config)
+            self.balanced_rpa = load_balanced_retrieval_prototypes(
+                bank_path,
+                adapter_path,
+                settings,
+                e3_config_sha256=sha256_file(projection_config_path),
+                e3_checkpoint_sha256=sha256_file(
+                    projection_checkpoint_path
+                ),
                 device=device,
             )
         
@@ -390,6 +448,32 @@ class DINOText(nn.Module):
         )
         return self.learned_rpa_context
 
+    @torch.no_grad()
+    def build_balanced_retrieval_prototypes(
+        self,
+        raw_text_embeddings,
+        mapped_text_embeddings,
+    ):
+        if self.balanced_rpa is None:
+            raise RuntimeError(
+                "E8 balanced retrieval prototypes are not enabled"
+            )
+        self.balanced_rpa_context = self.balanced_rpa.generate(
+            raw_text_embeddings,
+            mapped_text_embeddings,
+        )
+        self.balanced_rpa_has_effect = bool(
+            torch.any(
+                self.balanced_rpa_context.beta
+                * self.balanced_rpa_context.valid_mask.any(dim=-1).to(
+                    self.balanced_rpa_context.beta.dtype
+                )
+            )
+            .detach()
+            .cpu()
+        )
+        return self.balanced_rpa_context
+
     def apply_pamr(self, image, mask):
         image = F.interpolate(image, mask.shape[-2:], mode="bilinear", align_corners=True)
         if self.pamr is None:
@@ -460,7 +544,11 @@ class DINOText(nn.Module):
         image_feat = image_feat.reshape(b, np_h, np_w, c).permute(0, 3, 1, 2)
         
         self_attn, self_attn_maps = self.process_self_attention(self.feats['self_attn'], batch_size, num_tokens + self.num_global_tokens, self.num_attn_heads, embed_dim, self.scale, self.num_global_tokens, ret_self_attn_maps=True)
-        if self.rgtp is None and self.learned_rpa is None:
+        if (
+            self.rgtp is None
+            and self.learned_rpa is None
+            and self.balanced_rpa is None
+        ):
             mask, simmap = self.masker.forward_seg(
                 image_feat,
                 text_emb,
@@ -483,7 +571,7 @@ class DINOText(nn.Module):
                 ),
                 hard=False,
             )
-        else:
+        elif self.learned_rpa is not None:
             if self.learned_rpa_context is None:
                 raise RuntimeError(
                     "E7 class prototypes must be built before mask generation"
@@ -507,6 +595,36 @@ class DINOText(nn.Module):
                     ),
                     prototype_fusion_weight=1.0,
                     hard=False,
+                )
+        else:
+            if self.balanced_rpa_context is None:
+                raise RuntimeError(
+                    "E8 class prototypes must be built before mask generation"
+                )
+            if not self.balanced_rpa_has_effect:
+                # Exact E3 fallback for beta_max=0 or all-empty retrieval.
+                mask, simmap = self.masker.forward_seg(
+                    image_feat,
+                    text_emb,
+                    hard=False,
+                )
+            else:
+                mask, simmap = (
+                    self.masker.forward_seg_with_balanced_prototypes(
+                        image_feat,
+                        text_emb,
+                        self.balanced_rpa_context.prototypes,
+                        self.balanced_rpa_context.valid_mask,
+                        self.balanced_rpa_context.beta,
+                        prototype_temperature=(
+                            self.balanced_rpa.settings.prototype_temperature
+                        ),
+                        responsibility_temperature=(
+                            self.balanced_rpa.settings
+                            .responsibility_temperature
+                        ),
+                        hard=False,
+                    )
                 )
         
         if self.with_bg_clean:
