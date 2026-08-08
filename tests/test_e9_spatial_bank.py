@@ -6,6 +6,8 @@ import math
 import os
 import subprocess
 import tarfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,6 +20,18 @@ from train_e9_sparse_region_alignment import select_query_rows_for_spatial
 
 DINO_SOURCE_COMMIT = "a" * 40
 DINO_CHECKPOINT_SHA256 = "b" * 64
+
+
+def _write_malicious_marker(path):
+    Path(path).write_text("unsafe deserialization executed")
+
+
+class _MaliciousSpatialShardPayload:
+    def __init__(self, marker):
+        self.marker = marker
+
+    def __reduce__(self):
+        return _write_malicious_marker, (str(self.marker),)
 
 
 def sha(path):
@@ -166,6 +180,7 @@ def path_snapshot(path):
 def assert_no_publication_leftovers(parent, output_name="bank"):
     assert not list(parent.glob(f".{output_name}.e9-*"))
     assert not list(parent.glob(f".{output_name}.backup-*"))
+    assert not os.path.lexists(parent / f".{output_name}.publication-lock")
 
 
 def test_source_geometry_and_independent_pooling():
@@ -271,6 +286,139 @@ def test_build_validate_lazy_load_and_closed_manifest(tmp_path):
     (output / "manifest.json").write_text(json.dumps(manifest))
     with pytest.raises(e9.E9SpatialBankValidationError, match="closed schema"):
         e9.validate_e9_spatial_bank(output, require_production=False)
+
+
+@pytest.mark.parametrize(
+    "malformed_name",
+    (
+        "../outside.pth",
+        "/tmp/absolute.pth",
+        "nested/train-000000.pth",
+        "val-000000.pth",
+        "train-000001.pth",
+        "train-000000.pt",
+        "./train-000000.pth",
+    ),
+)
+def test_spatial_validator_rejects_noncanonical_shard_paths(
+    tmp_path, malformed_name
+):
+    repository = tmp_path / "repo"
+    git_repo(repository)
+    source = make_source(tmp_path / "source", [source_record(18)])
+    output = tmp_path / "bank"
+    build_spatial_bank(
+        source,
+        output,
+        split="train",
+        max_images=1,
+        repository_root=repository,
+    )
+    manifest_path = output / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["shards"][0]["name"] = malformed_name
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(
+        e9.E9SpatialBankValidationError,
+        match="non-canonical spatial shard name",
+    ):
+        e9.validate_e9_spatial_bank(output, require_production=False)
+
+
+def test_spatial_validator_rejects_duplicate_shard_names(tmp_path):
+    repository = tmp_path / "repo"
+    git_repo(repository)
+    source = make_source(
+        tmp_path / "source", [source_record(19), source_record(20)]
+    )
+    output = tmp_path / "bank"
+    build_spatial_bank(
+        source,
+        output,
+        split="train",
+        shard_rows=1,
+        max_images=2,
+        repository_root=repository,
+    )
+    manifest_path = output / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["shards"][1]["name"] = manifest["shards"][0]["name"]
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(e9.E9SpatialBankValidationError, match="duplicate"):
+        e9.validate_e9_spatial_bank(output, require_production=False)
+
+
+def test_spatial_validator_rejects_symlinked_manifest_and_shard(tmp_path):
+    repository = tmp_path / "repo"
+    git_repo(repository)
+    source = make_source(tmp_path / "source", [source_record(23)])
+    output = tmp_path / "bank"
+    build_spatial_bank(
+        source,
+        output,
+        split="train",
+        max_images=1,
+        repository_root=repository,
+    )
+    shard = output / "train-000000.pth"
+    outside_shard = tmp_path / "outside-shard.pth"
+    shard.rename(outside_shard)
+    shard.symlink_to(outside_shard)
+    with pytest.raises(e9.E9SpatialBankValidationError, match="non-symlink"):
+        e9.validate_e9_spatial_bank(output, require_production=False)
+
+    shard.unlink()
+    outside_shard.rename(shard)
+    manifest = output / "manifest.json"
+    outside_manifest = tmp_path / "outside-manifest.json"
+    manifest.rename(outside_manifest)
+    manifest.symlink_to(outside_manifest)
+    with pytest.raises(e9.E9SpatialBankValidationError, match="manifest.*non-symlink"):
+        e9.validate_e9_spatial_bank(output, require_production=False)
+
+
+def test_malicious_spatial_pickle_never_executes_during_validation_or_overwrite(
+    tmp_path
+):
+    repository = tmp_path / "repo"
+    git_repo(repository)
+    source = make_source(tmp_path / "source", [source_record(24)])
+    output = tmp_path / "bank"
+    build_spatial_bank(
+        source,
+        output,
+        split="train",
+        max_images=1,
+        repository_root=repository,
+    )
+    marker = tmp_path / "malicious-marker"
+    shard_path = output / "train-000000.pth"
+    torch.save(_MaliciousSpatialShardPayload(marker), shard_path)
+    manifest_path = output / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["shards"][0]["bytes"] = shard_path.stat().st_size
+    manifest["shards"][0]["sha256"] = sha(shard_path)
+    manifest_path.write_text(json.dumps(manifest))
+    before = exact_tree_snapshot(output)
+
+    with pytest.raises(e9.E9SpatialBankValidationError, match="cannot load shard"):
+        e9.validate_e9_spatial_bank(output, require_production=False)
+    assert not marker.exists()
+
+    with pytest.raises(e9.E9SpatialBankValidationError, match="cannot load shard"):
+        build_spatial_bank(
+            source,
+            output,
+            split="train",
+            max_images=1,
+            overwrite=True,
+            repository_root=repository,
+        )
+    assert not marker.exists()
+    assert exact_tree_snapshot(output) == before
+    assert_no_publication_leftovers(tmp_path)
 
 
 def test_pilot_cannot_overwrite_production_bank_byte_for_byte(tmp_path):
@@ -428,6 +576,127 @@ def test_pilot_overwrite_rejects_and_restores_invalid_destination(
     if destination_kind == "symlink":
         assert exact_tree_snapshot(symlink_target) == symlink_target_before
     assert_no_publication_leftovers(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "alias_kind",
+    ("source_parent", "multilevel_source_parent", "repository_parent"),
+)
+def test_parent_symlink_containment_is_rejected_before_any_write(
+    tmp_path, monkeypatch, alias_kind
+):
+    repository = tmp_path / "repo"
+    git_repo(repository)
+    source = make_source(tmp_path / "source", [source_record(42)])
+    alias = tmp_path / "alias"
+    if alias_kind == "source_parent":
+        alias.symlink_to(source, target_is_directory=True)
+    elif alias_kind == "multilevel_source_parent":
+        intermediate = tmp_path / "intermediate-alias"
+        intermediate.symlink_to(source, target_is_directory=True)
+        alias.symlink_to(intermediate, target_is_directory=True)
+    else:
+        alias.symlink_to(repository, target_is_directory=True)
+    canonical_parent = alias.resolve()
+    iterated = False
+
+    def reject_source_iteration(*args, **kwargs):
+        nonlocal iterated
+        iterated = True
+        raise AssertionError("source records were iterated before containment rejection")
+
+    monkeypatch.setattr(e9, "_iter_source_records", reject_source_iteration)
+    with pytest.raises(ValueError, match="overlap|outside.*repository"):
+        build_spatial_bank(
+            source,
+            alias / "bank",
+            split="train",
+            max_images=1,
+            repository_root=repository,
+        )
+
+    assert not iterated
+    assert not os.path.lexists(canonical_parent / "bank")
+    assert not list(canonical_parent.glob(".bank.e9-*"))
+    assert not os.path.lexists(canonical_parent / ".bank.publication-lock")
+
+
+def test_parent_symlink_to_existing_production_parent_is_rejected_early(tmp_path):
+    repository = tmp_path / "repo"
+    git_repo(repository)
+    production_source = make_source(
+        tmp_path / "production-source", [source_record(43)]
+    )
+    incoming_source = make_source(
+        tmp_path / "incoming-source", [source_record(44)]
+    )
+    production_parent = tmp_path / "production-parent"
+    production_parent.mkdir()
+    output = production_parent / "bank"
+    build_spatial_bank(
+        production_source,
+        output,
+        split="train",
+        repository_root=repository,
+    )
+    before = exact_tree_snapshot(output)
+    alias = tmp_path / "production-alias"
+    alias.symlink_to(production_parent, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="canonical parent"):
+        build_spatial_bank(
+            incoming_source,
+            alias / "bank",
+            split="train",
+            max_images=1,
+            overwrite=True,
+            repository_root=repository,
+        )
+
+    assert exact_tree_snapshot(output) == before
+    assert_no_publication_leftovers(production_parent)
+
+
+def test_permitted_external_parent_symlink_resolves_and_publishes(tmp_path):
+    repository = tmp_path / "repo"
+    git_repo(repository)
+    source = make_source(tmp_path / "source", [source_record(45)])
+    external = tmp_path / "external-scratch"
+    external.mkdir()
+    alias = tmp_path / "external-alias"
+    alias.symlink_to(external, target_is_directory=True)
+
+    result = build_spatial_bank(
+        source,
+        alias / "bank",
+        split="train",
+        max_images=1,
+        repository_root=repository,
+    )
+
+    assert result["is_pilot"] and not result["production_eligible"]
+    assert (external / "bank" / "manifest.json").is_file()
+    assert e9.validate_e9_spatial_bank(
+        external / "bank", require_production=False
+    )["is_pilot"]
+    assert_no_publication_leftovers(external)
+
+
+@pytest.mark.parametrize("invalid_output", ("", ".", "..", "/"))
+def test_empty_dot_and_dotdot_output_names_are_rejected_before_staging(
+    tmp_path, invalid_output
+):
+    repository = tmp_path / "repo"
+    git_repo(repository)
+    source = make_source(tmp_path / "source", [source_record(46)])
+    with pytest.raises(ValueError, match="nonempty final name"):
+        build_spatial_bank(
+            source,
+            invalid_output,
+            split="train",
+            max_images=1,
+            repository_root=repository,
+        )
 
 
 def test_full_bank_is_production_eligible_and_incomplete_is_rejected(
@@ -693,9 +962,219 @@ def test_manifest_boundary_rejects_mutation_after_nonmanifest_link(
     assert not list(tmp_path.glob(".bank.backup-*"))
 
 
+def test_overwrite_with_absent_output_preserves_concurrent_winner(
+    tmp_path, monkeypatch
+):
+    repository = tmp_path / "repo"
+    git_repo(repository)
+    source = make_source(tmp_path / "source", [source_record(62)])
+    output = tmp_path / "bank"
+    original_mkdir = Path.mkdir
+    winner = {"bytes": b"concurrent winner"}
+    injected = False
+
+    def inject_winner_at_reservation(path, *args, **kwargs):
+        nonlocal injected
+        if path == output and not injected:
+            injected = True
+            original_mkdir(path)
+            (path / "winner").write_bytes(winner["bytes"])
+            raise FileExistsError(path)
+        return original_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", inject_winner_at_reservation)
+    with pytest.raises(e9.E9PublicationConflictError, match=str(output)):
+        build_spatial_bank(
+            source,
+            output,
+            split="train",
+            max_images=1,
+            overwrite=True,
+            repository_root=repository,
+        )
+
+    assert injected
+    assert path_snapshot(output) == (
+        "directory",
+        {
+            "winner": {
+                "bytes": winner["bytes"],
+                "sha256": hashlib.sha256(winner["bytes"]).hexdigest(),
+            }
+        },
+    )
+    assert_no_publication_leftovers(tmp_path)
+
+
+def test_existing_pilot_race_preserves_foreign_output_and_old_backup(
+    tmp_path, monkeypatch
+):
+    repository = tmp_path / "repo"
+    git_repo(repository)
+    old_source = make_source(tmp_path / "old-source", [source_record(63)])
+    new_source = make_source(tmp_path / "new-source", [source_record(64)])
+    output = tmp_path / "bank"
+    build_spatial_bank(
+        old_source,
+        output,
+        split="train",
+        max_images=1,
+        repository_root=repository,
+    )
+    old_snapshot = exact_tree_snapshot(output)
+    backup = output.with_name(f".{output.name}.backup-{os.getpid()}")
+    original_validate = e9.validate_e9_spatial_bank
+    foreign_bytes = b"foreign concurrent destination"
+    injected = False
+
+    def inject_after_backup_validation(path, *args, **kwargs):
+        nonlocal injected
+        result = original_validate(path, *args, **kwargs)
+        if Path(path) == backup and not injected:
+            injected = True
+            output.mkdir()
+            (output / "winner").write_bytes(foreign_bytes)
+        return result
+
+    monkeypatch.setattr(e9, "validate_e9_spatial_bank", inject_after_backup_validation)
+    with pytest.raises(e9.E9PublicationRecoveryError) as captured:
+        build_spatial_bank(
+            new_source,
+            output,
+            split="train",
+            max_images=1,
+            overwrite=True,
+            repository_root=repository,
+        )
+
+    assert injected
+    assert str(output) in str(captured.value)
+    assert str(backup) in str(captured.value)
+    assert (output / "winner").read_bytes() == foreign_bytes
+    assert not (output / "manifest.json").exists()
+    assert exact_tree_snapshot(backup) == old_snapshot
+    assert not list(tmp_path.glob(".bank.e9-*"))
+    assert not os.path.lexists(tmp_path / ".bank.publication-lock")
+
+
+def test_two_cooperative_builders_are_serialized_by_stable_lock(
+    tmp_path, monkeypatch
+):
+    repository = tmp_path / "repo"
+    git_repo(repository)
+    first_source = make_source(tmp_path / "first-source", [source_record(65)])
+    second_source = make_source(tmp_path / "second-source", [source_record(66)])
+    output = tmp_path / "bank"
+    original_acquire = e9._acquire_publication_lock
+    first_acquired = threading.Event()
+    let_first_finish = threading.Event()
+    guard = threading.Lock()
+    first_call = True
+
+    def coordinate_acquisition(lock_path):
+        nonlocal first_call
+        with guard:
+            is_first = first_call
+            first_call = False
+        if is_first:
+            identity = original_acquire(lock_path)
+            first_acquired.set()
+            assert let_first_finish.wait(timeout=10)
+            return identity
+        assert first_acquired.wait(timeout=10)
+        try:
+            return original_acquire(lock_path)
+        finally:
+            let_first_finish.set()
+
+    monkeypatch.setattr(e9, "_acquire_publication_lock", coordinate_acquisition)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(
+            build_spatial_bank,
+            first_source,
+            output,
+            split="train",
+            max_images=1,
+            repository_root=repository,
+        )
+        assert first_acquired.wait(timeout=10)
+        second = executor.submit(
+            build_spatial_bank,
+            second_source,
+            output,
+            split="train",
+            max_images=1,
+            repository_root=repository,
+        )
+        with pytest.raises(e9.E9PublicationConflictError, match="publication lock"):
+            second.result(timeout=20)
+        first_result = first.result(timeout=20)
+
+    assert first_result["is_pilot"]
+    manifest = json.loads((output / "manifest.json").read_text())
+    assert [row["image_id"] for row in manifest["image_index"]] == [65]
+    assert e9.validate_e9_spatial_bank(
+        output, require_production=False
+    )["is_pilot"]
+    assert_no_publication_leftovers(tmp_path)
+
+
+def test_foreign_inode_after_reservation_is_never_deleted(tmp_path, monkeypatch):
+    repository = tmp_path / "repo"
+    git_repo(repository)
+    source = make_source(tmp_path / "source", [source_record(67)])
+    output = tmp_path / "bank"
+    original_identity = e9._directory_identity
+    original_link = e9.os.link
+    foreign_bytes = b"foreign inode survives"
+    replaced = False
+
+    def replace_owned_reservation(path, *, label):
+        nonlocal replaced
+        identity = original_identity(path, label=label)
+        if label == "owned output reservation" and not replaced:
+            replaced = True
+            path.rmdir()
+            path.mkdir()
+            (path / "winner").write_bytes(foreign_bytes)
+        return identity
+
+    def force_failure_after_replacement(source_path, destination_path):
+        if Path(destination_path).parent == output:
+            raise OSError("forced failure after foreign inode replacement")
+        return original_link(source_path, destination_path)
+
+    monkeypatch.setattr(e9, "_directory_identity", replace_owned_reservation)
+    monkeypatch.setattr(e9.os, "link", force_failure_after_replacement)
+    with pytest.raises(e9.E9PublicationRecoveryError, match="foreign"):
+        build_spatial_bank(
+            source,
+            output,
+            split="train",
+            max_images=1,
+            overwrite=True,
+            repository_root=repository,
+        )
+
+    assert replaced
+    assert (output / "winner").read_bytes() == foreign_bytes
+    assert not (output / "manifest.json").exists()
+    assert not list(tmp_path.glob(".bank.e9-*"))
+    assert not list(tmp_path.glob(".bank.backup-*"))
+    assert not os.path.lexists(tmp_path / ".bank.publication-lock")
+
+
 @pytest.mark.parametrize(
     "mutation_kind",
-    ("unstaged", "staged", "untracked", "source_artifact", "publication_rename"),
+    (
+        "unstaged",
+        "staged",
+        "untracked",
+        "source_artifact",
+        "shard_link",
+        "manifest_link",
+        "file_fsync",
+    ),
 )
 def test_manifest_boundary_failed_pilot_overwrite_restores_existing_tree(
     tmp_path, monkeypatch, mutation_kind
@@ -716,7 +1195,8 @@ def test_manifest_boundary_failed_pilot_overwrite_restores_existing_tree(
     manifest_sha = sha(output / "manifest.json")
     backup = output.with_name(f".{output.name}.backup-{os.getpid()}")
     original_validate = e9.validate_e9_spatial_bank
-    original_rename = e9.os.rename
+    original_link = e9.os.link
+    original_fsync_file = e9._fsync_file
     mutation_seen = False
 
     def mutate_after_backup_validation(path, *args, **kwargs):
@@ -738,17 +1218,28 @@ def test_manifest_boundary_failed_pilot_overwrite_restores_existing_tree(
                 )
         return result
 
-    def fail_publication_rename(source_path, destination_path):
+    def fail_publication_link(source_path, destination_path):
+        destination_path = Path(destination_path)
         if (
-            mutation_kind == "publication_rename"
-            and Path(source_path).name.startswith(f".{output.name}.e9-")
-            and Path(destination_path) == output
+            destination_path.parent == output
+            and (
+                mutation_kind == "shard_link"
+                and destination_path.name != e9.MANIFEST_NAME
+                or mutation_kind == "manifest_link"
+                and destination_path.name == e9.MANIFEST_NAME
+            )
         ):
-            raise OSError("injected publication rename failure")
-        return original_rename(source_path, destination_path)
+            raise OSError("injected publication link failure")
+        return original_link(source_path, destination_path)
+
+    def fail_publication_fsync(path):
+        if mutation_kind == "file_fsync" and Path(path).parent == output:
+            raise OSError("injected publication fsync failure")
+        return original_fsync_file(path)
 
     monkeypatch.setattr(e9, "validate_e9_spatial_bank", mutate_after_backup_validation)
-    monkeypatch.setattr(e9.os, "rename", fail_publication_rename)
+    monkeypatch.setattr(e9.os, "link", fail_publication_link)
+    monkeypatch.setattr(e9, "_fsync_file", fail_publication_fsync)
     with pytest.raises((e9.E9SpatialBankValidationError, OSError)):
         build_spatial_bank(
             source, output, split="train", max_images=1, overwrite=True,
@@ -778,13 +1269,16 @@ def test_pilot_overwrite_publication_order_uses_protected_backup(tmp_path, monke
     state = {
         "boundary": False,
         "input_hash_recorded": False,
-        "published": False,
+        "manifest_linked": False,
+        "published_validated": False,
         "backup_removed": False,
     }
     original_validate = e9.validate_e9_spatial_bank
     original_sha256 = e9.sha256_file
     original_git_check = e9._require_unchanged_git_provenance
     original_rename = e9.os.rename
+    original_mkdir = Path.mkdir
+    original_link = e9.os.link
     original_fsync_directory = e9._fsync_directory
     original_rmtree = e9.shutil.rmtree
     original_torch_save = e9.torch.save
@@ -793,6 +1287,13 @@ def test_pilot_overwrite_publication_order_uses_protected_backup(tmp_path, monke
         result = original_validate(path, *args, **kwargs)
         if state["boundary"] and Path(path) == backup:
             events.append("validate_backup")
+        elif (
+            state["boundary"]
+            and Path(path) == output
+            and not state["published_validated"]
+        ):
+            state["published_validated"] = True
+            events.append("validate_published_output")
         return result
 
     def record_sha256(path):
@@ -813,13 +1314,22 @@ def test_pilot_overwrite_publication_order_uses_protected_backup(tmp_path, monke
         if Path(source_path) == output and Path(destination_path) == backup:
             state["boundary"] = True
             events.append("rename_backup")
-        elif (
-            state["boundary"]
-            and Path(source_path).name.startswith(f".{output.name}.e9-")
-            and Path(destination_path) == output
-        ):
-            state["published"] = True
-            events.append("rename_publish")
+        return result
+
+    def record_mkdir(path, *args, **kwargs):
+        result = original_mkdir(path, *args, **kwargs)
+        if state["boundary"] and path == output:
+            events.append("reserve_output")
+        return result
+
+    def record_link(source_path, destination_path):
+        result = original_link(source_path, destination_path)
+        if state["boundary"] and Path(destination_path).parent == output:
+            if Path(destination_path).name == e9.MANIFEST_NAME:
+                state["manifest_linked"] = True
+                events.append("link_manifest")
+            else:
+                events.append("link_shard")
         return result
 
     def record_fsync_directory(path):
@@ -827,9 +1337,10 @@ def test_pilot_overwrite_publication_order_uses_protected_backup(tmp_path, monke
         if state["backup_removed"]:
             events.append("fsync_after_backup_removal")
             state["backup_removed"] = False
-        elif state["published"]:
-            events.append("fsync_after_publish")
-            state["published"] = False
+        elif state["manifest_linked"] and not state["published_validated"]:
+            events.append(
+                "fsync_output" if Path(path) == output else "fsync_parent"
+            )
         return result
 
     def record_rmtree(path, *args, **kwargs):
@@ -848,6 +1359,8 @@ def test_pilot_overwrite_publication_order_uses_protected_backup(tmp_path, monke
     monkeypatch.setattr(e9, "sha256_file", record_sha256)
     monkeypatch.setattr(e9, "_require_unchanged_git_provenance", record_git_check)
     monkeypatch.setattr(e9.os, "rename", record_rename)
+    monkeypatch.setattr(Path, "mkdir", record_mkdir)
+    monkeypatch.setattr(e9.os, "link", record_link)
     monkeypatch.setattr(e9, "_fsync_directory", record_fsync_directory)
     monkeypatch.setattr(e9.shutil, "rmtree", record_rmtree)
     monkeypatch.setattr(e9.torch, "save", reject_late_serialization)
@@ -864,14 +1377,18 @@ def test_pilot_overwrite_publication_order_uses_protected_backup(tmp_path, monke
     assert events == [
         "rename_backup",
         "validate_backup",
+        "reserve_output",
+        "link_shard",
         "final_input_hash_check",
         "final_git_check",
-        "rename_publish",
-        "fsync_after_publish",
+        "link_manifest",
+        "fsync_output",
+        "fsync_parent",
+        "validate_published_output",
         "remove_backup",
         "fsync_after_backup_removal",
     ]
-    assert events.index("rename_publish") == events.index("final_git_check") + 1
+    assert events.index("link_manifest") == events.index("final_git_check") + 1
     assert_no_publication_leftovers(tmp_path)
 
 
@@ -890,7 +1407,7 @@ def test_restoration_failure_preserves_recoverable_backup(tmp_path, monkeypatch)
     before = exact_tree_snapshot(output)
     backup = output.with_name(f".{output.name}.backup-{os.getpid()}")
     original_validate = e9.validate_e9_spatial_bank
-    original_rename = e9.os.rename
+    original_rename_noreplace = e9._rename_noreplace
     mutation_seen = False
 
     def mutate_after_backup_validation(path, *args, **kwargs):
@@ -904,10 +1421,10 @@ def test_restoration_failure_preserves_recoverable_backup(tmp_path, monkeypatch)
     def fail_backup_restoration(source_path, destination_path):
         if Path(source_path) == backup and Path(destination_path) == output:
             raise OSError("injected restoration failure")
-        return original_rename(source_path, destination_path)
+        return original_rename_noreplace(source_path, destination_path)
 
     monkeypatch.setattr(e9, "validate_e9_spatial_bank", mutate_after_backup_validation)
-    monkeypatch.setattr(e9.os, "rename", fail_backup_restoration)
+    monkeypatch.setattr(e9, "_rename_noreplace", fail_backup_restoration)
     with pytest.raises(RuntimeError, match=str(backup)):
         build_spatial_bank(
             source,
@@ -968,6 +1485,50 @@ def test_atomic_create_if_absent_preserves_concurrent_directory_winner(
         )
     assert (output / "winner").read_bytes() == b"concurrent"
     assert not (output / "manifest.json").exists()
+
+
+def test_existing_stable_lock_is_preserved_without_publication_mutation(tmp_path):
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    (staging / "train-000000.pth").write_bytes(b"staged shard")
+    (staging / "manifest.json").write_bytes(b"staged manifest")
+    staging_before = exact_tree_snapshot(staging)
+    output = tmp_path / "bank"
+    output.mkdir()
+    (output / "existing").write_bytes(b"existing output")
+    output_before = exact_tree_snapshot(output)
+    lock = tmp_path / ".bank.publication-lock"
+    lock.mkdir()
+    (lock / "owner").write_bytes(b"unknown lock owner")
+    lock_before = exact_tree_snapshot(lock)
+
+    with pytest.raises(e9.E9PublicationConflictError, match=str(lock)):
+        e9._publish_directory(
+            staging,
+            output,
+            overwrite=True,
+            final_verification=lambda: None,
+        )
+
+    assert exact_tree_snapshot(staging) == staging_before
+    assert exact_tree_snapshot(output) == output_before
+    assert exact_tree_snapshot(lock) == lock_before
+    assert not list(tmp_path.glob(".bank.backup-*"))
+
+
+def test_replaced_publication_lock_is_never_removed(tmp_path):
+    lock = tmp_path / ".bank.publication-lock"
+    identity = e9._acquire_publication_lock(lock)
+    original_lock = tmp_path / ".bank.original-lock"
+    os.rename(lock, original_lock)
+    lock.mkdir()
+    (lock / "foreign").write_bytes(b"foreign lock")
+
+    with pytest.raises(e9.E9PublicationRecoveryError, match=str(lock)):
+        e9._release_publication_lock(lock, identity)
+
+    assert (lock / "foreign").read_bytes() == b"foreign lock"
+    assert original_lock.is_dir()
 
 
 def test_train_validation_overlap_is_rejected():

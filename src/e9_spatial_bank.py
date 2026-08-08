@@ -8,6 +8,8 @@ closed geometry/attention-format identity and cannot be streamed boundedly.
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import hashlib
 import io
 import json
@@ -15,6 +17,7 @@ import math
 import os
 import re
 import shutil
+import stat
 import tarfile
 import tempfile
 from collections import OrderedDict
@@ -152,10 +155,20 @@ _GIT_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _UTC_RFC3339 = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?\+00:00$"
 )
+_AT_FDCWD = -100
+_RENAME_NOREPLACE = 1
 
 
 class E9SpatialBankValidationError(ValueError):
     """Raised when an E9 source or spatial bank violates its closed contract."""
+
+
+class E9PublicationConflictError(FileExistsError):
+    """Raised when another filesystem object wins E9 publication."""
+
+
+class E9PublicationRecoveryError(RuntimeError):
+    """Raised when publication cannot safely restore an earlier artifact."""
 
 
 def _closed(value: Any, keys: set[str], label: str) -> Mapping[str, Any]:
@@ -623,7 +636,7 @@ def _read_spatial_shard(
     ):
         raise E9SpatialBankValidationError(f"spatial shard SHA changed: {path}")
     try:
-        return torch.load(io.BytesIO(payload), map_location="cpu", weights_only=False)
+        return torch.load(io.BytesIO(payload), map_location="cpu", weights_only=True)
     except Exception as error:
         raise E9SpatialBankValidationError(f"cannot load shard {path}: {error}") from error
 
@@ -656,7 +669,20 @@ def validate_e9_spatial_bank(
     verify_source_artifacts: bool = False,
 ) -> dict[str, Any]:
     root = Path(path)
-    manifest = _closed(_load_json(root / MANIFEST_NAME), MANIFEST_KEYS, "E9 manifest")
+    manifest_path = root / MANIFEST_NAME
+    try:
+        manifest_stat = os.lstat(manifest_path)
+    except OSError as error:
+        raise E9SpatialBankValidationError(
+            f"invalid E9 manifest file {manifest_path}: {error}"
+        ) from error
+    if stat.S_ISLNK(manifest_stat.st_mode) or not stat.S_ISREG(
+        manifest_stat.st_mode
+    ):
+        raise E9SpatialBankValidationError(
+            "E9 manifest.json must be a non-symlink regular file"
+        )
+    manifest = _closed(_load_json(manifest_path), MANIFEST_KEYS, "E9 manifest")
     if manifest["format_version"] != E9_SPATIAL_BANK_FORMAT:
         raise E9SpatialBankValidationError("unsupported E9 spatial-bank format")
     for key in ("complete", "is_pilot", "production_eligible", "source_git_dirty"):
@@ -821,11 +847,22 @@ def validate_e9_spatial_bank(
     if not isinstance(index, list) or len(index) != manifest["selected_images"]:
         raise E9SpatialBankValidationError("manifest image index count mismatch")
     seen: list[int] = []
+    seen_shard_names: set[str] = set()
     expected_start = 0
+    resolved_root = root.resolve()
     for shard_number, entry in enumerate(shards):
         _closed(entry, SHARD_METADATA_KEYS, "E9 shard metadata")
         if not isinstance(entry["name"], str) or not entry["name"]:
             raise E9SpatialBankValidationError("invalid spatial shard name")
+        if entry["name"] in seen_shard_names:
+            raise E9SpatialBankValidationError("duplicate spatial shard name")
+        seen_shard_names.add(entry["name"])
+        expected_name = f"{manifest['split']}-{shard_number:06d}.pth"
+        if entry["name"] != expected_name:
+            raise E9SpatialBankValidationError(
+                "non-canonical spatial shard name: "
+                f"expected={expected_name}, got={entry['name']!r}"
+            )
         _require_sha256(entry["sha256"], "spatial shard")
         for key in ("bytes", "row_start", "row_end", "row_count"):
             item = entry[key]
@@ -839,10 +876,25 @@ def validate_e9_spatial_bank(
         if entry["row_start"] != expected_start or entry["row_end"] != expected_start + entry["row_count"]:
             raise E9SpatialBankValidationError("non-contiguous shard row ranges")
         shard_path = root / entry["name"]
-        if not shard_path.is_file():
-            raise E9SpatialBankValidationError(f"missing spatial shard: {shard_path}")
+        try:
+            shard_stat = os.lstat(shard_path)
+        except OSError as error:
+            raise E9SpatialBankValidationError(
+                f"missing spatial shard: {shard_path}"
+            ) from error
+        if stat.S_ISLNK(shard_stat.st_mode) or not stat.S_ISREG(
+            shard_stat.st_mode
+        ):
+            raise E9SpatialBankValidationError(
+                f"spatial shard must be a non-symlink regular file: {shard_path}"
+            )
+        resolved_shard = shard_path.resolve()
+        if resolved_shard.parent != resolved_root:
+            raise E9SpatialBankValidationError(
+                f"spatial shard resolves outside bank root: {shard_path}"
+            )
         raw = _read_spatial_shard(
-            shard_path,
+            resolved_shard,
             expected_sha256=entry["sha256"],
             expected_bytes=entry["bytes"],
         )
@@ -917,22 +969,172 @@ def validate_e9_spatial_bank(
     }
 
 
-def _restore_overwrite_backup(
+DirectoryIdentity = tuple[int, int]
+
+
+def _directory_identity(path: Path, *, label: str) -> DirectoryIdentity:
+    try:
+        metadata = os.lstat(path)
+    except OSError as error:
+        raise E9PublicationRecoveryError(
+            f"cannot inspect {label} at {path}: {error}"
+        ) from error
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise E9PublicationRecoveryError(
+            f"{label} is not a non-symlink directory: {path}"
+        )
+    return metadata.st_dev, metadata.st_ino
+
+
+def _is_owned_directory(path: Path, identity: DirectoryIdentity) -> bool:
+    try:
+        metadata = os.lstat(path)
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(metadata.st_mode)
+        and not stat.S_ISLNK(metadata.st_mode)
+        and (metadata.st_dev, metadata.st_ino) == identity
+    )
+
+
+def _remove_owned_directory(
+    path: Path,
+    identity: DirectoryIdentity,
+    *,
+    label: str,
+) -> None:
+    if not _is_owned_directory(path, identity):
+        raise E9PublicationRecoveryError(
+            f"refusing to remove foreign {label} at {path}"
+        )
+    shutil.rmtree(path)
+    _fsync_directory(path.parent)
+
+
+def _rename_noreplace(source: Path, destination: Path) -> None:
+    """Atomically rename a directory without replacing any destination."""
+
+    try:
+        renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
+    except AttributeError as error:
+        raise E9PublicationRecoveryError(
+            "atomic no-replace rename is unavailable; preserving recovery "
+            f"artifact at {source}"
+        ) from error
+    renameat2.argtypes = (
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    renameat2.restype = ctypes.c_int
+    result = renameat2(
+        _AT_FDCWD,
+        os.fsencode(source),
+        _AT_FDCWD,
+        os.fsencode(destination),
+        _RENAME_NOREPLACE,
+    )
+    if result == 0:
+        return
+    error_number = ctypes.get_errno()
+    if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
+        raise FileExistsError(
+            error_number, os.strerror(error_number), str(destination)
+        )
+    raise OSError(error_number, os.strerror(error_number), str(destination))
+
+
+def _acquire_publication_lock(lock: Path) -> DirectoryIdentity:
+    try:
+        lock.mkdir(mode=0o700)
+    except FileExistsError as error:
+        raise E9PublicationConflictError(
+            "E9 publication lock already exists; inspect it manually at "
+            f"{lock}"
+        ) from error
+    identity = _directory_identity(lock, label="owned publication lock")
+    _fsync_directory(lock.parent)
+    return identity
+
+
+def _release_publication_lock(
+    lock: Path,
+    identity: DirectoryIdentity,
+) -> None:
+    if not _is_owned_directory(lock, identity):
+        raise E9PublicationRecoveryError(
+            "refusing to remove a replaced E9 publication lock; inspect it "
+            f"manually at {lock}"
+        )
+    try:
+        lock.rmdir()
+    except OSError as error:
+        raise E9PublicationRecoveryError(
+            f"cannot remove owned E9 publication lock at {lock}: {error}"
+        ) from error
+    _fsync_directory(lock.parent)
+
+
+def _publish_manifest_last(
+    staging: Path,
+    output: Path,
+    *,
+    final_verification: Callable[[], None],
+) -> DirectoryIdentity:
+    try:
+        output.mkdir()
+    except FileExistsError as error:
+        raise E9PublicationConflictError(
+            "refusing to overwrite; concurrent E9 destination already "
+            f"exists at {output}"
+        ) from error
+    identity = _directory_identity(output, label="owned output reservation")
+    try:
+        names = sorted(
+            path.name
+            for path in staging.iterdir()
+            if path.name != MANIFEST_NAME
+        )
+        for name in names:
+            os.link(staging / name, output / name)
+            _fsync_file(output / name)
+        final_verification()
+        os.link(staging / MANIFEST_NAME, output / MANIFEST_NAME)
+        _fsync_file(output / MANIFEST_NAME)
+        _fsync_directory(output)
+        _fsync_directory(output.parent)
+        validate_e9_spatial_bank(output, require_production=False)
+    except Exception:
+        _remove_owned_directory(
+            output, identity, label="partial E9 output reservation"
+        )
+        raise
+    return identity
+
+
+def _restore_backup_if_free(
     output: Path,
     backup: Path,
     *,
-    had_output: bool,
+    expected_identity: DirectoryIdentity | None,
 ) -> None:
-    """Restore the pre-publication destination without discarding its backup."""
-    if os.path.lexists(output):
-        if output.is_symlink() or not output.is_dir():
-            output.unlink()
-        else:
-            shutil.rmtree(output)
-    if had_output:
-        if not os.path.lexists(backup):
-            raise RuntimeError("the E9 overwrite backup is missing")
-        os.rename(backup, output)
+    if (
+        expected_identity is not None
+        and not _is_owned_directory(backup, expected_identity)
+    ):
+        raise E9PublicationRecoveryError(
+            f"refusing to restore a replaced E9 backup at {backup}"
+        )
+    try:
+        _rename_noreplace(backup, output)
+    except FileExistsError as error:
+        raise E9PublicationRecoveryError(
+            "cannot restore the previous E9 pilot because a foreign output "
+            f"exists; output={output}, backup={backup}"
+        ) from error
     _fsync_directory(output.parent)
 
 
@@ -944,46 +1146,23 @@ def _publish_directory(
     final_verification: Callable[[], None],
 ) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
-    if os.path.lexists(output) and not overwrite:
-        raise FileExistsError(f"refusing to overwrite E9 spatial bank: {output}")
-    if not overwrite:
-        # mkdir is the atomic create-if-absent reservation.  Shards are linked
-        # first and the manifest is linked last, making the manifest the
-        # publication boundary while preventing a concurrent builder from
-        # clobbering this target.
-        try:
-            output.mkdir()
-        except FileExistsError as error:
+    lock = output.with_name(f".{output.name}.publication-lock")
+    lock_identity = _acquire_publication_lock(lock)
+    backup = output.with_name(f".{output.name}.backup-{os.getpid()}")
+    backup_moved = False
+    backup_identity: DirectoryIdentity | None = None
+    try:
+        if os.path.lexists(backup):
+            raise FileExistsError(
+                f"stale E9 publication backup exists: {backup}"
+            )
+        if not overwrite and os.path.lexists(output):
             raise FileExistsError(
                 f"refusing to overwrite E9 spatial bank: {output}"
-            ) from error
-        try:
-            names = sorted(
-                path.name for path in staging.iterdir()
-                if path.name != MANIFEST_NAME
             )
-            for name in names:
-                os.link(staging / name, output / name)
-                _fsync_file(output / name)
-            final_verification()
-            os.link(staging / MANIFEST_NAME, output / MANIFEST_NAME)
-            _fsync_file(output / MANIFEST_NAME)
-            _fsync_directory(output)
-            _fsync_directory(output.parent)
-        except Exception:
-            shutil.rmtree(output)
-            _fsync_directory(output.parent)
-            raise
-        shutil.rmtree(staging)
-        return
-    backup = output.with_name(f".{output.name}.backup-{os.getpid()}")
-    if os.path.lexists(backup):
-        raise FileExistsError(f"stale E9 publication backup exists: {backup}")
-    had_output = os.path.lexists(output)
-    if had_output:
-        os.rename(output, backup)
-    try:
-        if had_output:
+        if overwrite and os.path.lexists(output):
+            os.rename(output, backup)
+            backup_moved = True
             if backup.is_symlink():
                 raise E9SpatialBankValidationError(
                     "refusing to overwrite a symbolic-link E9 destination"
@@ -993,6 +1172,9 @@ def _publish_directory(
                     "existing E9 overwrite destination is not a spatial-bank "
                     "directory"
                 )
+            backup_identity = _directory_identity(
+                backup, label="moved E9 pilot backup"
+            )
             previous = validate_e9_spatial_bank(
                 backup, require_production=False
             )
@@ -1003,23 +1185,40 @@ def _publish_directory(
                 raise E9SpatialBankValidationError(
                     "existing E9 spatial bank is not a replaceable pilot"
                 )
-        final_verification()
-        os.rename(staging, output)
-        _fsync_directory(output.parent)
-    except Exception:
-        try:
-            _restore_overwrite_backup(
-                output, backup, had_output=had_output
-            )
-        except Exception as restore_error:
-            raise RuntimeError(
-                "E9 pilot overwrite restoration failed; recoverable backup "
-                f"location: {backup}"
-            ) from restore_error
+        _publish_manifest_last(
+            staging, output, final_verification=final_verification
+        )
+    except Exception as publication_error:
+        if backup_moved:
+            if os.path.lexists(output):
+                raise E9PublicationRecoveryError(
+                    "E9 publication conflict preserved both artifacts; "
+                    f"output={output}, backup={backup}"
+                ) from publication_error
+            try:
+                _restore_backup_if_free(
+                    output,
+                    backup,
+                    expected_identity=backup_identity,
+                )
+            except Exception as restore_error:
+                raise E9PublicationRecoveryError(
+                    "E9 pilot restoration failed; preserved recovery paths: "
+                    f"output={output}, backup={backup}"
+                ) from restore_error
         raise
-    if os.path.lexists(backup):
-        shutil.rmtree(backup)
-        _fsync_directory(output.parent)
+    else:
+        if backup_moved:
+            if backup_identity is None:
+                raise E9PublicationRecoveryError(
+                    f"validated E9 pilot backup identity is missing: {backup}"
+                )
+            _remove_owned_directory(
+                backup, backup_identity, label="validated old E9 pilot backup"
+            )
+        shutil.rmtree(staging)
+    finally:
+        _release_publication_lock(lock, lock_identity)
 
 
 def build_e9_spatial_bank(
@@ -1048,9 +1247,23 @@ def build_e9_spatial_bank(
         expected_dino_checkpoint_sha256, "expected DINO checkpoint"
     )
     source = Path(source).resolve()
-    # Keep the final path component unresolved so overwrite publication can
-    # inspect and reject a symbolic-link destination instead of following it.
-    output = Path(output).expanduser().absolute()
+    output_text = os.fspath(output)
+    if not isinstance(output_text, str):
+        raise ValueError("E9 output path must be text")
+    if (
+        not output_text
+        or output_text.endswith(os.sep)
+        or output_text.rsplit(os.sep, 1)[-1] in {"", ".", ".."}
+    ):
+        raise ValueError("E9 output path must have a nonempty final name")
+    raw_output = Path(output_text).expanduser()
+    if not raw_output.is_absolute():
+        raw_output = Path.cwd() / raw_output
+    raw_parent = raw_output.parent.absolute()
+    resolved_parent = raw_output.parent.resolve()
+    # Resolve every ancestor while retaining the final component verbatim so
+    # a final-component symlink remains visible to os.path.lexists/lstat.
+    output = resolved_parent / raw_output.name
     repository_root = Path(repository_root or Path(__file__).parents[1]).resolve()
     if (
         source == output
@@ -1064,6 +1277,19 @@ def build_e9_spatial_bank(
         pass
     else:
         raise ValueError("E9 banks must be published outside the source repository")
+    try:
+        output.parent.relative_to(repository_root)
+    except ValueError:
+        pass
+    else:
+        raise ValueError(
+            "E9 output parent must resolve outside the source repository"
+        )
+    if raw_parent != resolved_parent and os.path.lexists(output):
+        raise ValueError(
+            "an existing E9 destination must be addressed through its "
+            f"canonical parent path: {output}"
+        )
     manifest_source = _source_manifest(source)
     if manifest_source["split"] != split:
         raise E9SpatialBankValidationError("source split mismatch")
