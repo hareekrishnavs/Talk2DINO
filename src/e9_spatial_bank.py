@@ -917,6 +917,25 @@ def validate_e9_spatial_bank(
     }
 
 
+def _restore_overwrite_backup(
+    output: Path,
+    backup: Path,
+    *,
+    had_output: bool,
+) -> None:
+    """Restore the pre-publication destination without discarding its backup."""
+    if os.path.lexists(output):
+        if output.is_symlink() or not output.is_dir():
+            output.unlink()
+        else:
+            shutil.rmtree(output)
+    if had_output:
+        if not os.path.lexists(backup):
+            raise RuntimeError("the E9 overwrite backup is missing")
+        os.rename(backup, output)
+    _fsync_directory(output.parent)
+
+
 def _publish_directory(
     staging: Path,
     output: Path,
@@ -925,7 +944,7 @@ def _publish_directory(
     final_verification: Callable[[], None],
 ) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
-    if output.exists() and not overwrite:
+    if os.path.lexists(output) and not overwrite:
         raise FileExistsError(f"refusing to overwrite E9 spatial bank: {output}")
     if not overwrite:
         # mkdir is the atomic create-if-absent reservation.  Shards are linked
@@ -958,27 +977,47 @@ def _publish_directory(
         shutil.rmtree(staging)
         return
     backup = output.with_name(f".{output.name}.backup-{os.getpid()}")
-    if backup.exists():
+    if os.path.lexists(backup):
         raise FileExistsError(f"stale E9 publication backup exists: {backup}")
-    had_output = output.exists()
-    if output.exists():
+    had_output = os.path.lexists(output)
+    if had_output:
         os.rename(output, backup)
     try:
+        if had_output:
+            if backup.is_symlink():
+                raise E9SpatialBankValidationError(
+                    "refusing to overwrite a symbolic-link E9 destination"
+                )
+            if not backup.is_dir():
+                raise E9SpatialBankValidationError(
+                    "existing E9 overwrite destination is not a spatial-bank "
+                    "directory"
+                )
+            previous = validate_e9_spatial_bank(
+                backup, require_production=False
+            )
+            if (
+                not previous["is_pilot"]
+                or previous["production_eligible"]
+            ):
+                raise E9SpatialBankValidationError(
+                    "existing E9 spatial bank is not a replaceable pilot"
+                )
         final_verification()
         os.rename(staging, output)
         _fsync_directory(output.parent)
     except Exception:
-        if output.exists():
-            shutil.rmtree(output)
-        if backup.exists():
-            os.rename(backup, output)
-        elif had_output:
-            raise RuntimeError(
-                "E9 pilot overwrite could not restore the previous output"
+        try:
+            _restore_overwrite_backup(
+                output, backup, had_output=had_output
             )
-        _fsync_directory(output.parent)
+        except Exception as restore_error:
+            raise RuntimeError(
+                "E9 pilot overwrite restoration failed; recoverable backup "
+                f"location: {backup}"
+            ) from restore_error
         raise
-    if backup.exists():
+    if os.path.lexists(backup):
         shutil.rmtree(backup)
         _fsync_directory(output.parent)
 
@@ -1009,7 +1048,9 @@ def build_e9_spatial_bank(
         expected_dino_checkpoint_sha256, "expected DINO checkpoint"
     )
     source = Path(source).resolve()
-    output = Path(output).resolve()
+    # Keep the final path component unresolved so overwrite publication can
+    # inspect and reject a symbolic-link destination instead of following it.
+    output = Path(output).expanduser().absolute()
     repository_root = Path(repository_root or Path(__file__).parents[1]).resolve()
     if (
         source == output

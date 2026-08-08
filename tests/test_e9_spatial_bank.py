@@ -3,6 +3,7 @@ import copy
 import io
 import json
 import math
+import os
 import subprocess
 import tarfile
 from pathlib import Path
@@ -140,6 +141,33 @@ def tree_hashes(root):
     }
 
 
+def exact_tree_snapshot(root):
+    return {
+        path.relative_to(root).as_posix(): {
+            "bytes": path.read_bytes(),
+            "sha256": sha(path),
+        }
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def path_snapshot(path):
+    if path.is_symlink():
+        return ("symlink", os.readlink(path))
+    if path.is_file():
+        payload = path.read_bytes()
+        return ("file", payload, hashlib.sha256(payload).hexdigest())
+    if path.is_dir():
+        return ("directory", exact_tree_snapshot(path))
+    return ("missing",)
+
+
+def assert_no_publication_leftovers(parent, output_name="bank"):
+    assert not list(parent.glob(f".{output_name}.e9-*"))
+    assert not list(parent.glob(f".{output_name}.backup-*"))
+
+
 def test_source_geometry_and_independent_pooling():
     patches = torch.arange(1024 * 3, dtype=torch.float32).reshape(1024, 3)
     patches = torch.cat((patches, torch.ones(1024, 765)), dim=-1).half()
@@ -243,6 +271,164 @@ def test_build_validate_lazy_load_and_closed_manifest(tmp_path):
     (output / "manifest.json").write_text(json.dumps(manifest))
     with pytest.raises(e9.E9SpatialBankValidationError, match="closed schema"):
         e9.validate_e9_spatial_bank(output, require_production=False)
+
+
+def test_pilot_cannot_overwrite_production_bank_byte_for_byte(tmp_path):
+    repository = tmp_path / "repo"
+    git_repo(repository)
+    production_source = make_source(
+        tmp_path / "production-source", [source_record(21)]
+    )
+    pilot_source = make_source(
+        tmp_path / "pilot-source", [source_record(22)]
+    )
+    output = tmp_path / "bank"
+    build_spatial_bank(
+        production_source, output, split="train", repository_root=repository
+    )
+    before = exact_tree_snapshot(output)
+    manifest_sha = sha(output / "manifest.json")
+
+    with pytest.raises(
+        e9.E9SpatialBankValidationError,
+        match="not a replaceable pilot",
+    ):
+        build_spatial_bank(
+            pilot_source,
+            output,
+            split="train",
+            max_images=1,
+            overwrite=True,
+            repository_root=repository,
+        )
+
+    assert exact_tree_snapshot(output) == before
+    assert sha(output / "manifest.json") == manifest_sha
+    assert e9.validate_e9_spatial_bank(output)["production_eligible"]
+    assert_no_publication_leftovers(tmp_path)
+
+
+def test_valid_pilot_can_atomically_replace_valid_pilot(tmp_path):
+    repository = tmp_path / "repo"
+    git_repo(repository)
+    old_source = make_source(tmp_path / "old-source", [source_record(31)])
+    new_source = make_source(tmp_path / "new-source", [source_record(32)])
+    output = tmp_path / "bank"
+    old_result = build_spatial_bank(
+        old_source,
+        output,
+        split="train",
+        max_images=1,
+        repository_root=repository,
+    )
+    old_manifest_sha = sha(output / "manifest.json")
+
+    new_result = build_spatial_bank(
+        new_source,
+        output,
+        split="train",
+        max_images=1,
+        overwrite=True,
+        repository_root=repository,
+    )
+
+    assert old_result["is_pilot"] and not old_result["production_eligible"]
+    assert new_result["is_pilot"] and not new_result["production_eligible"]
+    assert sha(output / "manifest.json") != old_manifest_sha
+    manifest = json.loads((output / "manifest.json").read_text())
+    assert [row["image_id"] for row in manifest["image_index"]] == [32]
+    assert_no_publication_leftovers(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "destination_kind",
+    (
+        "malformed_manifest",
+        "missing_manifest",
+        "legacy_v1",
+        "invalid_incomplete",
+        "valid_nonpilot_nonproduction",
+        "ordinary_file",
+        "unrelated_directory",
+        "symlink",
+    ),
+)
+def test_pilot_overwrite_rejects_and_restores_invalid_destination(
+    tmp_path, destination_kind
+):
+    repository = tmp_path / "repo"
+    git_repo(repository)
+    source = make_source(tmp_path / "source", [source_record(41)])
+    output = tmp_path / "bank"
+    symlink_target = tmp_path / "symlink-target"
+
+    if destination_kind in {
+        "legacy_v1",
+        "invalid_incomplete",
+        "valid_nonpilot_nonproduction",
+    }:
+        build_spatial_bank(
+            source,
+            output,
+            split="train",
+            max_images=(
+                None
+                if destination_kind == "valid_nonpilot_nonproduction"
+                else 1
+            ),
+            repository_root=repository,
+        )
+        manifest_path = output / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        if destination_kind == "legacy_v1":
+            manifest["format_version"] = "talk2dino-e9-spatial-bank-v1"
+        elif destination_kind == "invalid_incomplete":
+            manifest["complete"] = False
+            manifest["production_eligible"] = False
+        else:
+            manifest["source_git_dirty"] = True
+            manifest["source_git_diff_sha256"] = "d" * 64
+            manifest["production_eligible"] = False
+        manifest_path.write_text(json.dumps(manifest))
+    elif destination_kind == "ordinary_file":
+        output.write_bytes(b"ordinary file, not a bank")
+    elif destination_kind == "symlink":
+        symlink_target.mkdir()
+        (symlink_target / "original").write_bytes(b"symlink target")
+        output.symlink_to(symlink_target, target_is_directory=True)
+    else:
+        output.mkdir()
+        if destination_kind == "malformed_manifest":
+            (output / "manifest.json").write_bytes(b"{not-json")
+            (output / "original").write_bytes(b"preserve malformed")
+        elif destination_kind == "missing_manifest":
+            (output / "train-000000.pth").write_bytes(b"missing manifest")
+        else:
+            nested = output / "unrelated"
+            nested.mkdir()
+            (nested / "original").write_bytes(b"unrelated directory")
+
+    before = path_snapshot(output)
+    symlink_target_before = (
+        exact_tree_snapshot(symlink_target)
+        if destination_kind == "symlink"
+        else None
+    )
+    with pytest.raises(e9.E9SpatialBankValidationError):
+        build_spatial_bank(
+            source,
+            output,
+            split="train",
+            max_images=1,
+            overwrite=True,
+            repository_root=repository,
+        )
+
+    assert path_snapshot(output) == before
+    if destination_kind == "symlink":
+        assert exact_tree_snapshot(symlink_target) == symlink_target_before
+    assert_no_publication_leftovers(tmp_path)
+
 
 def test_full_bank_is_production_eligible_and_incomplete_is_rejected(
     tmp_path, monkeypatch
@@ -408,13 +594,21 @@ def test_duplicate_source_image_ids_are_rejected(tmp_path):
     assert not output.exists()
 
 
-def test_failed_publication_preserves_existing_output_and_cleans_staging(tmp_path, monkeypatch):
+def test_failed_publication_preserves_existing_output_and_cleans_staging(
+    tmp_path, monkeypatch
+):
+    repository = tmp_path / "repo"
+    git_repo(repository)
     source = make_source(tmp_path / "source", [source_record(4)])
     output = tmp_path / "bank"
-    output.mkdir()
-    marker = output / "existing"
-    marker.write_bytes(b"preserve-me")
-    before = sha(marker)
+    build_spatial_bank(
+        source,
+        output,
+        split="train",
+        max_images=1,
+        repository_root=repository,
+    )
+    before = exact_tree_snapshot(output)
     monkeypatch.setattr(
         e9,
         "_require_unchanged_git_provenance",
@@ -423,10 +617,10 @@ def test_failed_publication_preserves_existing_output_and_cleans_staging(tmp_pat
     with pytest.raises(RuntimeError, match="mutated"):
         build_spatial_bank(
             source, output, split="train", max_images=1, overwrite=True,
-            allow_dirty_source=True,
+            repository_root=repository,
         )
-    assert sha(marker) == before
-    assert not list(tmp_path.glob(".bank.e9-*"))
+    assert exact_tree_snapshot(output) == before
+    assert_no_publication_leftovers(tmp_path)
 
 
 def test_source_mutation_during_shard_serialization_prevents_publication(tmp_path, monkeypatch):
@@ -500,7 +694,8 @@ def test_manifest_boundary_rejects_mutation_after_nonmanifest_link(
 
 
 @pytest.mark.parametrize(
-    "mutation_kind", ("unstaged", "staged", "untracked", "source_artifact")
+    "mutation_kind",
+    ("unstaged", "staged", "untracked", "source_artifact", "publication_rename"),
 )
 def test_manifest_boundary_failed_pilot_overwrite_restores_existing_tree(
     tmp_path, monkeypatch, mutation_kind
@@ -510,44 +705,224 @@ def test_manifest_boundary_failed_pilot_overwrite_restores_existing_tree(
     source = make_source(tmp_path / "source", [source_record(13)])
     source_shard = source / "train-000000.tar"
     output = tmp_path / "bank"
-    output.mkdir()
-    (output / "manifest.json").write_bytes(b"existing manifest")
-    (output / "existing-shard.pth").write_bytes(b"existing shard")
-    before = tree_hashes(output)
+    build_spatial_bank(
+        source,
+        output,
+        split="train",
+        max_images=1,
+        repository_root=repository,
+    )
+    before = exact_tree_snapshot(output)
+    manifest_sha = sha(output / "manifest.json")
+    backup = output.with_name(f".{output.name}.backup-{os.getpid()}")
+    original_validate = e9.validate_e9_spatial_bank
     original_rename = e9.os.rename
     mutation_seen = False
 
-    def mutate_after_backup(source_path, destination_path):
+    def mutate_after_backup_validation(path, *args, **kwargs):
         nonlocal mutation_seen
-        original_rename(source_path, destination_path)
-        if Path(source_path) != output or mutation_seen:
-            return
+        result = original_validate(path, *args, **kwargs)
+        if Path(path) != backup or mutation_seen:
+            return result
         mutation_seen = True
         if mutation_kind == "untracked":
             (repository / "new.py").write_text("new\n")
         elif mutation_kind == "source_artifact":
             source_shard.write_bytes(source_shard.read_bytes() + b"mutation")
-        else:
+        elif mutation_kind in {"unstaged", "staged"}:
             tracked.write_text(f"{mutation_kind}\n")
             if mutation_kind == "staged":
                 subprocess.run(
                     ["git", "-C", str(repository), "add", "source.py"],
                     check=True,
                 )
+        return result
 
-    monkeypatch.setattr(e9.os, "rename", mutate_after_backup)
-    with pytest.raises(
-        e9.E9SpatialBankValidationError,
-        match="publication|provenance",
-    ):
+    def fail_publication_rename(source_path, destination_path):
+        if (
+            mutation_kind == "publication_rename"
+            and Path(source_path).name.startswith(f".{output.name}.e9-")
+            and Path(destination_path) == output
+        ):
+            raise OSError("injected publication rename failure")
+        return original_rename(source_path, destination_path)
+
+    monkeypatch.setattr(e9, "validate_e9_spatial_bank", mutate_after_backup_validation)
+    monkeypatch.setattr(e9.os, "rename", fail_publication_rename)
+    with pytest.raises((e9.E9SpatialBankValidationError, OSError)):
         build_spatial_bank(
             source, output, split="train", max_images=1, overwrite=True,
             repository_root=repository,
         )
     assert mutation_seen
-    assert tree_hashes(output) == before
+    assert exact_tree_snapshot(output) == before
+    assert sha(output / "manifest.json") == manifest_sha
+    assert_no_publication_leftovers(tmp_path)
+
+
+def test_pilot_overwrite_publication_order_uses_protected_backup(tmp_path, monkeypatch):
+    repository = tmp_path / "repo"
+    git_repo(repository)
+    old_source = make_source(tmp_path / "old-source", [source_record(51)])
+    new_source = make_source(tmp_path / "new-source", [source_record(52)])
+    output = tmp_path / "bank"
+    build_spatial_bank(
+        old_source,
+        output,
+        split="train",
+        max_images=1,
+        repository_root=repository,
+    )
+    backup = output.with_name(f".{output.name}.backup-{os.getpid()}")
+    events = []
+    state = {
+        "boundary": False,
+        "input_hash_recorded": False,
+        "published": False,
+        "backup_removed": False,
+    }
+    original_validate = e9.validate_e9_spatial_bank
+    original_sha256 = e9.sha256_file
+    original_git_check = e9._require_unchanged_git_provenance
+    original_rename = e9.os.rename
+    original_fsync_directory = e9._fsync_directory
+    original_rmtree = e9.shutil.rmtree
+    original_torch_save = e9.torch.save
+
+    def record_validate(path, *args, **kwargs):
+        result = original_validate(path, *args, **kwargs)
+        if state["boundary"] and Path(path) == backup:
+            events.append("validate_backup")
+        return result
+
+    def record_sha256(path):
+        result = original_sha256(path)
+        if state["boundary"] and not state["input_hash_recorded"]:
+            state["input_hash_recorded"] = True
+            events.append("final_input_hash_check")
+        return result
+
+    def record_git_check(*args, **kwargs):
+        result = original_git_check(*args, **kwargs)
+        if state["boundary"]:
+            events.append("final_git_check")
+        return result
+
+    def record_rename(source_path, destination_path):
+        result = original_rename(source_path, destination_path)
+        if Path(source_path) == output and Path(destination_path) == backup:
+            state["boundary"] = True
+            events.append("rename_backup")
+        elif (
+            state["boundary"]
+            and Path(source_path).name.startswith(f".{output.name}.e9-")
+            and Path(destination_path) == output
+        ):
+            state["published"] = True
+            events.append("rename_publish")
+        return result
+
+    def record_fsync_directory(path):
+        result = original_fsync_directory(path)
+        if state["backup_removed"]:
+            events.append("fsync_after_backup_removal")
+            state["backup_removed"] = False
+        elif state["published"]:
+            events.append("fsync_after_publish")
+            state["published"] = False
+        return result
+
+    def record_rmtree(path, *args, **kwargs):
+        result = original_rmtree(path, *args, **kwargs)
+        if Path(path) == backup:
+            events.append("remove_backup")
+            state["backup_removed"] = True
+        return result
+
+    def reject_late_serialization(*args, **kwargs):
+        if state["boundary"]:
+            raise AssertionError("serialization occurred after backup validation boundary")
+        return original_torch_save(*args, **kwargs)
+
+    monkeypatch.setattr(e9, "validate_e9_spatial_bank", record_validate)
+    monkeypatch.setattr(e9, "sha256_file", record_sha256)
+    monkeypatch.setattr(e9, "_require_unchanged_git_provenance", record_git_check)
+    monkeypatch.setattr(e9.os, "rename", record_rename)
+    monkeypatch.setattr(e9, "_fsync_directory", record_fsync_directory)
+    monkeypatch.setattr(e9.shutil, "rmtree", record_rmtree)
+    monkeypatch.setattr(e9.torch, "save", reject_late_serialization)
+
+    build_spatial_bank(
+        new_source,
+        output,
+        split="train",
+        max_images=1,
+        overwrite=True,
+        repository_root=repository,
+    )
+
+    assert events == [
+        "rename_backup",
+        "validate_backup",
+        "final_input_hash_check",
+        "final_git_check",
+        "rename_publish",
+        "fsync_after_publish",
+        "remove_backup",
+        "fsync_after_backup_removal",
+    ]
+    assert events.index("rename_publish") == events.index("final_git_check") + 1
+    assert_no_publication_leftovers(tmp_path)
+
+
+def test_restoration_failure_preserves_recoverable_backup(tmp_path, monkeypatch):
+    repository = tmp_path / "repo"
+    tracked = git_repo(repository)
+    source = make_source(tmp_path / "source", [source_record(61)])
+    output = tmp_path / "bank"
+    build_spatial_bank(
+        source,
+        output,
+        split="train",
+        max_images=1,
+        repository_root=repository,
+    )
+    before = exact_tree_snapshot(output)
+    backup = output.with_name(f".{output.name}.backup-{os.getpid()}")
+    original_validate = e9.validate_e9_spatial_bank
+    original_rename = e9.os.rename
+    mutation_seen = False
+
+    def mutate_after_backup_validation(path, *args, **kwargs):
+        nonlocal mutation_seen
+        result = original_validate(path, *args, **kwargs)
+        if Path(path) == backup and not mutation_seen:
+            mutation_seen = True
+            tracked.write_text("mutated after backup validation\n")
+        return result
+
+    def fail_backup_restoration(source_path, destination_path):
+        if Path(source_path) == backup and Path(destination_path) == output:
+            raise OSError("injected restoration failure")
+        return original_rename(source_path, destination_path)
+
+    monkeypatch.setattr(e9, "validate_e9_spatial_bank", mutate_after_backup_validation)
+    monkeypatch.setattr(e9.os, "rename", fail_backup_restoration)
+    with pytest.raises(RuntimeError, match=str(backup)):
+        build_spatial_bank(
+            source,
+            output,
+            split="train",
+            max_images=1,
+            overwrite=True,
+            repository_root=repository,
+        )
+
+    assert mutation_seen
+    assert not os.path.lexists(output)
+    assert backup.is_dir()
+    assert exact_tree_snapshot(backup) == before
     assert not list(tmp_path.glob(".bank.e9-*"))
-    assert not list(tmp_path.glob(".bank.backup-*"))
 
 
 def test_atomic_create_if_absent_refuses_existing_target(tmp_path):
