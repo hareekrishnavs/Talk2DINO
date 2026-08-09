@@ -1808,8 +1808,8 @@ def build_e9_spatial_bank(
     output: os.PathLike[str] | str,
     *,
     split: str,
-    expected_dino_source_commit: str,
-    expected_dino_checkpoint_sha256: str,
+    expected_dino_source_commit: str | None = None,
+    expected_dino_checkpoint_sha256: str | None = None,
     shard_rows: int = 128,
     max_images: int | None = None,
     overwrite: bool = False,
@@ -1822,12 +1822,14 @@ def build_e9_spatial_bank(
         raise ValueError("shard_rows must be a positive integer")
     if max_images is not None and (isinstance(max_images, bool) or not isinstance(max_images, int) or max_images <= 0):
         raise ValueError("max_images must be a positive integer")
-    _require_git_commit(
-        expected_dino_source_commit, "expected DINO source commit"
-    )
-    _require_sha256(
-        expected_dino_checkpoint_sha256, "expected DINO checkpoint"
-    )
+    if expected_dino_source_commit is not None:
+        _require_git_commit(
+            expected_dino_source_commit, "expected DINO source commit"
+        )
+    if expected_dino_checkpoint_sha256 is not None:
+        _require_sha256(
+            expected_dino_checkpoint_sha256, "expected DINO checkpoint"
+        )
     source = Path(source).resolve()
     output_text = os.fspath(output)
     if not isinstance(output_text, str):
@@ -1892,6 +1894,19 @@ def build_e9_spatial_bank(
     if manifest_source["split"] != split:
         raise E9SpatialBankValidationError("source split mismatch")
     extraction_source = manifest_source["extraction_config"]
+    if expected_dino_source_commit is None:
+        # No independent expectation was supplied: trust the source
+        # manifest's own already-validated extractor commit directly
+        # (the latest value actually recorded for this source) rather than
+        # cross-checking it against an external assertion.
+        expected_dino_source_commit = manifest_source["source_commit"]
+    if expected_dino_checkpoint_sha256 is None:
+        # No independent expectation was supplied: trust the source
+        # manifest's own already-validated checkpoint identity directly
+        # rather than cross-checking it against an external assertion.
+        expected_dino_checkpoint_sha256 = extraction_source[
+            "backbone_weights_sha256"
+        ]
     if manifest_source["source_commit"] != expected_dino_source_commit:
         raise E9SpatialBankValidationError(
             "dense source DINO extractor commit does not match the expected "

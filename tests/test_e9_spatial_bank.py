@@ -761,6 +761,72 @@ def test_builder_requires_exact_external_dino_identity_before_staging(
     assert not list(tmp_path.glob(".bank.e9-*"))
 
 
+def test_omitted_expected_checkpoint_sha256_trusts_source_manifest(tmp_path):
+    source = make_source(tmp_path / "source", [source_record(2)])
+    output = tmp_path / "bank"
+    result = e9.build_e9_spatial_bank(
+        source, output, split="train",
+        expected_dino_source_commit=DINO_SOURCE_COMMIT,
+        max_images=1,
+        allow_dirty_source=True,
+    )
+    assert result["images"] == 1
+    manifest = json.loads((output / "manifest.json").read_text())
+    assert manifest["dino_identity"]["checkpoint_sha256"] == DINO_CHECKPOINT_SHA256
+
+
+def test_omitted_expected_checkpoint_sha256_still_enforces_source_commit(tmp_path):
+    source = make_source(tmp_path / "source", [source_record(2)])
+    output = tmp_path / "bank"
+    with pytest.raises(e9.E9SpatialBankValidationError, match="DINO"):
+        e9.build_e9_spatial_bank(
+            source, output, split="train",
+            expected_dino_source_commit="c" * 40,
+            max_images=1,
+            allow_dirty_source=True,
+        )
+    assert not output.exists()
+
+
+def test_omitted_expected_source_commit_trusts_source_manifest(tmp_path):
+    source = make_source(tmp_path / "source", [source_record(2)])
+    output = tmp_path / "bank"
+    result = e9.build_e9_spatial_bank(
+        source, output, split="train",
+        expected_dino_checkpoint_sha256=DINO_CHECKPOINT_SHA256,
+        max_images=1,
+        allow_dirty_source=True,
+    )
+    assert result["images"] == 1
+    manifest = json.loads((output / "manifest.json").read_text())
+    assert manifest["dino_identity"]["source_commit"] == DINO_SOURCE_COMMIT
+
+
+def test_omitted_expected_source_commit_still_enforces_checkpoint_sha256(tmp_path):
+    source = make_source(tmp_path / "source", [source_record(2)])
+    output = tmp_path / "bank"
+    with pytest.raises(e9.E9SpatialBankValidationError, match="DINO"):
+        e9.build_e9_spatial_bank(
+            source, output, split="train",
+            expected_dino_checkpoint_sha256="d" * 64,
+            max_images=1,
+            allow_dirty_source=True,
+        )
+    assert not output.exists()
+
+
+def test_both_dino_identity_expectations_omitted_trusts_source_manifest(tmp_path):
+    source = make_source(tmp_path / "source", [source_record(2)])
+    output = tmp_path / "bank"
+    result = e9.build_e9_spatial_bank(
+        source, output, split="train", max_images=1, allow_dirty_source=True,
+    )
+    assert result["images"] == 1
+    manifest = json.loads((output / "manifest.json").read_text())
+    assert manifest["dino_identity"]["source_commit"] == DINO_SOURCE_COMMIT
+    assert manifest["dino_identity"]["checkpoint_sha256"] == DINO_CHECKPOINT_SHA256
+
+
 def test_builder_rejects_source_without_dino_checkpoint_identity(tmp_path):
     source = make_source(tmp_path / "source", [source_record(2)])
     manifest_path = source / "manifest.json"
