@@ -99,7 +99,7 @@ _GIT_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 
 CANONICAL_E9_TRAINING_CONFIG = {
     "seed": 42,
-    "num_epochs": 20,
+    "num_epochs": 100,
     "batch_size": 128,
     "learning_rate": 0.0001,
     "weight_decay": 0.0001,

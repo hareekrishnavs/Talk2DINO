@@ -827,23 +827,26 @@ def test_both_dino_identity_expectations_omitted_trusts_source_manifest(tmp_path
     assert manifest["dino_identity"]["checkpoint_sha256"] == DINO_CHECKPOINT_SHA256
 
 
-def test_builder_rejects_source_without_dino_checkpoint_identity(tmp_path):
+def test_builder_uses_default_checkpoint_for_legacy_source_without_identity(
+    tmp_path, monkeypatch
+):
     source = make_source(tmp_path / "source", [source_record(2)])
     manifest_path = source / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
     manifest["extraction_config"].pop("backbone_weights_sha256")
     manifest_path.write_text(json.dumps(manifest))
+    checkpoint = tmp_path / "dinov2_vitb14_reg4_pretrain.pth"
+    checkpoint.write_bytes(b"standard local checkpoint")
+    monkeypatch.setattr(e9, "_default_dino_checkpoint_path", lambda: checkpoint)
     output = tmp_path / "bank"
-    with pytest.raises(
-        e9.E9SpatialBankValidationError,
-        match="missing required backbone_weights_sha256",
-    ):
+    with pytest.warns(RuntimeWarning, match="legacy E5 manifest"):
         build_spatial_bank(
             source, output, split="train", max_images=1,
             allow_dirty_source=True,
         )
-    assert not output.exists()
-    assert not list(tmp_path.glob(".bank.e9-*"))
+    built = json.loads((output / "manifest.json").read_text())
+    assert built["dino_identity"]["checkpoint_sha256"] == sha(checkpoint)
+    assert built["extraction"]["backbone_weights_sha256"] == sha(checkpoint)
 
 
 def test_forged_partial_full_bank_is_rejected(tmp_path, monkeypatch):

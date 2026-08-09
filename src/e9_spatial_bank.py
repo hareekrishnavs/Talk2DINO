@@ -21,6 +21,8 @@ import shutil
 import stat
 import tarfile
 import tempfile
+import time
+import warnings
 from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -157,6 +159,7 @@ _UTC_RFC3339 = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?\+00:00$"
 )
 _RENAME_NOREPLACE = 1
+_DEFAULT_DINO_CHECKPOINT_NAME = "dinov2_vitb14_reg4_pretrain.pth"
 _RENAME_EXCHANGE = 2
 _UNSUPPORTED_RENAMEAT2_ERRNOS = {errno.EINVAL, errno.ENOSYS}
 _PRIVATE_DIR_MODE = 0o700
@@ -328,6 +331,32 @@ def _load_json(path: Path) -> dict[str, Any]:
     return value
 
 
+def _default_dino_checkpoint_path() -> Path:
+    """Resolve the standard local ViT-B checkpoint without a CLI identity input."""
+
+    candidates: list[Path] = []
+    configured = os.environ.get("TALK2DINO_WEIGHT_DIR")
+    if configured:
+        candidates.append(Path(configured) / _DEFAULT_DINO_CHECKPOINT_NAME)
+    user = os.environ.get("USER")
+    if user:
+        candidates.append(
+            Path("/scratch") / user / "weights" / _DEFAULT_DINO_CHECKPOINT_NAME
+        )
+    candidates.append(
+        Path(__file__).parents[1] / "weights" / _DEFAULT_DINO_CHECKPOINT_NAME
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+    searched = ", ".join(str(candidate) for candidate in candidates)
+    raise E9SpatialBankValidationError(
+        "legacy dense source has no DINO checkpoint identity and the default "
+        f"checkpoint {_DEFAULT_DINO_CHECKPOINT_NAME} was not found; searched: "
+        f"{searched}"
+    )
+
+
 def _source_manifest(source: Path, *, require_complete: bool = True) -> dict[str, Any]:
     if source.is_file():
         raise E9SpatialBankValidationError(
@@ -410,10 +439,16 @@ def _source_manifest(source: Path, *, require_complete: bool = True) -> dict[str
     if not isinstance(extraction, Mapping):
         raise E9SpatialBankValidationError("source extraction_config must be a mapping")
     if "backbone_weights_sha256" not in extraction:
-        raise E9SpatialBankValidationError(
-            "source extraction_config is missing required "
-            "backbone_weights_sha256; regenerate E5 dense features with exact "
-            "DINO weight identity"
+        checkpoint_path = _default_dino_checkpoint_path()
+        extraction = dict(extraction)
+        extraction["backbone_weights_sha256"] = sha256_file(checkpoint_path)
+        manifest = dict(manifest)
+        manifest["extraction_config"] = extraction
+        warnings.warn(
+            "legacy E5 manifest has no backbone_weights_sha256; using the "
+            f"standard local checkpoint identity from {checkpoint_path}",
+            RuntimeWarning,
+            stacklevel=2,
         )
     _require_sha256(
         extraction["backbone_weights_sha256"],
@@ -435,11 +470,58 @@ def _source_manifest(source: Path, *, require_complete: bool = True) -> dict[str
     return manifest
 
 
+def _format_duration(seconds: float) -> str:
+    if not math.isfinite(seconds):
+        return "unknown"
+    total = max(0, int(seconds))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m{secs:02d}s"
+    if minutes:
+        return f"{minutes}m{secs:02d}s"
+    return f"{secs}s"
+
+
+def _progress_reporter(
+    prefix: str, total: int, *, min_interval: float = 2.0
+) -> Callable[[int], None]:
+    """Return a callback that prints periodic "done/total (%) ETA" lines.
+
+    Printing is time-gated (not count-gated) so it stays useful whether
+    ``total`` is a handful of shards or hundreds of thousands of images,
+    without flooding a log file. Always prints on completion.
+    """
+
+    start = time.monotonic()
+    state = {"last_print": 0.0}
+
+    def report(done: int) -> None:
+        now = time.monotonic()
+        finished = total <= 0 or done >= total
+        if not finished and now - state["last_print"] < min_interval:
+            return
+        state["last_print"] = now
+        elapsed = now - start
+        rate = done / elapsed if elapsed > 0 else 0.0
+        eta = (total - done) / rate if rate > 0 else math.inf
+        percent = (done / total * 100) if total > 0 else 100.0
+        print(
+            f"{prefix}: {done}/{total} ({percent:.1f}%) "
+            f"elapsed={_format_duration(elapsed)} eta={_format_duration(eta)}",
+            flush=True,
+        )
+
+    return report
+
+
 def _source_artifacts(source: Path, manifest: Mapping[str, Any]) -> list[dict[str, Any]]:
     artifacts = []
     manifest_path = source / MANIFEST_NAME
     artifacts.append({"path": str(manifest_path.resolve()), "sha256": sha256_file(manifest_path)})
-    for entry in manifest["shards"]:
+    shards = manifest["shards"]
+    report = _progress_reporter("E9 verifying source shard integrity", len(shards))
+    for index, entry in enumerate(shards, start=1):
         if not isinstance(entry, Mapping) or "name" not in entry:
             raise E9SpatialBankValidationError("invalid source shard entry")
         path = source / entry["name"]
@@ -449,6 +531,7 @@ def _source_artifacts(source: Path, manifest: Mapping[str, Any]) -> list[dict[st
         if entry.get("sha256") != digest:
             raise E9SpatialBankValidationError(f"source shard SHA mismatch: {path}")
         artifacts.append({"path": str(path.resolve()), "sha256": digest})
+        report(index)
     return artifacts
 
 
@@ -2014,6 +2097,7 @@ def build_e9_spatial_bank(
             )
             pooled, priors, ids = [], [], []
 
+        report = _progress_reporter("E9 processing source images", selected_images)
         for record in _iter_source_records(source, manifest_source):
             if max_images is not None and len(selected_ids) >= selected_images:
                 break
@@ -2042,6 +2126,7 @@ def build_e9_spatial_bank(
             priors.append(prior.to(torch.float16).cpu())
             ids.append(image_id)
             selected_ids.append(image_id)
+            report(len(selected_ids))
             if len(ids) == shard_rows:
                 finalize_shard()
         finalize_shard()

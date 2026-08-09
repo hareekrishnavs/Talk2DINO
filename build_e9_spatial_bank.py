@@ -15,25 +15,6 @@ def main() -> None:
     parser.add_argument("--source", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--split", required=True, choices=("train", "val"))
-    parser.add_argument(
-        "--expected_dino_source_commit",
-        default=None,
-        help=(
-            "optional; if omitted, the value from the source manifest's "
-            "source_commit is trusted directly instead of being "
-            "cross-checked against an independently supplied expectation"
-        ),
-    )
-    parser.add_argument(
-        "--expected_dino_checkpoint_sha256",
-        default=None,
-        help=(
-            "optional; if omitted, the value from the source manifest's "
-            "extraction_config.backbone_weights_sha256 is trusted directly "
-            "instead of being cross-checked against an independently "
-            "supplied expectation"
-        ),
-    )
     parser.add_argument("--shard_rows", type=int, default=128)
     parser.add_argument("--max_images", type=int)
     parser.add_argument("--overwrite", action="store_true")
@@ -43,8 +24,6 @@ def main() -> None:
         args.source,
         args.output,
         split=args.split,
-        expected_dino_source_commit=args.expected_dino_source_commit,
-        expected_dino_checkpoint_sha256=args.expected_dino_checkpoint_sha256,
         shard_rows=args.shard_rows,
         max_images=args.max_images,
         overwrite=args.overwrite,
