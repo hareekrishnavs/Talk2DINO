@@ -39,6 +39,7 @@ from src.e8_balanced_retrieval_adapter import (
 from src.e9_sparse_region_alignment import (
     E9ValidationError,
     load_e9_adapter,
+    pool_native_grid_to_training_geometry,
     validate_e9_dino_identity,
 )
 
@@ -641,6 +642,15 @@ class DINOText(nn.Module):
             patch_grid = projected_patch_tokens.reshape(
                 b, np_h, np_w, c
             ).permute(0, 3, 1, 2)
+            # The E9 adapter was trained exclusively on the E9 spatial bank's
+            # pooled geometry (2x2 mean/sum pooling from the native DINO
+            # grid -- see src.e9_spatial_bank.pool_source_image). Reduce the
+            # native runtime grid the same way before scoring, or every
+            # patch embedding and attention weight the adapter sees differs
+            # systematically from what it learned.
+            patch_grid, attention_prior = pool_native_grid_to_training_geometry(
+                patch_grid, attention_prior
+            )
             mask, simmap = self.masker.forward_seg_with_sparse_region_alignment(
                 patch_grid,
                 text_emb,

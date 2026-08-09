@@ -16,6 +16,7 @@ import json
 import math
 import os
 import re
+import secrets
 import shutil
 import stat
 import tarfile
@@ -155,8 +156,13 @@ _GIT_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _UTC_RFC3339 = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?\+00:00$"
 )
-_AT_FDCWD = -100
 _RENAME_NOREPLACE = 1
+_RENAME_EXCHANGE = 2
+_UNSUPPORTED_RENAMEAT2_ERRNOS = {errno.EINVAL, errno.ENOSYS}
+_PRIVATE_DIR_MODE = 0o700
+_MAX_MANIFEST_BYTES = 256 * 1024 * 1024
+_NOFOLLOW_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+_NOFOLLOW_FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
 
 
 class E9SpatialBankValidationError(ValueError):
@@ -169,6 +175,14 @@ class E9PublicationConflictError(FileExistsError):
 
 class E9PublicationRecoveryError(RuntimeError):
     """Raised when publication cannot safely restore an earlier artifact."""
+
+
+class E9AtomicOperationUnsupportedError(E9PublicationRecoveryError):
+    """Raised when the filesystem/kernel lacks a required renameat2 primitive.
+
+    Publication never falls back to an unsafe non-atomic path when this is
+    raised: it fails before any existing destination is touched.
+    """
 
 
 def _closed(value: Any, keys: set[str], label: str) -> Mapping[str, Any]:
@@ -662,27 +676,97 @@ def load_spatial_shard(
     }
 
 
+def _read_fd_exact(fd: int, size: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = size
+    while remaining > 0:
+        chunk = os.read(fd, min(remaining, 1 << 20))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
 def validate_e9_spatial_bank(
     path: os.PathLike[str] | str,
     *,
     require_production: bool = True,
     verify_source_artifacts: bool = False,
 ) -> dict[str, Any]:
+    """Validate a closed-contract E9 spatial bank.
+
+    Every filesystem read below is descriptor based: the bank root and every
+    manifest/shard are opened with ``O_NOFOLLOW`` relative to an already-open
+    directory descriptor and read from that exact descriptor, so nothing can
+    be swapped for a symlink between a preliminary check and the read.
+    """
+
     root = Path(path)
-    manifest_path = root / MANIFEST_NAME
     try:
-        manifest_stat = os.lstat(manifest_path)
+        root_fd = os.open(root, _NOFOLLOW_DIR_FLAGS)
     except OSError as error:
         raise E9SpatialBankValidationError(
-            f"invalid E9 manifest file {manifest_path}: {error}"
+            f"cannot open E9 bank root {root}: {error}"
         ) from error
-    if stat.S_ISLNK(manifest_stat.st_mode) or not stat.S_ISREG(
-        manifest_stat.st_mode
-    ):
-        raise E9SpatialBankValidationError(
-            "E9 manifest.json must be a non-symlink regular file"
+    try:
+        return _validate_e9_spatial_bank_fd(
+            root_fd,
+            root,
+            require_production=require_production,
+            verify_source_artifacts=verify_source_artifacts,
         )
-    manifest = _closed(_load_json(manifest_path), MANIFEST_KEYS, "E9 manifest")
+    finally:
+        os.close(root_fd)
+
+
+def _validate_e9_spatial_bank_fd(
+    root_fd: int,
+    root: Path,
+    *,
+    require_production: bool,
+    verify_source_artifacts: bool,
+) -> dict[str, Any]:
+    manifest_display = root / MANIFEST_NAME
+    try:
+        manifest_fd = os.open(MANIFEST_NAME, _NOFOLLOW_FILE_FLAGS, dir_fd=root_fd)
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise E9SpatialBankValidationError(
+                "E9 manifest.json must be a non-symlink regular file"
+            ) from error
+        raise E9SpatialBankValidationError(
+            f"invalid E9 manifest file {manifest_display}: {error}"
+        ) from error
+    try:
+        manifest_stat = os.fstat(manifest_fd)
+        if not stat.S_ISREG(manifest_stat.st_mode):
+            raise E9SpatialBankValidationError(
+                "E9 manifest.json must be a non-symlink regular file"
+            )
+        if manifest_stat.st_size > _MAX_MANIFEST_BYTES:
+            raise E9SpatialBankValidationError(
+                f"E9 manifest.json exceeds the maximum allowed size: "
+                f"{manifest_stat.st_size} > {_MAX_MANIFEST_BYTES} bytes"
+            )
+        payload = _read_fd_exact(manifest_fd, manifest_stat.st_size)
+        if len(payload) != manifest_stat.st_size:
+            raise E9SpatialBankValidationError(
+                f"E9 manifest.json was truncated while reading: {manifest_display}"
+            )
+        try:
+            manifest_value = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise E9SpatialBankValidationError(
+                f"invalid JSON {manifest_display}: {error}"
+            ) from error
+        if not isinstance(manifest_value, dict):
+            raise E9SpatialBankValidationError(
+                f"{manifest_display} must contain a mapping"
+            )
+    finally:
+        os.close(manifest_fd)
+    manifest = _closed(manifest_value, MANIFEST_KEYS, "E9 manifest")
     if manifest["format_version"] != E9_SPATIAL_BANK_FORMAT:
         raise E9SpatialBankValidationError("unsupported E9 spatial-bank format")
     for key in ("complete", "is_pilot", "production_eligible", "source_git_dirty"):
@@ -849,7 +933,6 @@ def validate_e9_spatial_bank(
     seen: list[int] = []
     seen_shard_names: set[str] = set()
     expected_start = 0
-    resolved_root = root.resolve()
     for shard_number, entry in enumerate(shards):
         _closed(entry, SHARD_METADATA_KEYS, "E9 shard metadata")
         if not isinstance(entry["name"], str) or not entry["name"]:
@@ -875,29 +958,48 @@ def validate_e9_spatial_bank(
                 )
         if entry["row_start"] != expected_start or entry["row_end"] != expected_start + entry["row_count"]:
             raise E9SpatialBankValidationError("non-contiguous shard row ranges")
-        shard_path = root / entry["name"]
+        shard_display = root / entry["name"]
         try:
-            shard_stat = os.lstat(shard_path)
+            shard_fd = os.open(entry["name"], _NOFOLLOW_FILE_FLAGS, dir_fd=root_fd)
         except OSError as error:
+            if error.errno == errno.ELOOP:
+                raise E9SpatialBankValidationError(
+                    "spatial shard must be a non-symlink regular file: "
+                    f"{shard_display}"
+                ) from error
             raise E9SpatialBankValidationError(
-                f"missing spatial shard: {shard_path}"
+                f"missing spatial shard: {shard_display}"
             ) from error
-        if stat.S_ISLNK(shard_stat.st_mode) or not stat.S_ISREG(
-            shard_stat.st_mode
-        ):
-            raise E9SpatialBankValidationError(
-                f"spatial shard must be a non-symlink regular file: {shard_path}"
-            )
-        resolved_shard = shard_path.resolve()
-        if resolved_shard.parent != resolved_root:
-            raise E9SpatialBankValidationError(
-                f"spatial shard resolves outside bank root: {shard_path}"
-            )
-        raw = _read_spatial_shard(
-            resolved_shard,
-            expected_sha256=entry["sha256"],
-            expected_bytes=entry["bytes"],
-        )
+        try:
+            shard_stat = os.fstat(shard_fd)
+            if not stat.S_ISREG(shard_stat.st_mode):
+                raise E9SpatialBankValidationError(
+                    "spatial shard must be a non-symlink regular file: "
+                    f"{shard_display}"
+                )
+            if shard_stat.st_size != entry["bytes"]:
+                raise E9SpatialBankValidationError(
+                    f"spatial shard byte count changed: {shard_display}"
+                )
+            payload = _read_fd_exact(shard_fd, shard_stat.st_size)
+            if len(payload) != shard_stat.st_size:
+                raise E9SpatialBankValidationError(
+                    f"spatial shard was truncated while reading: {shard_display}"
+                )
+            if hashlib.sha256(payload).hexdigest() != entry["sha256"]:
+                raise E9SpatialBankValidationError(
+                    f"spatial shard SHA changed: {shard_display}"
+                )
+            try:
+                raw = torch.load(
+                    io.BytesIO(payload), map_location="cpu", weights_only=True
+                )
+            except Exception as error:
+                raise E9SpatialBankValidationError(
+                    f"cannot load shard {shard_display}: {error}"
+                ) from error
+        finally:
+            os.close(shard_fd)
         result = _validate_shard(raw, entry["row_count"])
         for row, image_id in enumerate(result["image_ids"]):
             index_entry = index[expected_start + row]
@@ -972,170 +1074,591 @@ def validate_e9_spatial_bank(
 DirectoryIdentity = tuple[int, int]
 
 
-def _directory_identity(path: Path, *, label: str) -> DirectoryIdentity:
+@dataclass
+class _OwnedEntry:
+    """An open, identity-checked handle to a filesystem object reached
+    without following a symlink.
+
+    The retained file descriptor pins the underlying inode for the handle's
+    lifetime: even if the pathname used to reach it is later replaced, this
+    handle keeps observing -- and, for a directory, keeps being able to read
+    -- the exact object it was opened for.  The ``(dev, ino)`` pair is the
+    ownership proof compared against whatever a later atomic capture turns
+    up at a shared pathname; a separate lstat() of that pathname is never
+    used as a substitute for this proof.
+    """
+
+    fd: int
+    dev: int
+    ino: int
+    is_dir: bool
+
+    @property
+    def identity(self) -> DirectoryIdentity:
+        return (self.dev, self.ino)
+
+    def close(self) -> None:
+        try:
+            os.close(self.fd)
+        except OSError:
+            pass
+
+
+def _fstat_identity(fd: int) -> tuple[int, int, bool]:
+    metadata = os.fstat(fd)
+    return metadata.st_dev, metadata.st_ino, stat.S_ISDIR(metadata.st_mode)
+
+
+def _stat_or_none(parent_fd: int, name: str) -> os.stat_result | None:
+    """A single fstatat(..., AT_SYMLINK_NOFOLLOW) relative to an already-open
+    directory descriptor.  Safe to call on a name nobody else can reach
+    (a private reservation/quarantine name) or purely to classify an object
+    that was *just* captured atomically; never used as a check that is
+    separated from a later destructive pathname operation."""
+
     try:
-        metadata = os.lstat(path)
+        return os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+
+
+def _open_parent_nofollow(path: Path) -> int:
+    try:
+        return os.open(path, _NOFOLLOW_DIR_FLAGS)
     except OSError as error:
         raise E9PublicationRecoveryError(
-            f"cannot inspect {label} at {path}: {error}"
+            f"cannot open {path} as a non-symlink directory: {error}"
         ) from error
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
-        raise E9PublicationRecoveryError(
-            f"{label} is not a non-symlink directory: {path}"
+
+
+_renameat2_fn: Any = None
+
+
+def _renameat2_symbol() -> Any:
+    global _renameat2_fn
+    if _renameat2_fn is None:
+        library = ctypes.CDLL(None, use_errno=True)
+        if not hasattr(library, "renameat2"):
+            raise E9AtomicOperationUnsupportedError(
+                "libc does not export renameat2(2); E9 publication requires "
+                "RENAME_NOREPLACE and RENAME_EXCHANGE"
+            )
+        symbol = library.renameat2
+        symbol.argtypes = (
+            ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p,
+            ctypes.c_uint,
         )
-    return metadata.st_dev, metadata.st_ino
+        symbol.restype = ctypes.c_int
+        _renameat2_fn = symbol
+    return _renameat2_fn
 
 
-def _is_owned_directory(path: Path, identity: DirectoryIdentity) -> bool:
-    try:
-        metadata = os.lstat(path)
-    except OSError:
-        return False
-    return (
-        stat.S_ISDIR(metadata.st_mode)
-        and not stat.S_ISLNK(metadata.st_mode)
-        and (metadata.st_dev, metadata.st_ino) == identity
-    )
-
-
-def _remove_owned_directory(
-    path: Path,
-    identity: DirectoryIdentity,
+def _renameat2(
+    old_dir_fd: int,
+    old_name: str,
+    new_dir_fd: int,
+    new_name: str,
+    flags: int,
     *,
-    label: str,
+    unsupported_label: str,
 ) -> None:
-    if not _is_owned_directory(path, identity):
-        raise E9PublicationRecoveryError(
-            f"refusing to remove foreign {label} at {path}"
-        )
-    shutil.rmtree(path)
-    _fsync_directory(path.parent)
-
-
-def _rename_noreplace(source: Path, destination: Path) -> None:
-    """Atomically rename a directory without replacing any destination."""
-
-    try:
-        renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
-    except AttributeError as error:
-        raise E9PublicationRecoveryError(
-            "atomic no-replace rename is unavailable; preserving recovery "
-            f"artifact at {source}"
-        ) from error
-    renameat2.argtypes = (
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_uint,
-    )
-    renameat2.restype = ctypes.c_int
-    result = renameat2(
-        _AT_FDCWD,
-        os.fsencode(source),
-        _AT_FDCWD,
-        os.fsencode(destination),
-        _RENAME_NOREPLACE,
+    symbol = _renameat2_symbol()
+    result = symbol(
+        old_dir_fd, os.fsencode(old_name), new_dir_fd, os.fsencode(new_name),
+        flags,
     )
     if result == 0:
         return
     error_number = ctypes.get_errno()
-    if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
-        raise FileExistsError(
-            error_number, os.strerror(error_number), str(destination)
+    if error_number in _UNSUPPORTED_RENAMEAT2_ERRNOS:
+        raise E9AtomicOperationUnsupportedError(
+            f"{unsupported_label} is not supported by this filesystem/"
+            f"kernel (errno={error_number}: {os.strerror(error_number)}); "
+            "E9 publication requires it and will not fall back to a "
+            "non-atomic rename"
         )
-    raise OSError(error_number, os.strerror(error_number), str(destination))
+    if error_number in (errno.EEXIST, errno.ENOTEMPTY):
+        raise FileExistsError(error_number, os.strerror(error_number), new_name)
+    raise OSError(error_number, os.strerror(error_number), old_name)
 
 
-def _acquire_publication_lock(lock: Path) -> DirectoryIdentity:
+def _random_private_name(prefix: str) -> str:
+    return f".e9-{prefix}-{os.getpid()}-{secrets.token_hex(8)}"
+
+
+def _probe_atomic_rename_support(parent_fd: int, parent_display: str) -> None:
+    """Fail closed, before any existing destination is ever touched, if this
+    filesystem/kernel cannot provide RENAME_NOREPLACE or RENAME_EXCHANGE.
+    Only private, freshly created objects are used for the probe."""
+
+    first_name = _random_private_name("probe")
+    second_name = _random_private_name("probe")
     try:
-        lock.mkdir(mode=0o700)
-    except FileExistsError as error:
-        raise E9PublicationConflictError(
-            "E9 publication lock already exists; inspect it manually at "
-            f"{lock}"
-        ) from error
-    identity = _directory_identity(lock, label="owned publication lock")
-    _fsync_directory(lock.parent)
-    return identity
-
-
-def _release_publication_lock(
-    lock: Path,
-    identity: DirectoryIdentity,
-) -> None:
-    if not _is_owned_directory(lock, identity):
-        raise E9PublicationRecoveryError(
-            "refusing to remove a replaced E9 publication lock; inspect it "
-            f"manually at {lock}"
-        )
-    try:
-        lock.rmdir()
+        os.mkdir(first_name, _PRIVATE_DIR_MODE, dir_fd=parent_fd)
     except OSError as error:
         raise E9PublicationRecoveryError(
-            f"cannot remove owned E9 publication lock at {lock}: {error}"
+            f"cannot create a probe object in {parent_display}: {error}"
         ) from error
-    _fsync_directory(lock.parent)
+    try:
+        _renameat2(
+            parent_fd, first_name, parent_fd, second_name,
+            _RENAME_NOREPLACE, unsupported_label="RENAME_NOREPLACE",
+        )
+        os.mkdir(first_name, _PRIVATE_DIR_MODE, dir_fd=parent_fd)
+        _renameat2(
+            parent_fd, first_name, parent_fd, second_name,
+            _RENAME_EXCHANGE, unsupported_label="RENAME_EXCHANGE",
+        )
+    finally:
+        for name in (first_name, second_name):
+            try:
+                os.rmdir(name, dir_fd=parent_fd)
+            except OSError:
+                pass
+
+
+def _create_private_directory(
+    parent_fd: int, *, prefix: str
+) -> tuple[str, _OwnedEntry]:
+    """Create a private mode-0700 directory under ``parent_fd`` and return an
+    identity-checked handle, established before the object is ever exposed
+    at a shared pathname."""
+
+    for _ in range(8):
+        name = _random_private_name(prefix)
+        try:
+            os.mkdir(name, _PRIVATE_DIR_MODE, dir_fd=parent_fd)
+        except FileExistsError:
+            continue
+        fd = os.open(name, _NOFOLLOW_DIR_FLAGS, dir_fd=parent_fd)
+        dev, ino, is_dir = _fstat_identity(fd)
+        return name, _OwnedEntry(fd=fd, dev=dev, ino=ino, is_dir=is_dir)
+    raise E9PublicationRecoveryError(
+        f"cannot allocate a private reservation name for {prefix!r}"
+    )
+
+
+def _discard_unshared_reservation(
+    parent_fd: int, name: str, entry: _OwnedEntry
+) -> None:
+    """Remove a private reservation that was never exposed at a shared
+    pathname; its name was never known to any other process."""
+
+    try:
+        if entry.is_dir:
+            _rmtree_via_fd(entry.fd, mount_dev=entry.dev)
+    except OSError:
+        pass
+    entry.close()
+    try:
+        if entry.is_dir:
+            os.rmdir(name, dir_fd=parent_fd)
+        else:
+            os.unlink(name, dir_fd=parent_fd)
+    except OSError:
+        pass
+
+
+def _install_reservation(
+    parent_fd: int,
+    reservation_name: str,
+    destination_name: str,
+    *,
+    conflict_label: str,
+) -> None:
+    try:
+        _renameat2(
+            parent_fd, reservation_name, parent_fd, destination_name,
+            _RENAME_NOREPLACE, unsupported_label="RENAME_NOREPLACE",
+        )
+    except FileExistsError as error:
+        raise E9PublicationConflictError(
+            f"refusing to overwrite; concurrent {conflict_label} already "
+            "exists"
+        ) from error
+
+
+def _rmtree_via_fd(dir_fd: int, *, mount_dev: int) -> None:
+    """Recursively remove the contents of an already-open, identity-verified
+    directory using descriptor-relative operations only.  Symlinks are never
+    followed -- they are unlinked as themselves -- and traversal refuses to
+    cross a mount point."""
+
+    for entry in os.scandir(dir_fd):
+        entry_stat = entry.stat(follow_symlinks=False)
+        if stat.S_ISLNK(entry_stat.st_mode):
+            os.unlink(entry.name, dir_fd=dir_fd)
+        elif stat.S_ISDIR(entry_stat.st_mode):
+            if entry_stat.st_dev != mount_dev:
+                raise E9PublicationRecoveryError(
+                    f"refusing to cross a mount point while removing "
+                    f"{entry.name!r}"
+                )
+            child_fd = os.open(entry.name, _NOFOLLOW_DIR_FLAGS, dir_fd=dir_fd)
+            try:
+                _rmtree_via_fd(child_fd, mount_dev=mount_dev)
+            finally:
+                os.close(child_fd)
+            os.rmdir(entry.name, dir_fd=dir_fd)
+        else:
+            os.unlink(entry.name, dir_fd=dir_fd)
+
+
+def _capture_shared_entry(
+    parent_fd: int, name: str, *, prefix: str
+) -> tuple[str, _OwnedEntry]:
+    """Atomically swap whatever currently sits at ``name`` for a fresh
+    private placeholder.
+
+    No lstat/open of ``name`` happens first: the RENAME_EXCHANGE call is the
+    only observation, so there is no gap in which a concurrent replacement
+    of ``name`` could go unnoticed between "look" and "act".  Returns the
+    private name the captured object now lives under, plus a retained handle
+    to the placeholder that took its place at ``name``.
+    """
+
+    placeholder_name, placeholder = _create_private_directory(
+        parent_fd, prefix=f"{prefix}-quarantine"
+    )
+    try:
+        _renameat2(
+            parent_fd, placeholder_name, parent_fd, name,
+            _RENAME_EXCHANGE, unsupported_label="RENAME_EXCHANGE",
+        )
+    except OSError:
+        _discard_unshared_reservation(parent_fd, placeholder_name, placeholder)
+        raise
+    return placeholder_name, placeholder
+
+
+def _restore_or_preserve(
+    parent_fd: int,
+    quarantine_name: str,
+    name: str,
+    *,
+    label: str,
+    parent_display: str,
+) -> str:
+    """Swap the object captured at ``quarantine_name`` back to ``name`` and
+    retire the placeholder that returns to ``quarantine_name``.
+
+    Used both when the captured object turned out to be foreign (restore,
+    then the caller raises) and when it matched our own expectation (restore,
+    then the caller continues) -- restoring is the same atomic operation
+    either way.
+    """
+
+    try:
+        _renameat2(
+            parent_fd, quarantine_name, parent_fd, name,
+            _RENAME_EXCHANGE, unsupported_label="RENAME_EXCHANGE",
+        )
+    except OSError as error:
+        raise E9PublicationRecoveryError(
+            f"cannot restore {label} to {parent_display}/{name}: {error}; "
+            f"it remains preserved at {parent_display}/{quarantine_name}"
+        ) from error
+    try:
+        os.rmdir(quarantine_name, dir_fd=parent_fd)
+    except OSError:
+        pass
+    return f"{label} restored to {parent_display}/{name}"
+
+
+def _retire_placeholder(
+    parent_fd: int,
+    name: str,
+    placeholder_identity: DirectoryIdentity,
+    *,
+    parent_display: str,
+) -> None:
+    """Remove the empty placeholder directory left at ``name`` after a
+    successful disposal, verifying with one more atomic capture that it is
+    still exactly the placeholder that was put there."""
+
+    retire_name = _random_private_name("retire")
+    try:
+        _renameat2(
+            parent_fd, name, parent_fd, retire_name,
+            _RENAME_NOREPLACE, unsupported_label="RENAME_NOREPLACE",
+        )
+    except FileNotFoundError:
+        return
+    captured_stat = _stat_or_none(parent_fd, retire_name)
+    matches = (
+        captured_stat is not None
+        and stat.S_ISDIR(captured_stat.st_mode)
+        and (captured_stat.st_dev, captured_stat.st_ino) == placeholder_identity
+    )
+    if matches:
+        try:
+            os.rmdir(retire_name, dir_fd=parent_fd)
+        except OSError as error:
+            raise E9PublicationRecoveryError(
+                "cannot remove a retired E9 placeholder at "
+                f"{parent_display}/{retire_name}: {error}"
+            ) from error
+        return
+    try:
+        _renameat2(
+            parent_fd, retire_name, parent_fd, name,
+            _RENAME_NOREPLACE, unsupported_label="RENAME_NOREPLACE",
+        )
+    except OSError as error:
+        raise E9PublicationRecoveryError(
+            "an unrecognized object was captured while retiring a private "
+            f"E9 placeholder; preserved at {parent_display}/{retire_name}: "
+            f"{error}"
+        ) from error
+    raise E9PublicationRecoveryError(
+        f"refusing to remove an unrecognized object found at "
+        f"{parent_display}/{name} while retiring a private placeholder; it "
+        "was restored unmodified"
+    )
+
+
+def _dispose_owned(
+    parent_fd: int,
+    name: str,
+    expected_identity: DirectoryIdentity | None,
+    *,
+    label: str,
+    parent_display: str,
+) -> None:
+    """Atomically capture whatever sits at ``name``.
+
+    If it is exactly the object expected (an object created and solely
+    owned by this process), it is recursively removed through directory
+    descriptors only, never by following a symlink or crossing a mount
+    point.  Anything else is restored to ``name`` byte-for-byte /
+    symlink-for-symlink and an :class:`E9PublicationRecoveryError` is
+    raised naming it.
+    """
+
+    quarantine_name, placeholder = _capture_shared_entry(
+        parent_fd, name, prefix="dispose"
+    )
+    placeholder_identity = placeholder.identity
+    try:
+        captured_stat = _stat_or_none(parent_fd, quarantine_name)
+        owned = (
+            captured_stat is not None
+            and stat.S_ISDIR(captured_stat.st_mode)
+            and expected_identity is not None
+            and (captured_stat.st_dev, captured_stat.st_ino) == expected_identity
+        )
+        if not owned:
+            _restore_or_preserve(
+                parent_fd, quarantine_name, name,
+                label=label, parent_display=parent_display,
+            )
+            raise E9PublicationRecoveryError(
+                f"refusing to remove foreign {label} at {parent_display}/"
+                f"{name}; it was restored unmodified"
+            )
+        captured_fd = os.open(quarantine_name, _NOFOLLOW_DIR_FLAGS, dir_fd=parent_fd)
+        try:
+            _rmtree_via_fd(captured_fd, mount_dev=captured_stat.st_dev)
+        finally:
+            os.close(captured_fd)
+        os.rmdir(quarantine_name, dir_fd=parent_fd)
+    finally:
+        placeholder.close()
+    _retire_placeholder(
+        parent_fd, name, placeholder_identity, parent_display=parent_display
+    )
+
+
+def _dispose_private_directory(
+    path: Path, identity: DirectoryIdentity, *, label: str
+) -> None:
+    parent_fd = _open_parent_nofollow(path.parent)
+    try:
+        _dispose_owned(
+            parent_fd, path.name, identity,
+            label=label, parent_display=str(path.parent),
+        )
+    finally:
+        os.close(parent_fd)
+
+
+def _preserve_orphaned_reservation(
+    parent_fd: int, reservation: _OwnedEntry, *, prefix: str
+) -> str:
+    """Best-effort: relink every regular file out of a reservation directory
+    that lost its shared name into a freshly named recovery directory, so a
+    fully validated bank is not silently lost even if its intended pathname
+    was taken by something else in the same instant."""
+
+    recovery_name, recovery = _create_private_directory(parent_fd, prefix=prefix)
+    try:
+        for entry in os.scandir(reservation.fd):
+            entry_stat = entry.stat(follow_symlinks=False)
+            if not stat.S_ISREG(entry_stat.st_mode):
+                continue
+            os.link(
+                entry.name, entry.name,
+                src_dir_fd=reservation.fd, dst_dir_fd=recovery.fd,
+            )
+        os.fsync(recovery.fd)
+    finally:
+        recovery.close()
+    return recovery_name
+
+
+def _acquire_publication_lock(lock: Path) -> _OwnedEntry:
+    parent_fd = _open_parent_nofollow(lock.parent)
+    try:
+        reservation_name, reservation = _create_private_directory(
+            parent_fd, prefix="lock-reserve"
+        )
+        try:
+            _install_reservation(
+                parent_fd, reservation_name, lock.name,
+                conflict_label=f"E9 publication lock at {lock}",
+            )
+        except E9PublicationConflictError as error:
+            _discard_unshared_reservation(parent_fd, reservation_name, reservation)
+            raise E9PublicationConflictError(
+                "E9 publication lock already exists; inspect it manually at "
+                f"{lock}"
+            ) from error
+        os.fsync(parent_fd)
+        return reservation
+    finally:
+        os.close(parent_fd)
+
+
+def _release_publication_lock(lock: Path, identity: _OwnedEntry) -> None:
+    parent_fd = _open_parent_nofollow(lock.parent)
+    try:
+        try:
+            _dispose_owned(
+                parent_fd, lock.name, identity.identity,
+                label="E9 publication lock", parent_display=str(lock.parent),
+            )
+        except E9PublicationRecoveryError as error:
+            raise E9PublicationRecoveryError(
+                "refusing to remove a replaced E9 publication lock; inspect "
+                f"it manually at {lock}"
+            ) from error
+    finally:
+        identity.close()
+        os.close(parent_fd)
+
+
+def _fsync_name(name: str, *, dir_fd: int) -> None:
+    fd = os.open(name, _NOFOLLOW_FILE_FLAGS, dir_fd=dir_fd)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def _publish_manifest_last(
-    staging: Path,
-    output: Path,
+    parent_fd: int,
+    output_name: str,
+    staging_fd: int,
     *,
+    output_display: Path,
     final_verification: Callable[[], None],
-) -> DirectoryIdentity:
+) -> _OwnedEntry:
+    reservation_name, reservation = _create_private_directory(
+        parent_fd, prefix="output-reserve"
+    )
+    installed = False
     try:
-        output.mkdir()
-    except FileExistsError as error:
-        raise E9PublicationConflictError(
-            "refusing to overwrite; concurrent E9 destination already "
-            f"exists at {output}"
-        ) from error
-    identity = _directory_identity(output, label="owned output reservation")
-    try:
+        _install_reservation(
+            parent_fd, reservation_name, output_name,
+            conflict_label=f"E9 destination {output_display}",
+        )
+        installed = True
         names = sorted(
-            path.name
-            for path in staging.iterdir()
-            if path.name != MANIFEST_NAME
+            entry.name for entry in os.scandir(staging_fd)
+            if entry.name != MANIFEST_NAME
         )
         for name in names:
-            os.link(staging / name, output / name)
-            _fsync_file(output / name)
+            os.link(name, name, src_dir_fd=staging_fd, dst_dir_fd=reservation.fd)
+            _fsync_name(name, dir_fd=reservation.fd)
         final_verification()
-        os.link(staging / MANIFEST_NAME, output / MANIFEST_NAME)
-        _fsync_file(output / MANIFEST_NAME)
-        _fsync_directory(output)
-        _fsync_directory(output.parent)
-        validate_e9_spatial_bank(output, require_production=False)
+        os.link(
+            MANIFEST_NAME, MANIFEST_NAME,
+            src_dir_fd=staging_fd, dst_dir_fd=reservation.fd,
+        )
+        _fsync_name(MANIFEST_NAME, dir_fd=reservation.fd)
+        os.fsync(reservation.fd)
+        os.fsync(parent_fd)
+        _validate_e9_spatial_bank_fd(
+            reservation.fd, output_display,
+            require_production=False, verify_source_artifacts=False,
+        )
     except Exception:
-        _remove_owned_directory(
-            output, identity, label="partial E9 output reservation"
-        )
+        if installed:
+            try:
+                _dispose_owned(
+                    parent_fd, output_name, reservation.identity,
+                    label="partial E9 output reservation",
+                    parent_display=str(output_display.parent),
+                )
+            finally:
+                reservation.close()
+        else:
+            _discard_unshared_reservation(parent_fd, reservation_name, reservation)
         raise
-    return identity
+    return reservation
 
 
-def _restore_backup_if_free(
-    output: Path,
-    backup: Path,
+def _checkpoint_and_commit_output(
+    parent_fd: int,
+    output_name: str,
+    reservation: _OwnedEntry,
     *,
-    expected_identity: DirectoryIdentity | None,
+    parent_display: str,
 ) -> None:
-    if (
-        expected_identity is not None
-        and not _is_owned_directory(backup, expected_identity)
-    ):
-        raise E9PublicationRecoveryError(
-            f"refusing to restore a replaced E9 backup at {backup}"
-        )
+    """Close the post-validation window.
+
+    Atomically capture whatever is now at ``output_name`` and confirm, via
+    the reservation fd/identity retained since before this bank was ever
+    exposed at a shared pathname, that it is still exactly the bank that was
+    just validated.  Only after that checkpoint succeeds is the caller
+    allowed to retire the old pilot backup.
+    """
+
     try:
-        _rename_noreplace(backup, output)
-    except FileExistsError as error:
+        quarantine_name, checkpoint_placeholder = _capture_shared_entry(
+            parent_fd, output_name, prefix="checkpoint"
+        )
+    except OSError as error:
+        recovery_name = _preserve_orphaned_reservation(
+            parent_fd, reservation, prefix="orphaned-output"
+        )
         raise E9PublicationRecoveryError(
-            "cannot restore the previous E9 pilot because a foreign output "
-            f"exists; output={output}, backup={backup}"
+            "E9 output disappeared immediately after validation; "
+            f"publication aborted ({error}). The validated new bank was "
+            f"preserved at {parent_display}/{recovery_name}."
         ) from error
-    _fsync_directory(output.parent)
+    try:
+        captured_stat = _stat_or_none(parent_fd, quarantine_name)
+        matches = (
+            captured_stat is not None
+            and stat.S_ISDIR(captured_stat.st_mode)
+            and (captured_stat.st_dev, captured_stat.st_ino) == reservation.identity
+        )
+        restore_note = _restore_or_preserve(
+            parent_fd, quarantine_name, output_name,
+            label="E9 output", parent_display=parent_display,
+        )
+        if not matches:
+            recovery_name = _preserve_orphaned_reservation(
+                parent_fd, reservation, prefix="orphaned-output"
+            )
+            raise E9PublicationRecoveryError(
+                "E9 output was replaced immediately after validation; "
+                f"publication aborted. {restore_note}. The validated new "
+                f"bank was preserved at {parent_display}/{recovery_name}."
+            )
+    finally:
+        checkpoint_placeholder.close()
 
 
 def _publish_directory(
@@ -1144,81 +1667,140 @@ def _publish_directory(
     *,
     overwrite: bool,
     final_verification: Callable[[], None],
+    staging_identity: DirectoryIdentity | None = None,
 ) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
-    lock = output.with_name(f".{output.name}.publication-lock")
-    lock_identity = _acquire_publication_lock(lock)
-    backup = output.with_name(f".{output.name}.backup-{os.getpid()}")
-    backup_moved = False
-    backup_identity: DirectoryIdentity | None = None
+    parent_fd = _open_parent_nofollow(output.parent)
     try:
-        if os.path.lexists(backup):
-            raise FileExistsError(
-                f"stale E9 publication backup exists: {backup}"
-            )
-        if not overwrite and os.path.lexists(output):
-            raise FileExistsError(
-                f"refusing to overwrite E9 spatial bank: {output}"
-            )
-        if overwrite and os.path.lexists(output):
-            os.rename(output, backup)
-            backup_moved = True
-            if backup.is_symlink():
-                raise E9SpatialBankValidationError(
-                    "refusing to overwrite a symbolic-link E9 destination"
-                )
-            if not backup.is_dir():
-                raise E9SpatialBankValidationError(
-                    "existing E9 overwrite destination is not a spatial-bank "
-                    "directory"
-                )
-            backup_identity = _directory_identity(
-                backup, label="moved E9 pilot backup"
-            )
-            previous = validate_e9_spatial_bank(
-                backup, require_production=False
-            )
-            if (
-                not previous["is_pilot"]
-                or previous["production_eligible"]
-            ):
-                raise E9SpatialBankValidationError(
-                    "existing E9 spatial bank is not a replaceable pilot"
-                )
-        _publish_manifest_last(
-            staging, output, final_verification=final_verification
-        )
-    except Exception as publication_error:
-        if backup_moved:
-            if os.path.lexists(output):
-                raise E9PublicationRecoveryError(
-                    "E9 publication conflict preserved both artifacts; "
-                    f"output={output}, backup={backup}"
-                ) from publication_error
+        parent_display = str(output.parent)
+        _probe_atomic_rename_support(parent_fd, parent_display)
+
+        if staging_identity is None:
+            probe_fd = os.open(staging, _NOFOLLOW_DIR_FLAGS)
             try:
-                _restore_backup_if_free(
-                    output,
-                    backup,
-                    expected_identity=backup_identity,
+                staging_identity = _fstat_identity(probe_fd)[:2]
+            finally:
+                os.close(probe_fd)
+
+        output_name = output.name
+        lock_path = output.with_name(f".{output_name}.publication-lock")
+        backup_name = f".{output_name}.backup-{os.getpid()}"
+
+        lock_identity = _acquire_publication_lock(lock_path)
+        backup_moved = False
+        backup_owner: _OwnedEntry | None = None
+        try:
+            if _stat_or_none(parent_fd, backup_name) is not None:
+                raise FileExistsError(
+                    "stale E9 publication backup exists: "
+                    f"{output.with_name(backup_name)}"
                 )
-            except Exception as restore_error:
-                raise E9PublicationRecoveryError(
-                    "E9 pilot restoration failed; preserved recovery paths: "
-                    f"output={output}, backup={backup}"
-                ) from restore_error
-        raise
-    else:
-        if backup_moved:
-            if backup_identity is None:
-                raise E9PublicationRecoveryError(
-                    f"validated E9 pilot backup identity is missing: {backup}"
+            output_present = _stat_or_none(parent_fd, output_name) is not None
+            if not overwrite and output_present:
+                raise FileExistsError(
+                    f"refusing to overwrite E9 spatial bank: {output}"
                 )
-            _remove_owned_directory(
-                backup, backup_identity, label="validated old E9 pilot backup"
+            if overwrite and output_present:
+                try:
+                    _renameat2(
+                        parent_fd, output_name, parent_fd, backup_name,
+                        _RENAME_NOREPLACE, unsupported_label="RENAME_NOREPLACE",
+                    )
+                except FileExistsError as error:
+                    raise FileExistsError(
+                        "stale E9 publication backup exists: "
+                        f"{output.with_name(backup_name)}"
+                    ) from error
+                backup_moved = True
+                backup_stat = os.stat(
+                    backup_name, dir_fd=parent_fd, follow_symlinks=False
+                )
+                if stat.S_ISLNK(backup_stat.st_mode):
+                    raise E9SpatialBankValidationError(
+                        "refusing to overwrite a symbolic-link E9 destination"
+                    )
+                if not stat.S_ISDIR(backup_stat.st_mode):
+                    raise E9SpatialBankValidationError(
+                        "existing E9 overwrite destination is not a "
+                        "spatial-bank directory"
+                    )
+                backup_fd = os.open(
+                    backup_name, _NOFOLLOW_DIR_FLAGS, dir_fd=parent_fd
+                )
+                backup_owner = _OwnedEntry(
+                    fd=backup_fd, dev=backup_stat.st_dev,
+                    ino=backup_stat.st_ino, is_dir=True,
+                )
+                previous = validate_e9_spatial_bank(
+                    output.with_name(backup_name), require_production=False
+                )
+                if not previous["is_pilot"] or previous["production_eligible"]:
+                    raise E9SpatialBankValidationError(
+                        "existing E9 spatial bank is not a replaceable pilot"
+                    )
+
+            staging_fd = os.open(staging, _NOFOLLOW_DIR_FLAGS)
+            try:
+                reservation = _publish_manifest_last(
+                    parent_fd, output_name, staging_fd,
+                    output_display=output,
+                    final_verification=final_verification,
+                )
+            finally:
+                os.close(staging_fd)
+            try:
+                _checkpoint_and_commit_output(
+                    parent_fd, output_name, reservation,
+                    parent_display=parent_display,
+                )
+            finally:
+                reservation.close()
+        except E9PublicationRecoveryError as publication_error:
+            if backup_owner is not None:
+                raise E9PublicationRecoveryError(
+                    f"{publication_error} Old E9 pilot backup preserved "
+                    f"at {output.with_name(backup_name)}."
+                ) from publication_error
+            raise
+        except Exception as publication_error:
+            if backup_moved:
+                try:
+                    _renameat2(
+                        parent_fd, backup_name, parent_fd, output_name,
+                        _RENAME_NOREPLACE,
+                        unsupported_label="RENAME_NOREPLACE",
+                    )
+                except FileExistsError as restore_error:
+                    raise E9PublicationRecoveryError(
+                        "E9 publication conflict preserved both "
+                        f"artifacts; output={output}, backup="
+                        f"{output.with_name(backup_name)}"
+                    ) from restore_error
+                except OSError as restore_error:
+                    raise E9PublicationRecoveryError(
+                        "E9 pilot restoration failed; preserved "
+                        f"recovery paths: output={output}, backup="
+                        f"{output.with_name(backup_name)}"
+                    ) from restore_error
+            raise
+        else:
+            if backup_owner is not None:
+                _dispose_owned(
+                    parent_fd, backup_name, backup_owner.identity,
+                    label="validated old E9 pilot backup",
+                    parent_display=parent_display,
+                )
+            _dispose_owned(
+                parent_fd, staging.name, staging_identity,
+                label="E9 staging directory",
+                parent_display=parent_display,
             )
-        shutil.rmtree(staging)
+        finally:
+            if backup_owner is not None:
+                backup_owner.close()
+            _release_publication_lock(lock_path, lock_identity)
     finally:
-        _release_publication_lock(lock, lock_identity)
+        os.close(parent_fd)
 
 
 def build_e9_spatial_bank(
@@ -1290,6 +1872,22 @@ def build_e9_spatial_bank(
             "an existing E9 destination must be addressed through its "
             f"canonical parent path: {output}"
         )
+    # Reject an existing final-component symlink immediately, before any
+    # source record is read, before staging is created, before the
+    # publication lock is taken, and before any destination movement.  This
+    # is a cheap early rejection only: the race-safe publication layer below
+    # still independently refuses to follow or destructively touch a
+    # final-component symlink that appears or changes after this check.
+    try:
+        _early_final_component_stat = os.lstat(output)
+    except OSError:
+        _early_final_component_stat = None
+    if _early_final_component_stat is not None and stat.S_ISLNK(
+        _early_final_component_stat.st_mode
+    ):
+        raise E9SpatialBankValidationError(
+            f"refusing to overwrite a symbolic-link E9 destination: {output}"
+        )
     manifest_source = _source_manifest(source)
     if manifest_source["split"] != split:
         raise E9SpatialBankValidationError("source split mismatch")
@@ -1351,6 +1949,11 @@ def build_e9_spatial_bank(
 
     output.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.e9-", dir=output.parent))
+    _staging_identity_fd = os.open(staging, _NOFOLLOW_DIR_FLAGS)
+    try:
+        staging_identity = _fstat_identity(_staging_identity_fd)[:2]
+    finally:
+        os.close(_staging_identity_fd)
     shard_entries = []
     image_index = []
     try:
@@ -1552,12 +2155,15 @@ def build_e9_spatial_bank(
             output,
             overwrite=overwrite,
             final_verification=final_verification,
+            staging_identity=staging_identity,
         )
         staging = None
         return {**validate_e9_spatial_bank(output, require_production=False), "estimated_bytes": estimated_bytes}
     finally:
-        if staging is not None and staging.exists():
-            shutil.rmtree(staging)
+        if staging is not None:
+            _dispose_private_directory(
+                staging, staging_identity, label="E9 staging directory",
+            )
 
 
 class E9SpatialBank:

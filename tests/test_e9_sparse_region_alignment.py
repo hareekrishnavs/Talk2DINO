@@ -11,8 +11,10 @@ from src.e9_sparse_region_alignment import (
     compute_chunked_mil_scores,
     compute_e9_loss,
     max_valid_normalized_attention,
+    pool_native_grid_to_training_geometry,
     symmetric_infonce,
 )
+from src.e9_spatial_bank import pool_source_image
 
 
 def normalized(shape, seed):
@@ -358,3 +360,84 @@ def test_direct_loss_helper_rejects_invalid_mil_temperature(value):
     )
     with pytest.raises(E9ValidationError, match="mil_temperature"):
         compute_e9_loss(output, query, patches, mil_temperature=value)
+
+
+def _per_head_normalized_maps(seed):
+    generator = torch.Generator().manual_seed(seed)
+    maps = torch.rand(12, 1024, generator=generator).clamp_min(1e-3)
+    maps = maps / maps.sum(dim=-1, keepdim=True)
+    return maps.half()
+
+
+def test_pool_native_grid_to_training_geometry_matches_bank_pooling():
+    """Inference-time pooling must be bit-for-bit the same reduction the E9
+    spatial bank applies when building training data (pool_source_image),
+    since the adapter never sees anything else during training."""
+
+    generator = torch.Generator().manual_seed(11)
+    patch_tokens = torch.randn(1024, 768, generator=generator).half()
+    maps = _per_head_normalized_maps(12)
+    expected_patches, expected_prior = pool_source_image(patch_tokens, maps)
+
+    # Reconstruct what generate_masks computes at inference: a heads-mean,
+    # renormalized attention prior derived from the same per-head
+    # probabilities, and the native 32x32 patch grid in [B,D,H,W].
+    native_prior = maps.float().mean(dim=0)
+    native_prior = native_prior / native_prior.sum()
+    patch_grid = patch_tokens.float().reshape(1, 32, 32, 768).permute(0, 3, 1, 2)
+    attention_prior = native_prior[None]
+
+    pooled_grid, pooled_prior = pool_native_grid_to_training_geometry(
+        patch_grid, attention_prior
+    )
+    actual_patches = pooled_grid[0].permute(1, 2, 0).reshape(256, 768)
+
+    torch.testing.assert_close(actual_patches, expected_patches, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(pooled_prior[0], expected_prior, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(
+        pooled_grid.permute(0, 2, 3, 1).reshape(-1, 768).norm(dim=-1),
+        torch.ones(256),
+    )
+    torch.testing.assert_close(pooled_prior.sum(dim=-1), torch.ones(1))
+
+
+def test_pool_native_grid_to_training_geometry_is_batch_consistent():
+    """Batching must not couple rows together."""
+
+    grid_a = torch.randn(1, 768, 32, 32)
+    grid_b = torch.randn(1, 768, 32, 32)
+    prior_a = torch.softmax(torch.randn(1, 1024), dim=-1)
+    prior_b = torch.softmax(torch.randn(1, 1024), dim=-1)
+
+    batched_grid, batched_prior = pool_native_grid_to_training_geometry(
+        torch.cat([grid_a, grid_b], dim=0), torch.cat([prior_a, prior_b], dim=0)
+    )
+    single_a = pool_native_grid_to_training_geometry(grid_a, prior_a)
+    single_b = pool_native_grid_to_training_geometry(grid_b, prior_b)
+
+    torch.testing.assert_close(batched_grid[0], single_a[0][0])
+    torch.testing.assert_close(batched_grid[1], single_b[0][0])
+    torch.testing.assert_close(batched_prior[0], single_a[1][0])
+    torch.testing.assert_close(batched_prior[1], single_b[1][0])
+
+
+def test_pool_native_grid_to_training_geometry_rejects_wrong_resolution():
+    grid = torch.randn(1, 768, 16, 16)
+    prior = torch.softmax(torch.randn(1, 256), dim=-1)
+    with pytest.raises(E9ValidationError, match="32x32"):
+        pool_native_grid_to_training_geometry(grid, prior)
+
+
+def test_pool_native_grid_to_training_geometry_rejects_shape_mismatch():
+    grid = torch.randn(2, 768, 32, 32)
+    wrong_prior = torch.softmax(torch.randn(2, 999), dim=-1)
+    with pytest.raises(E9ValidationError, match="attention_prior"):
+        pool_native_grid_to_training_geometry(grid, wrong_prior)
+
+
+def test_pool_native_grid_to_training_geometry_rejects_nonfinite_inputs():
+    grid = torch.randn(1, 768, 32, 32)
+    grid[0, 0, 0, 0] = float("nan")
+    prior = torch.softmax(torch.randn(1, 1024), dim=-1)
+    with pytest.raises(E9ValidationError, match="finite"):
+        pool_native_grid_to_training_geometry(grid, prior)

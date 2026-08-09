@@ -325,6 +325,83 @@ def max_valid_normalized_attention(
     return feature
 
 
+def pool_native_grid_to_training_geometry(
+    patch_grid: torch.Tensor,
+    attention_prior: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reduce a native runtime DINO patch grid to the exact geometry E9 was
+    trained on.
+
+    The E9 spatial bank pools every source image from its native
+    ``source_grid_height x source_grid_width`` DINO patch grid down to
+    ``pooled_grid_height x pooled_grid_width`` (see
+    ``src.e9_spatial_bank.pool_source_image``): 2x2 mean pooling followed by
+    L2 renormalization for patch embeddings, and 2x2 sum pooling followed by
+    renormalization for attention priors.  The adapter never sees anything
+    but that pooled geometry during training.  Segmentation inference must
+    apply the identical reduction before scoring, or every patch embedding
+    and attention weight the adapter sees at test time differs
+    systematically -- in scale, in noise, and in the effective area a single
+    scored "patch" covers -- from what it learned.  This function is the
+    single place that reduction happens.
+    """
+
+    if patch_grid.ndim != 4:
+        raise E9ValidationError("patch_grid must have shape [B,D,H,W]")
+    batch, dimension, height, width = patch_grid.shape
+    source_h = EXPECTED_GEOMETRY["source_grid_height"]
+    source_w = EXPECTED_GEOMETRY["source_grid_width"]
+    if height != source_h or width != source_w:
+        raise E9ValidationError(
+            f"E9 inference requires the exact {source_h}x{source_w} native "
+            "DINO patch grid the training pipeline used; got "
+            f"{height}x{width}. Check resize_dim/patch_size for the "
+            "evaluation configuration."
+        )
+    if (
+        attention_prior.ndim != 2
+        or attention_prior.shape[0] != batch
+        or attention_prior.shape[1] != height * width
+    ):
+        raise E9ValidationError("attention_prior must have shape [B,H*W]")
+    if not torch.isfinite(patch_grid).all() or not torch.isfinite(attention_prior).all():
+        raise E9ValidationError("E9 pooling inputs must be finite")
+
+    pooled_h = EXPECTED_GEOMETRY["pooled_grid_height"]
+    pooled_w = EXPECTED_GEOMETRY["pooled_grid_width"]
+    block_h = source_h // pooled_h
+    block_w = source_w // pooled_w
+    if block_h * pooled_h != source_h or block_w * pooled_w != source_w:
+        raise E9ValidationError(
+            "source grid is not an exact multiple of the pooled grid"
+        )
+
+    patches = patch_grid.permute(0, 2, 3, 1).float()
+    pooled_patches = patches.reshape(
+        batch, pooled_h, block_h, pooled_w, block_w, dimension
+    ).mean(dim=(2, 4))
+    pooled_patches = F.normalize(
+        pooled_patches.reshape(batch, pooled_h * pooled_w, dimension), dim=-1
+    )
+    pooled_grid = pooled_patches.reshape(batch, pooled_h, pooled_w, dimension).permute(
+        0, 3, 1, 2
+    )
+
+    prior = attention_prior.float().reshape(batch, source_h, source_w)
+    pooled_prior = (
+        prior.reshape(batch, pooled_h, block_h, pooled_w, block_w)
+        .sum(dim=(2, 4))
+        .reshape(batch, pooled_h * pooled_w)
+        .clamp_min(0)
+    )
+    total = pooled_prior.sum(dim=-1, keepdim=True)
+    pooled_prior = pooled_prior / total.clamp_min(torch.finfo(pooled_prior.dtype).tiny)
+
+    if not torch.isfinite(pooled_grid).all() or not torch.isfinite(pooled_prior).all():
+        raise E9ValidationError("E9 pooling produced non-finite values")
+    return pooled_grid, pooled_prior
+
+
 @dataclass(frozen=True)
 class SparseRegionAlignmentConfig:
     embedding_dim: int = 768
@@ -1308,6 +1385,7 @@ __all__ = [
     "E9MILOutput",
     "compute_chunked_mil_scores",
     "max_valid_normalized_attention",
+    "pool_native_grid_to_training_geometry",
     "symmetric_infonce",
     "compute_e9_loss",
     "validate_e9_training_config",

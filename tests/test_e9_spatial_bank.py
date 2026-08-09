@@ -4,6 +4,7 @@ import io
 import json
 import math
 import os
+import shutil
 import subprocess
 import tarfile
 import threading
@@ -927,11 +928,14 @@ def test_manifest_boundary_rejects_mutation_after_nonmanifest_link(
     mutation_seen = False
     linked_names = []
 
-    def mutate_after_link(source_path, destination_path):
+    def mutate_after_link(source_name, destination_name, *, src_dir_fd=None, dst_dir_fd=None):
         nonlocal mutation_seen
-        original_link(source_path, destination_path)
-        linked_names.append(Path(source_path).name)
-        if Path(source_path).name == e9.MANIFEST_NAME or mutation_seen:
+        original_link(
+            source_name, destination_name,
+            src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd,
+        )
+        linked_names.append(source_name)
+        if source_name == e9.MANIFEST_NAME or mutation_seen:
             return
         mutation_seen = True
         if mutation_kind == "untracked":
@@ -969,20 +973,41 @@ def test_overwrite_with_absent_output_preserves_concurrent_winner(
     git_repo(repository)
     source = make_source(tmp_path / "source", [source_record(62)])
     output = tmp_path / "bank"
-    original_mkdir = Path.mkdir
+    original_install = e9._install_reservation
     winner = {"bytes": b"concurrent winner"}
     injected = False
 
-    def inject_winner_at_reservation(path, *args, **kwargs):
+    def inject_winner_at_reservation(
+        parent_fd, reservation_name, destination_name, *, conflict_label
+    ):
         nonlocal injected
-        if path == output and not injected:
+        if destination_name == output.name and not injected:
             injected = True
-            original_mkdir(path)
-            (path / "winner").write_bytes(winner["bytes"])
-            raise FileExistsError(path)
-        return original_mkdir(path, *args, **kwargs)
+            # A genuinely concurrent, unrelated actor installs a real
+            # directory at the shared destination name using nothing from
+            # our reservation machinery -- only the destination name itself
+            # is shared knowledge.
+            os.mkdir(destination_name, 0o755, dir_fd=parent_fd)
+            child_fd = os.open(
+                destination_name, os.O_RDONLY | os.O_DIRECTORY, dir_fd=parent_fd
+            )
+            try:
+                winner_fd = os.open(
+                    "winner", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644,
+                    dir_fd=child_fd,
+                )
+                try:
+                    os.write(winner_fd, winner["bytes"])
+                finally:
+                    os.close(winner_fd)
+            finally:
+                os.close(child_fd)
+        return original_install(
+            parent_fd, reservation_name, destination_name,
+            conflict_label=conflict_label,
+        )
 
-    monkeypatch.setattr(Path, "mkdir", inject_winner_at_reservation)
+    monkeypatch.setattr(e9, "_install_reservation", inject_winner_at_reservation)
     with pytest.raises(e9.E9PublicationConflictError, match=str(output)):
         build_spatial_bank(
             source,
@@ -1124,27 +1149,40 @@ def test_foreign_inode_after_reservation_is_never_deleted(tmp_path, monkeypatch)
     git_repo(repository)
     source = make_source(tmp_path / "source", [source_record(67)])
     output = tmp_path / "bank"
-    original_identity = e9._directory_identity
+    original_install = e9._install_reservation
     original_link = e9.os.link
     foreign_bytes = b"foreign inode survives"
     replaced = False
 
-    def replace_owned_reservation(path, *, label):
+    def replace_after_install(
+        parent_fd, reservation_name, destination_name, *, conflict_label
+    ):
         nonlocal replaced
-        identity = original_identity(path, label=label)
-        if label == "owned output reservation" and not replaced:
+        original_install(
+            parent_fd, reservation_name, destination_name,
+            conflict_label=conflict_label,
+        )
+        if destination_name == output.name and not replaced:
             replaced = True
-            path.rmdir()
-            path.mkdir()
-            (path / "winner").write_bytes(foreign_bytes)
-        return identity
+            # The reservation is installed and still empty (nothing has been
+            # linked into it yet); an unrelated concurrent actor now
+            # replaces it with a foreign directory using only the shared
+            # pathname, with no knowledge of our retained descriptor.
+            output.rmdir()
+            output.mkdir()
+            (output / "winner").write_bytes(foreign_bytes)
 
-    def force_failure_after_replacement(source_path, destination_path):
-        if Path(destination_path).parent == output:
+    def force_failure_after_replacement(
+        source_name, destination_name, *, src_dir_fd=None, dst_dir_fd=None
+    ):
+        if replaced:
             raise OSError("forced failure after foreign inode replacement")
-        return original_link(source_path, destination_path)
+        return original_link(
+            source_name, destination_name,
+            src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd,
+        )
 
-    monkeypatch.setattr(e9, "_directory_identity", replace_owned_reservation)
+    monkeypatch.setattr(e9, "_install_reservation", replace_after_install)
     monkeypatch.setattr(e9.os, "link", force_failure_after_replacement)
     with pytest.raises(e9.E9PublicationRecoveryError, match="foreign"):
         build_spatial_bank(
@@ -1196,7 +1234,7 @@ def test_manifest_boundary_failed_pilot_overwrite_restores_existing_tree(
     backup = output.with_name(f".{output.name}.backup-{os.getpid()}")
     original_validate = e9.validate_e9_spatial_bank
     original_link = e9.os.link
-    original_fsync_file = e9._fsync_file
+    original_fsync_name = e9._fsync_name
     mutation_seen = False
 
     def mutate_after_backup_validation(path, *args, **kwargs):
@@ -1218,28 +1256,28 @@ def test_manifest_boundary_failed_pilot_overwrite_restores_existing_tree(
                 )
         return result
 
-    def fail_publication_link(source_path, destination_path):
-        destination_path = Path(destination_path)
+    def fail_publication_link(
+        source_name, destination_name, *, src_dir_fd=None, dst_dir_fd=None
+    ):
         if (
-            destination_path.parent == output
-            and (
-                mutation_kind == "shard_link"
-                and destination_path.name != e9.MANIFEST_NAME
-                or mutation_kind == "manifest_link"
-                and destination_path.name == e9.MANIFEST_NAME
-            )
+            mutation_kind == "shard_link" and destination_name != e9.MANIFEST_NAME
+            or mutation_kind == "manifest_link"
+            and destination_name == e9.MANIFEST_NAME
         ):
             raise OSError("injected publication link failure")
-        return original_link(source_path, destination_path)
+        return original_link(
+            source_name, destination_name,
+            src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd,
+        )
 
-    def fail_publication_fsync(path):
-        if mutation_kind == "file_fsync" and Path(path).parent == output:
+    def fail_publication_fsync(name, *, dir_fd):
+        if mutation_kind == "file_fsync":
             raise OSError("injected publication fsync failure")
-        return original_fsync_file(path)
+        return original_fsync_name(name, dir_fd=dir_fd)
 
     monkeypatch.setattr(e9, "validate_e9_spatial_bank", mutate_after_backup_validation)
     monkeypatch.setattr(e9.os, "link", fail_publication_link)
-    monkeypatch.setattr(e9, "_fsync_file", fail_publication_fsync)
+    monkeypatch.setattr(e9, "_fsync_name", fail_publication_fsync)
     with pytest.raises((e9.E9SpatialBankValidationError, OSError)):
         build_spatial_bank(
             source, output, split="train", max_images=1, overwrite=True,
@@ -1266,40 +1304,28 @@ def test_pilot_overwrite_publication_order_uses_protected_backup(tmp_path, monke
     )
     backup = output.with_name(f".{output.name}.backup-{os.getpid()}")
     events = []
-    state = {
-        "boundary": False,
-        "input_hash_recorded": False,
-        "manifest_linked": False,
-        "published_validated": False,
-        "backup_removed": False,
-    }
+    state = {"boundary": False}
     original_validate = e9.validate_e9_spatial_bank
     original_sha256 = e9.sha256_file
     original_git_check = e9._require_unchanged_git_provenance
-    original_rename = e9.os.rename
-    original_mkdir = Path.mkdir
+    original_renameat2 = e9._renameat2
+    original_install = e9._install_reservation
     original_link = e9.os.link
-    original_fsync_directory = e9._fsync_directory
-    original_rmtree = e9.shutil.rmtree
+    original_fsync_name = e9._fsync_name
+    original_checkpoint = e9._checkpoint_and_commit_output
+    original_dispose = e9._dispose_owned
+    original_release_lock = e9._release_publication_lock
     original_torch_save = e9.torch.save
 
     def record_validate(path, *args, **kwargs):
         result = original_validate(path, *args, **kwargs)
         if state["boundary"] and Path(path) == backup:
             events.append("validate_backup")
-        elif (
-            state["boundary"]
-            and Path(path) == output
-            and not state["published_validated"]
-        ):
-            state["published_validated"] = True
-            events.append("validate_published_output")
         return result
 
     def record_sha256(path):
         result = original_sha256(path)
-        if state["boundary"] and not state["input_hash_recorded"]:
-            state["input_hash_recorded"] = True
+        if state["boundary"] and "final_input_hash_check" not in events:
             events.append("final_input_hash_check")
         return result
 
@@ -1309,45 +1335,67 @@ def test_pilot_overwrite_publication_order_uses_protected_backup(tmp_path, monke
             events.append("final_git_check")
         return result
 
-    def record_rename(source_path, destination_path):
-        result = original_rename(source_path, destination_path)
-        if Path(source_path) == output and Path(destination_path) == backup:
+    def record_renameat2(
+        old_dir_fd, old_name, new_dir_fd, new_name, flags, *, unsupported_label
+    ):
+        result = original_renameat2(
+            old_dir_fd, old_name, new_dir_fd, new_name, flags,
+            unsupported_label=unsupported_label,
+        )
+        if new_name == backup.name and flags == e9._RENAME_NOREPLACE:
             state["boundary"] = True
             events.append("rename_backup")
         return result
 
-    def record_mkdir(path, *args, **kwargs):
-        result = original_mkdir(path, *args, **kwargs)
-        if state["boundary"] and path == output:
+    def record_install(parent_fd, reservation_name, destination_name, *, conflict_label):
+        result = original_install(
+            parent_fd, reservation_name, destination_name,
+            conflict_label=conflict_label,
+        )
+        if state["boundary"] and destination_name == output.name:
             events.append("reserve_output")
         return result
 
-    def record_link(source_path, destination_path):
-        result = original_link(source_path, destination_path)
-        if state["boundary"] and Path(destination_path).parent == output:
-            if Path(destination_path).name == e9.MANIFEST_NAME:
-                state["manifest_linked"] = True
-                events.append("link_manifest")
-            else:
-                events.append("link_shard")
-        return result
-
-    def record_fsync_directory(path):
-        result = original_fsync_directory(path)
-        if state["backup_removed"]:
-            events.append("fsync_after_backup_removal")
-            state["backup_removed"] = False
-        elif state["manifest_linked"] and not state["published_validated"]:
+    def record_link(source_name, destination_name, *, src_dir_fd=None, dst_dir_fd=None):
+        result = original_link(
+            source_name, destination_name,
+            src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd,
+        )
+        if state["boundary"]:
             events.append(
-                "fsync_output" if Path(path) == output else "fsync_parent"
+                "link_manifest" if destination_name == e9.MANIFEST_NAME
+                else "link_shard"
             )
         return result
 
-    def record_rmtree(path, *args, **kwargs):
-        result = original_rmtree(path, *args, **kwargs)
-        if Path(path) == backup:
-            events.append("remove_backup")
-            state["backup_removed"] = True
+    def record_fsync_name(name, *, dir_fd):
+        result = original_fsync_name(name, dir_fd=dir_fd)
+        if state["boundary"]:
+            events.append(
+                "fsync_manifest" if name == e9.MANIFEST_NAME else "fsync_shard"
+            )
+        return result
+
+    def record_checkpoint(parent_fd, output_name, reservation, *, parent_display):
+        events.append("checkpoint_commit_start")
+        result = original_checkpoint(
+            parent_fd, output_name, reservation, parent_display=parent_display,
+        )
+        events.append("checkpoint_commit_done")
+        return result
+
+    def record_dispose(parent_fd, name, expected_identity, *, label, parent_display):
+        result = original_dispose(
+            parent_fd, name, expected_identity,
+            label=label, parent_display=parent_display,
+        )
+        if label == "validated old E9 pilot backup":
+            events.append("dispose_backup")
+        return result
+
+    def record_release_lock(lock, identity):
+        result = original_release_lock(lock, identity)
+        events.append("release_lock")
         return result
 
     def reject_late_serialization(*args, **kwargs):
@@ -1358,11 +1406,13 @@ def test_pilot_overwrite_publication_order_uses_protected_backup(tmp_path, monke
     monkeypatch.setattr(e9, "validate_e9_spatial_bank", record_validate)
     monkeypatch.setattr(e9, "sha256_file", record_sha256)
     monkeypatch.setattr(e9, "_require_unchanged_git_provenance", record_git_check)
-    monkeypatch.setattr(e9.os, "rename", record_rename)
-    monkeypatch.setattr(Path, "mkdir", record_mkdir)
+    monkeypatch.setattr(e9, "_renameat2", record_renameat2)
+    monkeypatch.setattr(e9, "_install_reservation", record_install)
     monkeypatch.setattr(e9.os, "link", record_link)
-    monkeypatch.setattr(e9, "_fsync_directory", record_fsync_directory)
-    monkeypatch.setattr(e9.shutil, "rmtree", record_rmtree)
+    monkeypatch.setattr(e9, "_fsync_name", record_fsync_name)
+    monkeypatch.setattr(e9, "_checkpoint_and_commit_output", record_checkpoint)
+    monkeypatch.setattr(e9, "_dispose_owned", record_dispose)
+    monkeypatch.setattr(e9, "_release_publication_lock", record_release_lock)
     monkeypatch.setattr(e9.torch, "save", reject_late_serialization)
 
     build_spatial_bank(
@@ -1374,21 +1424,27 @@ def test_pilot_overwrite_publication_order_uses_protected_backup(tmp_path, monke
         repository_root=repository,
     )
 
+    # The backup must exist and be validated before the new output is ever
+    # reserved; shards must be linked (and fsynced) before the manifest,
+    # which is linked only after the final input-hash/Git provenance
+    # recheck; the published bank is only checkpointed after the manifest is
+    # durable; the old pilot backup is retired only after that checkpoint
+    # commits; and the publication lock is released last of all.
     assert events == [
         "rename_backup",
         "validate_backup",
         "reserve_output",
         "link_shard",
+        "fsync_shard",
         "final_input_hash_check",
         "final_git_check",
         "link_manifest",
-        "fsync_output",
-        "fsync_parent",
-        "validate_published_output",
-        "remove_backup",
-        "fsync_after_backup_removal",
+        "fsync_manifest",
+        "checkpoint_commit_start",
+        "checkpoint_commit_done",
+        "dispose_backup",
+        "release_lock",
     ]
-    assert events.index("link_manifest") == events.index("final_git_check") + 1
     assert_no_publication_leftovers(tmp_path)
 
 
@@ -1407,7 +1463,7 @@ def test_restoration_failure_preserves_recoverable_backup(tmp_path, monkeypatch)
     before = exact_tree_snapshot(output)
     backup = output.with_name(f".{output.name}.backup-{os.getpid()}")
     original_validate = e9.validate_e9_spatial_bank
-    original_rename_noreplace = e9._rename_noreplace
+    original_renameat2 = e9._renameat2
     mutation_seen = False
 
     def mutate_after_backup_validation(path, *args, **kwargs):
@@ -1418,13 +1474,21 @@ def test_restoration_failure_preserves_recoverable_backup(tmp_path, monkeypatch)
             tracked.write_text("mutated after backup validation\n")
         return result
 
-    def fail_backup_restoration(source_path, destination_path):
-        if Path(source_path) == backup and Path(destination_path) == output:
+    def fail_backup_restoration(
+        old_dir_fd, old_name, new_dir_fd, new_name, flags, *, unsupported_label
+    ):
+        if (
+            old_name == backup.name and new_name == output.name
+            and flags == e9._RENAME_NOREPLACE
+        ):
             raise OSError("injected restoration failure")
-        return original_rename_noreplace(source_path, destination_path)
+        return original_renameat2(
+            old_dir_fd, old_name, new_dir_fd, new_name, flags,
+            unsupported_label=unsupported_label,
+        )
 
     monkeypatch.setattr(e9, "validate_e9_spatial_bank", mutate_after_backup_validation)
-    monkeypatch.setattr(e9, "_rename_noreplace", fail_backup_restoration)
+    monkeypatch.setattr(e9, "_renameat2", fail_backup_restoration)
     with pytest.raises(RuntimeError, match=str(backup)):
         build_spatial_bank(
             source,
@@ -1466,19 +1530,34 @@ def test_atomic_create_if_absent_preserves_concurrent_directory_winner(
     (staging / "train-000000.pth").write_bytes(b"shard")
     (staging / "manifest.json").write_bytes(b"manifest")
     output = tmp_path / "output"
-    original_mkdir = Path.mkdir
+    original_install = e9._install_reservation
     injected = False
 
-    def concurrent_mkdir(path, *args, **kwargs):
+    def concurrent_install(parent_fd, reservation_name, destination_name, *, conflict_label):
         nonlocal injected
-        if path == output and not injected:
+        if destination_name == output.name and not injected:
             injected = True
-            original_mkdir(path)
-            (path / "winner").write_bytes(b"concurrent")
-            raise FileExistsError(path)
-        return original_mkdir(path, *args, **kwargs)
+            os.mkdir(destination_name, 0o755, dir_fd=parent_fd)
+            child_fd = os.open(
+                destination_name, os.O_RDONLY | os.O_DIRECTORY, dir_fd=parent_fd
+            )
+            try:
+                winner_fd = os.open(
+                    "winner", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644,
+                    dir_fd=child_fd,
+                )
+                try:
+                    os.write(winner_fd, b"concurrent")
+                finally:
+                    os.close(winner_fd)
+            finally:
+                os.close(child_fd)
+        return original_install(
+            parent_fd, reservation_name, destination_name,
+            conflict_label=conflict_label,
+        )
 
-    monkeypatch.setattr(Path, "mkdir", concurrent_mkdir)
+    monkeypatch.setattr(e9, "_install_reservation", concurrent_install)
     with pytest.raises(FileExistsError, match="refusing to overwrite"):
         e9._publish_directory(
             staging, output, overwrite=False, final_verification=lambda: None
@@ -1720,3 +1799,332 @@ def test_pilot_query_view_selects_only_spatial_images_without_reconstruction():
     assert selected["metadata"] is query["metadata"]
     with pytest.raises(ValueError, match="missing spatial image ID"):
         select_query_rows_for_spatial(query, spatial, allow_subset=False)
+
+
+# ---------------------------------------------------------------------------
+# Adversarial race-safety regression tests for the renameat2-based
+# publication layer.  Every test below drives the real production helpers
+# (e9._install_reservation, e9._renameat2, e9._checkpoint_and_commit_output,
+# e9._dispose_owned, ...) through narrowly placed hooks; none of them replace
+# the publication or cleanup functions themselves with a fake.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("foreign_kind", ("file", "symlink"))
+def test_foreign_non_directory_after_reservation_is_never_deleted(
+    tmp_path, monkeypatch, foreign_kind
+):
+    repository = tmp_path / "repo"
+    git_repo(repository)
+    source = make_source(
+        tmp_path / "source", [source_record(96 if foreign_kind == "file" else 97)]
+    )
+    output = tmp_path / "bank"
+    elsewhere = tmp_path / "elsewhere.txt"
+    elsewhere.write_bytes(b"symlink target")
+    original_install = e9._install_reservation
+    original_link = e9.os.link
+    foreign_bytes = b"foreign non-directory survives"
+    replaced = False
+
+    def replace_after_install(
+        parent_fd, reservation_name, destination_name, *, conflict_label
+    ):
+        nonlocal replaced
+        original_install(
+            parent_fd, reservation_name, destination_name,
+            conflict_label=conflict_label,
+        )
+        if destination_name == output.name and not replaced:
+            replaced = True
+            # The reservation is installed and still empty; an unrelated
+            # concurrent actor now replaces it with a foreign non-directory
+            # object using only the shared pathname.
+            output.rmdir()
+            if foreign_kind == "file":
+                output.write_bytes(foreign_bytes)
+            else:
+                output.symlink_to(elsewhere)
+
+    def force_failure_after_replacement(
+        source_name, destination_name, *, src_dir_fd=None, dst_dir_fd=None
+    ):
+        if replaced:
+            raise OSError("forced failure after foreign non-directory replacement")
+        return original_link(
+            source_name, destination_name,
+            src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd,
+        )
+
+    monkeypatch.setattr(e9, "_install_reservation", replace_after_install)
+    monkeypatch.setattr(e9.os, "link", force_failure_after_replacement)
+    with pytest.raises(e9.E9PublicationRecoveryError, match="foreign"):
+        build_spatial_bank(
+            source, output, split="train", max_images=1, overwrite=True,
+            repository_root=repository,
+        )
+
+    assert replaced
+    if foreign_kind == "file":
+        assert output.is_file() and not output.is_symlink()
+        assert output.read_bytes() == foreign_bytes
+    else:
+        assert output.is_symlink()
+        assert os.readlink(output) == str(elsewhere)
+        assert elsewhere.read_bytes() == b"symlink target"
+    assert not (
+        output.is_dir() and (output / "manifest.json").exists()
+    )
+    assert not list(tmp_path.glob(".bank.e9-*"))
+    assert not list(tmp_path.glob(".bank.backup-*"))
+    assert not os.path.lexists(tmp_path / ".bank.publication-lock")
+
+
+def test_checkpoint_detects_output_replaced_after_validation_and_preserves_everything(
+    tmp_path, monkeypatch
+):
+    repository = tmp_path / "repo"
+    git_repo(repository)
+    old_source = make_source(tmp_path / "old-source", [source_record(71)])
+    new_source = make_source(tmp_path / "new-source", [source_record(72)])
+    output = tmp_path / "bank"
+    build_spatial_bank(
+        old_source, output, split="train", max_images=1, repository_root=repository,
+    )
+    old_pilot_snapshot = exact_tree_snapshot(output)
+    backup = output.with_name(f".{output.name}.backup-{os.getpid()}")
+
+    original_publish_manifest_last = e9._publish_manifest_last
+    foreign_bytes = b"foreign post-validation output"
+    replaced = False
+
+    def replace_after_publish(
+        parent_fd, output_name, staging_fd, *, output_display, final_verification
+    ):
+        nonlocal replaced
+        reservation = original_publish_manifest_last(
+            parent_fd, output_name, staging_fd,
+            output_display=output_display,
+            final_verification=final_verification,
+        )
+        if not replaced:
+            replaced = True
+            # Simulate a concurrent actor atomically swapping the
+            # just-validated, just-published output for a foreign directory
+            # in the instant after _publish_manifest_last returns and
+            # before the checkpoint capture that is supposed to close this
+            # window runs.  The swap uses RENAME_EXCHANGE, exactly like a
+            # second copy of this same tooling would -- the original,
+            # fully-populated reservation is displaced but never destroyed,
+            # only its shared name is taken.
+            displaced_name = f".displaced-original-{os.getpid()}"
+            os.mkdir(displaced_name, 0o700, dir_fd=parent_fd)
+            e9._renameat2(
+                parent_fd, displaced_name, parent_fd, output_name,
+                e9._RENAME_EXCHANGE, unsupported_label="RENAME_EXCHANGE",
+            )
+            (output / "winner").write_bytes(foreign_bytes)
+        return reservation
+
+    monkeypatch.setattr(e9, "_publish_manifest_last", replace_after_publish)
+
+    with pytest.raises(e9.E9PublicationRecoveryError) as captured:
+        build_spatial_bank(
+            new_source, output, split="train", max_images=1, overwrite=True,
+            repository_root=repository,
+        )
+
+    assert replaced
+    message = str(captured.value)
+    assert "replaced" in message
+    # The foreign output that raced in survives untouched.
+    assert (output / "winner").read_bytes() == foreign_bytes
+    assert not (output / "manifest.json").exists()
+    # The old pilot backup is preserved byte-for-byte -- it is never
+    # restored over the foreign output, and never deleted.
+    assert exact_tree_snapshot(backup) == old_pilot_snapshot
+    # The validated new bank is not silently discarded: it is preserved at a
+    # reported recovery path.
+    recovery_dirs = [
+        path for path in tmp_path.iterdir()
+        if path.is_dir() and path.name.startswith(".e9-orphaned-output-")
+    ]
+    assert len(recovery_dirs) == 1
+    assert str(recovery_dirs[0].name) in message
+    recovered_manifest = json.loads((recovery_dirs[0] / "manifest.json").read_text())
+    assert [row["image_id"] for row in recovered_manifest["image_index"]] == [72]
+    assert not list(tmp_path.glob(".bank.e9-*"))
+    assert not os.path.lexists(tmp_path / ".bank.publication-lock")
+
+
+def _open_fd_count():
+    return len(os.listdir("/proc/self/fd"))
+
+
+def test_descriptor_based_validation_rejects_symlink_swap_and_leaks_no_fds(tmp_path):
+    repository = tmp_path / "repo"
+    git_repo(repository)
+    source = make_source(tmp_path / "source", [source_record(95)])
+    output = tmp_path / "bank"
+    build_spatial_bank(
+        source, output, split="train", max_images=1, repository_root=repository,
+    )
+
+    secret = tmp_path / "outside-secret.txt"
+    secret.write_bytes(b"SECRET-DO-NOT-LEAK")
+    secret_before = secret.read_bytes()
+
+    # The manifest is swapped for a symlink to an external, sensitive file.
+    manifest_path = output / "manifest.json"
+    manifest_bytes = manifest_path.read_bytes()
+    manifest_path.unlink()
+    manifest_path.symlink_to(secret)
+    before_fds = _open_fd_count()
+    with pytest.raises(
+        e9.E9SpatialBankValidationError, match="non-symlink"
+    ) as captured:
+        e9.validate_e9_spatial_bank(output, require_production=False)
+    assert _open_fd_count() == before_fds
+    assert "SECRET-DO-NOT-LEAK" not in str(captured.value)
+    assert secret.read_bytes() == secret_before
+    manifest_path.unlink()
+    manifest_path.write_bytes(manifest_bytes)
+
+    # A canonical shard is swapped for a symlink to the same external file.
+    shard_path = output / "train-000000.pth"
+    shard_bytes = shard_path.read_bytes()
+    shard_path.unlink()
+    shard_path.symlink_to(secret)
+    before_fds = _open_fd_count()
+    with pytest.raises(
+        e9.E9SpatialBankValidationError, match="non-symlink"
+    ) as captured:
+        e9.validate_e9_spatial_bank(output, require_production=False)
+    assert _open_fd_count() == before_fds
+    assert "SECRET-DO-NOT-LEAK" not in str(captured.value)
+    assert secret.read_bytes() == secret_before
+    shard_path.unlink()
+    shard_path.write_bytes(shard_bytes)
+
+    # Regular validation still succeeds after restoring the real files, and
+    # every call still closes every descriptor it opened.
+    before_fds = _open_fd_count()
+    for _ in range(5):
+        result = e9.validate_e9_spatial_bank(output, require_production=False)
+        assert result["is_pilot"] is True
+    assert _open_fd_count() == before_fds
+
+
+def test_early_final_component_symlink_rejection_precedes_all_side_effects(
+    tmp_path, monkeypatch
+):
+    repository = tmp_path / "repo"
+    git_repo(repository)
+    source = make_source(tmp_path / "source", [source_record(91)])
+    symlink_target = tmp_path / "elsewhere"
+    symlink_target.mkdir()
+    (symlink_target / "preexisting").write_bytes(b"do not touch")
+    output = tmp_path / "bank"
+    output.symlink_to(symlink_target, target_is_directory=True)
+    before_target = exact_tree_snapshot(symlink_target)
+
+    calls = {
+        "iter_source_records": 0,
+        "mkdtemp": 0,
+        "acquire_lock": 0,
+        "renameat2": 0,
+    }
+    original_iter = e9._iter_source_records
+    original_mkdtemp = e9.tempfile.mkdtemp
+    original_acquire_lock = e9._acquire_publication_lock
+    original_renameat2 = e9._renameat2
+
+    def counting_iter(*args, **kwargs):
+        calls["iter_source_records"] += 1
+        return original_iter(*args, **kwargs)
+
+    def counting_mkdtemp(*args, **kwargs):
+        calls["mkdtemp"] += 1
+        return original_mkdtemp(*args, **kwargs)
+
+    def counting_acquire_lock(*args, **kwargs):
+        calls["acquire_lock"] += 1
+        return original_acquire_lock(*args, **kwargs)
+
+    def counting_renameat2(*args, **kwargs):
+        calls["renameat2"] += 1
+        return original_renameat2(*args, **kwargs)
+
+    monkeypatch.setattr(e9, "_iter_source_records", counting_iter)
+    monkeypatch.setattr(e9.tempfile, "mkdtemp", counting_mkdtemp)
+    monkeypatch.setattr(e9, "_acquire_publication_lock", counting_acquire_lock)
+    monkeypatch.setattr(e9, "_renameat2", counting_renameat2)
+
+    with pytest.raises(e9.E9SpatialBankValidationError, match="symbolic-link"):
+        build_spatial_bank(
+            source, output, split="train", max_images=1,
+            repository_root=repository,
+        )
+
+    assert calls == {
+        "iter_source_records": 0,
+        "mkdtemp": 0,
+        "acquire_lock": 0,
+        "renameat2": 0,
+    }
+    assert output.is_symlink()
+    assert os.readlink(output) == str(symlink_target)
+    assert exact_tree_snapshot(symlink_target) == before_target
+
+
+def test_missing_renameat2_support_fails_closed_before_any_destination_write(
+    tmp_path, monkeypatch
+):
+    repository = tmp_path / "repo"
+    git_repo(repository)
+    source = make_source(tmp_path / "source", [source_record(81)])
+    output = tmp_path / "bank"
+    build_spatial_bank(
+        source, output, split="train", max_images=1, repository_root=repository,
+    )
+    before_production = exact_tree_snapshot(output)
+
+    pilot_source = make_source(tmp_path / "pilot-source", [source_record(82)])
+    pilot_output = tmp_path / "pilot-bank"
+    build_spatial_bank(
+        pilot_source, pilot_output, split="train", max_images=1,
+        repository_root=repository,
+    )
+    before_pilot = exact_tree_snapshot(pilot_output)
+
+    def unsupported_renameat2(
+        old_dir_fd, old_name, new_dir_fd, new_name, flags, *, unsupported_label
+    ):
+        raise e9.E9AtomicOperationUnsupportedError(
+            f"simulated missing {unsupported_label} support"
+        )
+
+    monkeypatch.setattr(e9, "_renameat2", unsupported_renameat2)
+
+    new_pilot_source = make_source(tmp_path / "new-pilot-source", [source_record(83)])
+    with pytest.raises(
+        e9.E9AtomicOperationUnsupportedError,
+        match="RENAME_NOREPLACE|RENAME_EXCHANGE",
+    ):
+        build_spatial_bank(
+            new_pilot_source, pilot_output, split="train", max_images=1,
+            overwrite=True, repository_root=repository,
+        )
+
+    # The two real destinations are byte-identical to before: no destination
+    # was ever moved, replaced, or partially written.  (Cleanup itself also
+    # requires the same atomic primitive, so a leftover, inert staging
+    # directory is the correct, safe outcome here -- not a corrupted
+    # destination -- when the primitive is entirely unavailable; this is
+    # intentionally not asserted away.)
+    assert exact_tree_snapshot(output) == before_production
+    assert exact_tree_snapshot(pilot_output) == before_pilot
+    assert not list(tmp_path.glob(".pilot-bank.backup-*"))
+    # The probe runs before the publication lock is ever acquired, so no
+    # lock is created either.
+    assert not os.path.lexists(tmp_path / ".pilot-bank.publication-lock")
