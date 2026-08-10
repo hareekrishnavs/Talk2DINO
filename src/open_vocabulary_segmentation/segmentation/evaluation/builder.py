@@ -29,15 +29,18 @@ def build_seg_dataset(config):
     return dataset
 
 
-def build_seg_dataloader(dataset):
+def build_seg_dataloader(dataset, *, affinity_oracle_enabled=False):
     # batch size is set to 1 to handle varying image size (due to different aspect ratio)
+    # Oracle capture holds CUDA model state while iterating.  Loading samples in the
+    # rank process avoids forking a persistent worker after CUDA initialization.
+    workers_per_gpu = 0 if affinity_oracle_enabled else 1
     data_loader = build_dataloader(
         dataset,
         samples_per_gpu=1,
-        workers_per_gpu=1,
+        workers_per_gpu=workers_per_gpu,
         dist=True,
         shuffle=False,
-        persistent_workers=True,
+        persistent_workers=workers_per_gpu > 0,
         pin_memory=False,
     )
     return data_loader

@@ -149,7 +149,10 @@ def train(cfg, args):
             last_sample = len_dataset
 
         oracle_cfg = cfg.evaluate.get("affinity_oracle_cache")
-        if oracle_cfg is not None and oracle_cfg.get("enabled", False):
+        affinity_oracle_enabled = (
+            oracle_cfg is not None and oracle_cfg.get("enabled", False)
+        )
+        if affinity_oracle_enabled:
             if args.job_id != 0 or args.num_jobs != 1:
                 raise RuntimeError(
                     "affinity oracle cache v1 requires deterministic job 0/1"
@@ -163,7 +166,10 @@ def train(cfg, args):
                 last_sample = int(max_images)
 
         dataset = Subset(dataset, range(first_sample, last_sample))
-        loader = build_seg_dataloader(dataset)
+        loader = build_seg_dataloader(
+            dataset,
+            affinity_oracle_enabled=affinity_oracle_enabled,
+        )
         val_loaders[key] = loader
 
     logger = get_logger()
