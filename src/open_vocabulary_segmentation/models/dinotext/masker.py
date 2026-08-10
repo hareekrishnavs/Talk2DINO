@@ -192,6 +192,11 @@ class DINOTextMasker(nn.Module):
         self.sim2mask = DINOTextSim2Mask()
         self.sim2mask = self.sim2mask.eval()
         self.similarity_type = similarity_type
+        # Disabled by default.  The E3 oracle cache attaches a non-learning
+        # observer here so it sees the exact normalized patch tensor and raw
+        # pre-sigmoid dot products.  With no observer the original E3
+        # operations and return values below are unchanged.
+        self.affinity_oracle_observer = None
 
     @torch.no_grad()
     def forward_seg(self, image_feat, text_emb, deterministic=True, hard=False):
@@ -217,6 +222,8 @@ class DINOTextMasker(nn.Module):
             image_feat = us.normalize(image_feat, dim=1)  # BCHW
             # text_emb = us.normalize(text_emb, dim=-1)  # NKC
             simmap = torch.einsum("b c h w, n c -> b n h w", image_feat, text_emb)
+            if self.affinity_oracle_observer is not None:
+                self.affinity_oracle_observer(image_feat, simmap)
         else:
             raise NotImplementedError("similarity type {} not implemented".format(self.similarity_type))
 

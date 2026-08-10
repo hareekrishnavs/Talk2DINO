@@ -148,6 +148,20 @@ def train(cfg, args):
         if args.job_id == args.num_jobs - 1:
             last_sample = len_dataset
 
+        oracle_cfg = cfg.evaluate.get("affinity_oracle_cache")
+        if oracle_cfg is not None and oracle_cfg.get("enabled", False):
+            if args.job_id != 0 or args.num_jobs != 1:
+                raise RuntimeError(
+                    "affinity oracle cache v1 requires deterministic job 0/1"
+                )
+            max_images = oracle_cfg.get("max_images")
+            if max_images is not None:
+                if max_images <= 0 or max_images > len_dataset:
+                    raise ValueError(
+                        "affinity oracle max_images is outside the dataset"
+                    )
+                last_sample = int(max_images)
+
         dataset = Subset(dataset, range(first_sample, last_sample))
         loader = build_seg_dataloader(dataset)
         val_loaders[key] = loader
@@ -439,6 +453,14 @@ def validate_seg(config, seg_config, data_loader, model):
         pre_eval=True,
         format_only=False,
     )
+
+    cache_result = seg_model.finalize_affinity_oracle_cache()
+    if cache_result is not None:
+        logger.info(
+            "Published E3 affinity-oracle cache with %d images and %d windows",
+            cache_result["selected_image_count"],
+            cache_result["selected_window_count"],
+        )
 
     if device == "cpu" or dist.get_rank() == 0:
         metric = [data_loader.dataset.dataset.evaluate(results, metric="mIoU", logger=logger)]

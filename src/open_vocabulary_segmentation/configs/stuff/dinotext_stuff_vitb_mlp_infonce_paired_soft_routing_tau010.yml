@@ -10,3 +10,17 @@ model:
   resize_dim: 448
   type: DINOText
   use_avg_text_token: false
+evaluate:
+  affinity_oracle_cache:
+    enabled: false
+    output_dir: null
+    score_dtype: float16
+    knn_k: 12
+    affinity_power: 3.0
+    propagation_steps: 10
+    windows_per_shard: 256
+    allow_dirty_source: false
+    overwrite: false
+    max_images: null
+    fp16_control_manifest: null
+    e3_config_path: src/open_vocabulary_segmentation/configs/stuff/dinotext_stuff_vitb_mlp_infonce_paired_soft_routing_tau010.yml

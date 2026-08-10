@@ -16,6 +16,8 @@ class DINOTextSegInference(nn.Module):
             pamr=False,
             bg_thresh=0.5,
             bg_strategy="base",
+            affinity_oracle_capture=None,
+            oracle_dataset=None,
             # kp_w=0.3,
             **kwargs,
     ):
@@ -27,9 +29,16 @@ class DINOTextSegInference(nn.Module):
         self.pamr = pamr
         self.bg_thresh = bg_thresh
         self.bg_strategy = bg_strategy
+        self.affinity_oracle_capture = affinity_oracle_capture
+        self.oracle_dataset = oracle_dataset
+        self._oracle_dataset_index = 0
+        self.model = model
+        if self.affinity_oracle_capture is not None:
+            self.model.masker.affinity_oracle_observer = (
+                self.affinity_oracle_capture.observe
+            )
         # self.kp_w = kp_w
 
-        self.model = model
         self.register_buffer("text_embedding", text_embedding)
         self.classnames = classnames
         self.with_bg = with_bg
@@ -93,6 +102,11 @@ class DINOTextSegInference(nn.Module):
                 y1 = max(y2 - h_crop, 0)
                 x1 = max(x2 - w_crop, 0)
                 crop = img[:, :, y1:y2, x1:x2]
+                if self.affinity_oracle_capture is not None:
+                    self.affinity_oracle_capture.set_window(
+                        coordinates=(y1, x1, y2, x2),
+                        grid_indices=(h_idx, w_idx),
+                    )
                 crop_logits = self.encode_decode(crop, img_meta)
                 preds += F.pad(
                     crop_logits,
@@ -157,6 +171,45 @@ class DINOTextSegInference(nn.Module):
             raise RuntimeError("DINOTextSegInference is evaluation-only")
         if not isinstance(img, list) or not isinstance(img_metas, list):
             raise TypeError("Evaluation inputs must be augmentation lists")
-        if len(img) == 1:
-            return self.simple_test(img[0], img_metas[0], rescale=rescale)
-        return self.aug_test(img, img_metas, rescale=rescale)
+        if self.affinity_oracle_capture is None:
+            if len(img) == 1:
+                return self.simple_test(img[0], img_metas[0], rescale=rescale)
+            return self.aug_test(img, img_metas, rescale=rescale)
+        if len(img) != 1:
+            raise RuntimeError("affinity oracle cache v1 requires one augmentation")
+        metadata = img_metas[0][0]
+        self.affinity_oracle_capture.begin_image(
+            metadata,
+            dataset_index=self._oracle_dataset_index,
+            annotation_path=self._oracle_annotation_path(self._oracle_dataset_index),
+        )
+        result = self.simple_test(img[0], img_metas[0], rescale=rescale)
+        self.affinity_oracle_capture.end_image(
+            resized_input_shape=img[0].shape[-2:],
+            reference_prediction=result[0],
+            augmentation_index=0,
+        )
+        self._oracle_dataset_index += 1
+        return result
+
+    def _oracle_annotation_path(self, index):
+        dataset = self.oracle_dataset
+        if dataset is None:
+            raise RuntimeError(
+                "oracle cache requires the concrete segmentation dataset"
+            )
+        info = dataset.img_infos[index]
+        name = info.get("ann", {}).get("seg_map")
+        if not name:
+            raise RuntimeError(
+                f"missing annotation path for dataset index {index}"
+            )
+        return str(
+            (__import__("pathlib").Path(dataset.ann_dir) / name).resolve()
+        )
+
+    def finalize_affinity_oracle_cache(self):
+        if self.affinity_oracle_capture is None:
+            return None
+        self.model.masker.affinity_oracle_observer = None
+        return self.affinity_oracle_capture.finalize()
