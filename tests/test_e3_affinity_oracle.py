@@ -1,4 +1,5 @@
 import inspect
+import io
 import json
 from pathlib import Path
 
@@ -137,6 +138,36 @@ def test_alpha_zero_is_bitwise_same_tensor():
     result = oracle.propagate_scores(scores, indices, weights, 0.0)
     assert result is scores
     assert torch.equal(result, scores)
+
+
+def test_two_fully_separated_cliques_saturate_to_their_own_class():
+    # 16 patches in two 8-patch cliques with no cross-clique edges; one
+    # informative patch per clique (a strong, correct signal for that
+    # clique's class), the rest exactly zero for both classes. alpha=0 must
+    # reproduce the input exactly; alpha->1 with enough steps must saturate
+    # every patch in a clique to that clique's class, since propagation can
+    # never leak across a fully-separated graph boundary.
+    patches, classes, k = 16, 2, 3
+    clique_a, clique_b = list(range(8)), list(range(8, 16))
+    indices = torch.zeros(patches, k, dtype=torch.int64)
+    weights = torch.full((patches, k), 1.0 / k)
+    for p in range(patches):
+        clique = clique_a if p in clique_a else clique_b
+        indices[p] = torch.tensor([c for c in clique if c != p][:k])
+    indices16, weights16 = indices.to(torch.int16), weights.to(torch.float16)
+
+    raw = torch.zeros(classes, patches)
+    raw[0, 0], raw[1, 0] = 5.0, -5.0
+    raw[1, 8], raw[0, 8] = 5.0, -5.0
+
+    identity = oracle.propagate_scores(raw, indices16, weights16, 0.0, propagation_steps=10)
+    assert torch.equal(identity, raw)
+
+    saturated = oracle.propagate_scores(
+        raw, indices16, weights16, 0.999, propagation_steps=200
+    )
+    predicted = saturated.argmax(dim=0)
+    assert predicted.tolist() == [0] * 8 + [1] * 8
 
 
 @pytest.mark.parametrize("alpha", (-0.1, 1.0, float("nan"), float("inf")))
@@ -539,3 +570,270 @@ def test_oracle_module_does_not_import_e4_through_e9():
     source = inspect.getsource(oracle)
     for experiment in ("e4_", "e5_", "e6_", "e7_", "e8_", "e9_"):
         assert f"import {experiment}" not in source
+
+
+# --- Part E: feature-capture verification (E3/E4) ---------------------------
+
+def clustered_features(n_blocks, block_size, dim=768, seed=7):
+    """n_blocks*block_size unit vectors s.t. every vector's k<block_size-1
+    nearest neighbours are EXACTLY its (block_size-1) block-mates (cosine==1,
+    self excluded) with a huge, well-separated gap to every other block's
+    near-zero cross-block cosine. This makes the resulting knn graph immune
+    to fp16-storage rounding noise, so E3 round-trip tests can assert exact
+    agreement deterministically instead of a statistical threshold."""
+    generator = torch.Generator().manual_seed(seed)
+    centers = F.normalize(torch.randn(n_blocks, dim, generator=generator), dim=-1)
+    return centers.repeat_interleave(block_size, dim=0)
+
+
+def build_synthetic_cache(tmp_path, monkeypatch, per_image_features):
+    """Writes a real, fully-validated v1 oracle cache (via
+    OnlineAffinityOracleCapture, the exact class the online E3 path uses) --
+    one image per entry of per_image_features, each with a single
+    448x448 window. raw_scores are set so class 0 always wins, matching a
+    trivial all-zero annotation, so alpha=0 mIoU is deterministically 100."""
+
+    identity_paths = {}
+    for name in (
+        "e3_config", "projection_config", "e3_checkpoint",
+        "dino_checkpoint", "clip_checkpoint", "dataset_config",
+    ):
+        path = tmp_path / name
+        path.write_bytes(name.encode())
+        identity_paths[name] = str(path)
+    provenance = {
+        "source_git_commit": "a" * 40, "source_git_dirty": False,
+        "source_git_diff_sha256": None,
+    }
+    monkeypatch.setattr(oracle, "git_provenance", lambda *a, **k: provenance)
+    from PIL import Image
+    import numpy as np
+    annotation = tmp_path / "annotation.png"
+    Image.fromarray(np.zeros((448, 448), dtype=np.uint8)).save(annotation)
+
+    cache_dir = tmp_path / "cache"
+    count = len(per_image_features)
+    capture = oracle.OnlineAffinityOracleCapture(
+        output_dir=cache_dir,
+        protocol=oracle.OracleProtocol(with_background=False),
+        class_names=[f"class-{i}" for i in range(171)],
+        source_image_count=count, max_images=count, windows_per_shard=8,
+        identity_paths=identity_paths, dino_identity="dinov2_vitb14_reg",
+        text_embedding_sha256="d" * 64,
+        allow_dirty_source=True, overwrite=False, commands=["synthetic"],
+    )
+    raw = torch.full((1, 171, 32, 32), -10.0)
+    raw[0, 0] = 10.0
+    image_ids = []
+    for image_index, features in enumerate(per_image_features):
+        image_id = f"image_{image_index}.jpg"
+        image_ids.append(image_id)
+        metadata = {
+            "filename": image_id, "ori_filename": image_id,
+            "img_shape": (448, 448, 3), "ori_shape": (448, 448, 3),
+            "pad_shape": (448, 448, 3), "flip": False,
+        }
+        capture.begin_image(metadata, dataset_index=image_index, annotation_path=str(annotation))
+        capture.set_window(coordinates=(0, 0, 448, 448), grid_indices=(0, 0))
+        capture.observe(features.T.reshape(1, 768, 32, 32), raw)
+        capture.end_image(
+            resized_input_shape=(448, 448),
+            reference_prediction=torch.zeros(448, 448, dtype=torch.int64),
+        )
+    manifest = capture.finalize()
+    return cache_dir, manifest, image_ids
+
+
+def write_synthetic_capture(capture_dir, cache_dir, image_ids, per_image_features, *, limit=None):
+    """Writes a feature-capture directory matching load_capture_manifest's
+    schema: one shard holding every window's raw fp16 [1024,768] features,
+    plus a manifest cross-referencing the real cache built above."""
+
+    capture_dir.mkdir(parents=True)
+    shard_dir = capture_dir / "shards"
+    shard_dir.mkdir()
+    shard_tensor = torch.stack([f.to(torch.float16) for f in per_image_features])
+    buffer = io.BytesIO()
+    torch.save(shard_tensor, buffer)
+    payload = buffer.getvalue()
+    (shard_dir / "windows-000000.pt").write_bytes(payload)
+    shard_meta = {
+        "name": "shards/windows-000000.pt", "bytes": len(payload),
+        "sha256": oracle.sha256_bytes(payload),
+        "window_start": 0, "window_end": len(per_image_features),
+    }
+    images = [
+        {
+            "dataset_index": index, "image_id": image_id,
+            "resized_input_shape": [448, 448], "window_start": index, "window_end": index + 1,
+            "windows": [{
+                "window_index": 0, "coordinates": [0, 0, 448, 448],
+                "grid_indices": [0, 0], "global_window_index": index,
+            }],
+        }
+        for index, image_id in enumerate(image_ids)
+    ]
+    manifest = {
+        "format_version": oracle.CAPTURE_FORMAT, "split": "val", "limit": limit, "seed": 42,
+        "source_git_commit": "a" * 40, "source_git_dirty": False, "source_git_diff_sha256": None,
+        "existing_cache_manifest_sha256": oracle.sha256_file(cache_dir / "manifest.json"),
+        "selected_image_count": len(image_ids), "selected_window_count": len(per_image_features),
+        "shards": [shard_meta], "total_bytes": len(payload), "images": images,
+        "commands": ["synthetic"],
+    }
+    (capture_dir / "manifest.json").write_text(json.dumps(manifest))
+    return manifest
+
+
+def test_verify_feature_capture_exact_agreement_when_features_match(tmp_path, monkeypatch):
+    per_image_features = [
+        clustered_features(64, 16, seed=seed) for seed in (11, 12, 13)
+    ]
+    cache_dir, _cache_manifest, image_ids = build_synthetic_cache(
+        tmp_path, monkeypatch, per_image_features
+    )
+    capture_dir = tmp_path / "capture"
+    write_synthetic_capture(capture_dir, cache_dir, image_ids, per_image_features)
+
+    report = oracle.verify_feature_capture(capture_dir, cache_dir, device="cpu")
+    assert report["images_matched"] == 3
+    assert report["images_skipped_no_capture"] == 0
+    assert report["windows_compared"] == 3
+    assert report["window_exact_index_set_match_fraction"] == 1.0
+    assert report["edge_match_fraction"] == 1.0
+    assert report["edges_total"] == 3 * 1024 * 12
+    assert report["max_abs_weight_diff_where_indices_match"] < 1e-3
+    assert report["disagreeing_row_count"] == 0
+    assert report["gate_passed"] is True
+
+
+def test_verify_feature_capture_detects_a_perturbed_feature(tmp_path, monkeypatch):
+    per_image_features = [clustered_features(64, 16, seed=21)]
+    cache_dir, _cache_manifest, image_ids = build_synthetic_cache(
+        tmp_path, monkeypatch, per_image_features
+    )
+    captured = [per_image_features[0].clone()]
+    # Replace one patch's captured feature with an unrelated direction: its
+    # true (cache-side) 15 block-mates will no longer agree with what gets
+    # rebuilt from the corrupted capture for that row.
+    captured[0][0] = F.normalize(torch.randn(768), dim=-1)
+    capture_dir = tmp_path / "capture"
+    write_synthetic_capture(capture_dir, cache_dir, image_ids, captured)
+
+    report = oracle.verify_feature_capture(capture_dir, cache_dir, device="cpu")
+    assert report["windows_compared"] == 1
+    assert report["window_exact_index_set_match_fraction"] == 0.0
+    assert 0.0 < report["edge_match_fraction"] < 1.0
+    assert report["disagreeing_row_count"] > 0
+    # The corrupted row's block-mates lost a real (cosine==1) neighbour and
+    # gained a near-zero one -- not a fp16 tie. Taken over the whole window,
+    # this dominates the max tie-gap even though the corrupted row itself
+    # only swaps among near-zero candidates.
+    assert report["max_tie_affinity_gap"] > 0.3
+
+
+def test_verify_feature_capture_skips_images_absent_from_capture(tmp_path, monkeypatch):
+    per_image_features = [
+        clustered_features(64, 16, seed=seed) for seed in (31, 32)
+    ]
+    cache_dir, _cache_manifest, image_ids = build_synthetic_cache(
+        tmp_path, monkeypatch, per_image_features
+    )
+    capture_dir = tmp_path / "capture"
+    write_synthetic_capture(
+        capture_dir, cache_dir, image_ids[:1], per_image_features[:1], limit=1,
+    )
+    report = oracle.verify_feature_capture(capture_dir, cache_dir, device="cpu")
+    assert report["images_matched"] == 1
+    assert report["images_skipped_no_capture"] == 1
+    assert report["gate_passed"] is True
+
+
+def test_verify_feature_capture_rejects_stale_cache_reference(tmp_path, monkeypatch):
+    per_image_features = [clustered_features(64, 16, seed=41)]
+    cache_dir, _cache_manifest, image_ids = build_synthetic_cache(
+        tmp_path, monkeypatch, per_image_features
+    )
+    capture_dir = tmp_path / "capture"
+    manifest = write_synthetic_capture(capture_dir, cache_dir, image_ids, per_image_features)
+    mutated = dict(manifest, existing_cache_manifest_sha256="0" * 64)
+    (capture_dir / "manifest.json").write_text(json.dumps(mutated))
+
+    import argparse
+    import run_e3_affinity_oracle as runner
+    with pytest.raises(oracle.AffinityOracleError, match="cache manifest changed"):
+        runner.verify_feature_capture_cli(argparse.Namespace(
+            capture_dir=capture_dir, cache=cache_dir, device="cpu",
+            output=tmp_path / "verify.json", overwrite=False, max_images=None,
+            assert_anchors=False,
+        ))
+
+
+def test_evaluate_with_rebuilt_graph_matches_evaluate_cache_when_features_match(
+    tmp_path, monkeypatch,
+):
+    per_image_features = [
+        clustered_features(64, 16, seed=seed) for seed in (51, 52)
+    ]
+    cache_dir, _cache_manifest, image_ids = build_synthetic_cache(
+        tmp_path, monkeypatch, per_image_features
+    )
+    capture_dir = tmp_path / "capture"
+    write_synthetic_capture(capture_dir, cache_dir, image_ids, per_image_features)
+
+    direct = oracle.evaluate_cache(cache_dir, 0.0, device="cpu")
+    rebuilt = oracle.evaluate_with_rebuilt_graph(
+        capture_dir, cache_dir, 0.0, device="cpu", propagation_steps=10,
+    )
+    assert rebuilt["evaluated_images"] == direct["evaluated_images"] == 2
+    assert rebuilt["images_skipped_no_capture"] == 0
+    assert rebuilt["mIoU"] == pytest.approx(direct["mIoU"])
+    assert rebuilt["aAcc"] == pytest.approx(direct["aAcc"])
+    assert rebuilt["mAcc"] == pytest.approx(direct["mAcc"])
+    assert rebuilt["mIoU"] == pytest.approx(100.0)
+
+    direct_mid = oracle.evaluate_cache(cache_dir, 0.5, device="cpu")
+    rebuilt_mid = oracle.evaluate_with_rebuilt_graph(
+        capture_dir, cache_dir, 0.5, device="cpu", propagation_steps=10,
+    )
+    assert rebuilt_mid["mIoU"] == pytest.approx(direct_mid["mIoU"])
+
+
+def test_assert_feature_capture_anchors_requires_complete_coverage(tmp_path, monkeypatch):
+    per_image_features = [
+        clustered_features(64, 16, seed=seed) for seed in (61, 62)
+    ]
+    cache_dir, _cache_manifest, image_ids = build_synthetic_cache(
+        tmp_path, monkeypatch, per_image_features
+    )
+    capture_dir = tmp_path / "capture"
+    write_synthetic_capture(
+        capture_dir, cache_dir, image_ids[:1], per_image_features[:1], limit=1,
+    )
+    with pytest.raises(oracle.AffinityOracleError, match="does not cover the full cache"):
+        oracle.assert_feature_capture_anchors(capture_dir, cache_dir, device="cpu")
+
+
+def test_load_capture_manifest_rejects_unknown_and_noncanonical_shard_names(tmp_path, monkeypatch):
+    per_image_features = [clustered_features(64, 16, seed=71)]
+    cache_dir, _cache_manifest, image_ids = build_synthetic_cache(
+        tmp_path, monkeypatch, per_image_features
+    )
+    capture_dir = tmp_path / "capture"
+    write_synthetic_capture(capture_dir, cache_dir, image_ids, per_image_features)
+
+    manifest_path = capture_dir / "manifest.json"
+    original = manifest_path.read_text()
+    mutated = json.loads(original)
+    mutated["unknown"] = 1
+    manifest_path.write_text(json.dumps(mutated))
+    with pytest.raises(oracle.AffinityOracleError, match="closed schema"):
+        oracle.load_capture_manifest(capture_dir)
+    manifest_path.write_text(original)
+
+    mutated = json.loads(original)
+    mutated["shards"][0]["name"] = "shards/windows-000001.pt"
+    manifest_path.write_text(json.dumps(mutated))
+    with pytest.raises(oracle.AffinityOracleError, match="noncanonical"):
+        oracle.load_capture_manifest(capture_dir)
+    manifest_path.write_text(original)

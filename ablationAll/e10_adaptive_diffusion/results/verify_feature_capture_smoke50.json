@@ -1,0 +1,29 @@
+{
+  "cache_manifest_sha256": "c4216a8d8b9b8787aba0b3f8c4e99b75ced8d76f2d372ee8725e787800150b10",
+  "capture_limit": 50,
+  "capture_manifest_existing_cache_sha256": "c4216a8d8b9b8787aba0b3f8c4e99b75ced8d76f2d372ee8725e787800150b10",
+  "capture_split": "val",
+  "command": "verify-feature-capture",
+  "experiment": "e3-affinity-spread-oracle",
+  "format_version": "talk2dino-e10-feature-capture-verify-v1",
+  "git_commit": "3a39f37426a24d904ad43e254ea37abb02247ffe",
+  "git_dirty": true,
+  "invocation": "run_e3_affinity_oracle.py verify-feature-capture --capture-dir /scratch/haree/talk2dino_e3_affinity_oracle/feature_capture_smoke50 --cache /scratch/haree/talk2dino_e3_affinity_oracle/cache/full --device cpu --output ablationAll/e10_adaptive_diffusion/results/verify_feature_capture_smoke50.json",
+  "payload": {
+    "disagreeing_row_count": 4294,
+    "edge_match_fraction": 0.9967719184027778,
+    "edges_matching": 1359565,
+    "edges_total": 1363968,
+    "gate_passed": true,
+    "images_matched": 50,
+    "images_skipped_no_capture": 4950,
+    "max_abs_weight_diff_where_indices_match": 0.01422119140625,
+    "max_tie_affinity_gap": 0.14404401183128357,
+    "mean_tie_affinity_gap": 0.003253429335150321,
+    "tie_gap_threshold": 0.01,
+    "ties_under_threshold_fraction": 0.9250116441546343,
+    "window_exact_index_set_match_fraction": 0.0,
+    "windows_compared": 111
+  },
+  "seed": 42
+}

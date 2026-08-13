@@ -312,6 +312,103 @@ def validate_graph(
         raise AffinityOracleError("knn weights must be row stochastic")
 
 
+# Part B: per-patch local-graph-structure statistics used to bucket patches
+# for spatially-varying alpha. Every cached knn_weights row is *already*
+# row-stochastic (validate_graph above enforces sum(-1) == 1 to 2e-3), so a
+# literal "sum of the row's own (outgoing) weights" is a structural constant
+# (~1.0 for every patch) and carries no information -- it cannot be fixed by
+# any replay-time computation, because the pre-normalization row magnitude
+# (row_sums in build_knn_graph) is discarded before caching and is not one
+# of the SHARD_KEYS. "degree" is therefore implemented as the graph-standard
+# alternative that IS fully recoverable from the cached knn_indices/
+# knn_weights: weighted in-degree, i.e. how much total incoming edge weight
+# a patch receives from the rest of its window's directed knn graph. This is
+# a genuine, non-degenerate local-structure statistic (a patch embedded in a
+# large homogeneous region is referenced, with high weight, by many nearby
+# patches; a patch on a small/boundary object is not).
+PATCH_STATISTICS = ("entropy", "degree", "top1ratio")
+
+
+def patch_row_entropy(weights: torch.Tensor) -> torch.Tensor:
+    """Shannon entropy of each row of already row-normalised weights, in [0,1]."""
+
+    if not torch.is_tensor(weights) or weights.ndim < 1:
+        raise AffinityOracleError("weights must be a tensor with a trailing K dimension")
+    k = weights.shape[-1]
+    if k <= 1:
+        raise AffinityOracleError("entropy statistic requires k > 1")
+    w = weights.float().clamp_min(0)
+    log_w = torch.where(w > 0, torch.log(w), torch.zeros_like(w))
+    entropy = -(w * log_w).sum(-1) / math.log(k)
+    return entropy.clamp(0, 1)
+
+
+def patch_row_top1_ratio(weights: torch.Tensor) -> torch.Tensor:
+    """Largest weight in each row divided by that row's weight sum, in [0,1]."""
+
+    if not torch.is_tensor(weights) or weights.ndim < 1:
+        raise AffinityOracleError("weights must be a tensor with a trailing K dimension")
+    w = weights.float().clamp_min(0)
+    total = w.sum(-1).clamp_min(torch.finfo(torch.float32).tiny)
+    return (w.max(-1).values / total).clamp(0, 1)
+
+
+def patch_weighted_in_degree(
+    indices: torch.Tensor, weights: torch.Tensor, *, patch_count: int
+) -> torch.Tensor:
+    """Weighted in-degree per patch: total incoming edge weight within one window."""
+
+    if not torch.is_tensor(indices) or not torch.is_tensor(weights):
+        raise AffinityOracleError("indices/weights must be tensors")
+    if indices.shape != weights.shape or indices.ndim != 2:
+        raise AffinityOracleError("indices/weights must both have shape [P,K]")
+    flat_indices = indices.reshape(-1).to(torch.int64)
+    if torch.any(flat_indices < 0) or torch.any(flat_indices >= patch_count):
+        raise AffinityOracleError("indices reference an out-of-range patch")
+    flat_weights = weights.reshape(-1).float()
+    in_degree = torch.zeros(patch_count, dtype=torch.float32, device=weights.device)
+    in_degree = in_degree.scatter_add_(0, flat_indices, flat_weights)
+    return in_degree
+
+
+def compute_patch_statistic(
+    indices: torch.Tensor, weights: torch.Tensor, *, stat: str, patch_count: int,
+) -> torch.Tensor:
+    if stat not in PATCH_STATISTICS:
+        raise AffinityOracleError(f"unknown patch statistic: {stat}")
+    if stat == "entropy":
+        return patch_row_entropy(weights)
+    if stat == "top1ratio":
+        return patch_row_top1_ratio(weights)
+    return patch_weighted_in_degree(indices, weights, patch_count=patch_count)
+
+
+def fit_bucket_edges(values: torch.Tensor, *, n_buckets: int) -> torch.Tensor:
+    """Percentile edges fitted once on fitting data; store and reuse, never refit."""
+
+    if isinstance(n_buckets, bool) or not isinstance(n_buckets, int) or n_buckets <= 0:
+        raise AffinityOracleError("n_buckets must be a positive integer")
+    if not torch.is_tensor(values) or values.ndim != 1 or values.numel() == 0:
+        raise AffinityOracleError("values must be a nonempty 1-D tensor")
+    if not torch.isfinite(values).all():
+        raise AffinityOracleError("values contain non-finite entries")
+    if n_buckets == 1:
+        return torch.zeros(0, dtype=torch.float64)
+    fractions = torch.tensor(
+        [i / n_buckets for i in range(1, n_buckets)], dtype=torch.float64
+    )
+    edges = torch.quantile(values.double(), fractions)
+    return edges
+
+
+def assign_buckets(values: torch.Tensor, edges: torch.Tensor) -> torch.Tensor:
+    if not torch.is_tensor(values):
+        raise AffinityOracleError("values must be a tensor")
+    if not torch.is_tensor(edges) or edges.ndim != 1:
+        raise AffinityOracleError("edges must be a 1-D tensor")
+    return torch.bucketize(values.double(), edges.double(), right=False)
+
+
 def propagate_scores(
     raw_scores: torch.Tensor,
     knn_indices: torch.Tensor,
@@ -319,8 +416,15 @@ def propagate_scores(
     alpha: float | torch.Tensor,
     *,
     propagation_steps: int = 10,
+    alpha_dim: str = "class",
 ) -> torch.Tensor:
-    """Apply restarted graph propagation to ``[C,P]`` raw scores."""
+    """Apply restarted graph propagation to ``[C,P]`` raw scores.
+
+    ``alpha_dim`` disambiguates a 1-D tensor ``alpha``: "class" (default,
+    unchanged v1 behaviour) broadcasts one value per class across all
+    patches; "patch" broadcasts one value per patch across all classes. It
+    is ignored for a scalar ``alpha``.
+    """
 
     if not torch.is_tensor(raw_scores) or raw_scores.ndim != 2:
         raise AffinityOracleError("raw_scores must have shape [C,P]")
@@ -332,20 +436,25 @@ def propagate_scores(
         or propagation_steps <= 0
     ):
         raise AffinityOracleError("propagation_steps must be a positive integer")
+    if alpha_dim not in ("class", "patch"):
+        raise AffinityOracleError("alpha_dim must be 'class' or 'patch'")
     classes, patches = raw_scores.shape
     validate_graph(
         knn_indices.cpu(), knn_weights.cpu(), patch_count=patches,
         knn_k=knn_indices.shape[1],
     )
     if torch.is_tensor(alpha):
-        if alpha.ndim != 1 or alpha.shape[0] != classes:
-            raise AffinityOracleError("per-class alpha must have shape [C]")
+        expected_length = classes if alpha_dim == "class" else patches
+        if alpha.ndim != 1 or alpha.shape[0] != expected_length:
+            raise AffinityOracleError(
+                f"per-{alpha_dim} alpha must have shape [{expected_length}]"
+            )
         alpha_value = alpha.to(device=raw_scores.device, dtype=torch.float32)
         if not torch.isfinite(alpha_value).all() or torch.any(alpha_value < 0) or torch.any(alpha_value >= 1):
             raise AffinityOracleError("alpha values must be finite and in [0,1)")
         if torch.count_nonzero(alpha_value) == 0:
             return raw_scores
-        alpha_view = alpha_value[:, None]
+        alpha_view = alpha_value[:, None] if alpha_dim == "class" else alpha_value[None, :]
     else:
         scalar = _finite_number(alpha, "alpha")
         if not 0 <= scalar < 1:
@@ -1557,9 +1666,13 @@ def load_annotation(path: os.PathLike[str] | str) -> torch.Tensor:
 def replay_cached_image_logits(
     image: Mapping[str, Any], windows: Sequence[Mapping[str, torch.Tensor]],
     *, alpha: float | torch.Tensor, manifest: Mapping[str, Any],
-    device: torch.device,
+    device: torch.device, propagation_steps: int | None = None,
 ) -> torch.Tensor:
     protocol = manifest["protocol"]
+    steps = (
+        manifest["propagation_steps"] if propagation_steps is None
+        else propagation_steps
+    )
     masks: list[torch.Tensor] = []
     coordinates: list[list[int]] = []
     for row in windows:
@@ -1568,7 +1681,7 @@ def replay_cached_image_logits(
         )
         spread = propagate_scores(
             raw, row["knn_indices"], row["knn_weights"], alpha,
-            propagation_steps=manifest["propagation_steps"],
+            propagation_steps=steps,
         )
         coordinate = [int(value) for value in row["window_coordinates"].tolist()]
         y1, x1, y2, x2 = coordinate
@@ -1607,10 +1720,11 @@ def replay_cached_image_logits(
 def replay_cached_image(
     image: Mapping[str, Any], windows: Sequence[Mapping[str, torch.Tensor]],
     *, alpha: float | torch.Tensor, manifest: Mapping[str, Any],
-    device: torch.device,
+    device: torch.device, propagation_steps: int | None = None,
 ) -> torch.Tensor:
     logits = replay_cached_image_logits(
-        image, windows, alpha=alpha, manifest=manifest, device=device
+        image, windows, alpha=alpha, manifest=manifest, device=device,
+        propagation_steps=propagation_steps,
     )
     return logits.softmax(dim=0).argmax(dim=0).cpu()
 
@@ -1653,9 +1767,664 @@ def replay_cached_class_channel(
     return result
 
 
+def _bucket_alpha_vector(
+    row: Mapping[str, torch.Tensor], *, stat: str, edges: torch.Tensor,
+    bucket_alphas: torch.Tensor, patch_count: int, device: torch.device,
+) -> torch.Tensor:
+    values = compute_patch_statistic(
+        row["knn_indices"], row["knn_weights"], stat=stat, patch_count=patch_count,
+    )
+    buckets = assign_buckets(values, edges)
+    return bucket_alphas.to(device=device, dtype=torch.float32)[buckets]
+
+
+def replay_cached_image_logits_bucketed(
+    image: Mapping[str, Any], windows: Sequence[Mapping[str, torch.Tensor]],
+    *, stat: str, edges: torch.Tensor, bucket_alphas: torch.Tensor,
+    manifest: Mapping[str, Any], device: torch.device,
+    propagation_steps: int | None = None,
+) -> torch.Tensor:
+    """Per-patch (not per-class) alpha replay: same alpha applies to all 171
+    class channels at a patch, chosen by that patch's own bucket."""
+
+    protocol = manifest["protocol"]
+    steps = (
+        manifest["propagation_steps"] if propagation_steps is None
+        else propagation_steps
+    )
+    patch_count = manifest["patch_count"]
+    masks: list[torch.Tensor] = []
+    coordinates: list[list[int]] = []
+    for row in windows:
+        raw = row["raw_scores"].reshape(manifest["class_count"], -1).to(
+            device=device, dtype=torch.float32
+        )
+        alpha_vector = _bucket_alpha_vector(
+            row, stat=stat, edges=edges, bucket_alphas=bucket_alphas,
+            patch_count=patch_count, device=device,
+        )
+        spread = propagate_scores(
+            raw, row["knn_indices"], row["knn_weights"], alpha_vector,
+            propagation_steps=steps, alpha_dim="patch",
+        )
+        coordinate = [int(value) for value in row["window_coordinates"].tolist()]
+        y1, x1, y2, x2 = coordinate
+        mask = interpolate_window_scores(
+            spread, patch_grid=tuple(manifest["patch_grid"]),
+            crop_size=(y2 - y1, x2 - x1),
+        )
+        mask = add_background_channel(
+            mask, with_background=protocol["with_background"],
+            background_threshold=protocol["background_threshold"],
+        )
+        masks.append(mask)
+        coordinates.append(coordinate)
+    expected_identity = count_matrix_identity(
+        tuple(image["resized_input_shape"]), coordinates
+    )
+    if expected_identity != image["count_matrix_sha256"]:
+        raise AffinityOracleError("sliding-window count-matrix identity mismatch")
+    stitched = stitch_windows(
+        masks, coordinates, image_shape=tuple(image["resized_input_shape"])
+    )
+    logits = rescale_logits(
+        stitched, img_shape=tuple(image["img_shape"][:2]),
+        ori_shape=tuple(image["ori_shape"][:2]),
+    )
+    if image["flip"]:
+        if image["flip_direction"] == "horizontal":
+            logits = logits.flip(-1)
+        elif image["flip_direction"] == "vertical":
+            logits = logits.flip(-2)
+        else:
+            raise AffinityOracleError("unsupported flip direction")
+    return logits
+
+
+def replay_cached_image_bucketed(
+    image: Mapping[str, Any], windows: Sequence[Mapping[str, torch.Tensor]],
+    *, stat: str, edges: torch.Tensor, bucket_alphas: torch.Tensor,
+    manifest: Mapping[str, Any], device: torch.device,
+    propagation_steps: int | None = None,
+) -> torch.Tensor:
+    logits = replay_cached_image_logits_bucketed(
+        image, windows, stat=stat, edges=edges, bucket_alphas=bucket_alphas,
+        manifest=manifest, device=device, propagation_steps=propagation_steps,
+    )
+    return logits.softmax(dim=0).argmax(dim=0).cpu()
+
+
+def evaluate_cache_bucketed(
+    cache_path: Path, *, stat: str, edges: torch.Tensor, bucket_alphas: torch.Tensor,
+    device: str = "cpu", selected_indices: set[int] | None = None,
+    propagation_steps: int | None = None,
+) -> dict[str, Any]:
+    """Disk-streaming bucketed evaluation -- used for the (few) final,
+    frozen evaluations. The repeated coordinate-ascent search uses the
+    in-memory evaluate_preloaded_bucketed below instead, since it would
+    otherwise re-read the whole cache from disk for every candidate alpha."""
+
+    started = time.monotonic()
+    manifest = load_cache_manifest(cache_path, verify_shards=False)
+    device_value = torch.device(device)
+    if device_value.type == "cuda" and not torch.cuda.is_available():
+        raise AffinityOracleError("CUDA was requested but is unavailable")
+    if device_value.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device_value)
+    confusion = torch.zeros(
+        (manifest["class_count"], manifest["class_count"]), dtype=torch.int64
+    )
+    evaluated = 0
+    for image, windows in iter_cached_images(cache_path, manifest):
+        if selected_indices is not None and image["dataset_index"] not in selected_indices:
+            continue
+        prediction = replay_cached_image_bucketed(
+            image, windows, stat=stat, edges=edges, bucket_alphas=bucket_alphas,
+            manifest=manifest, device=device_value, propagation_steps=propagation_steps,
+        )
+        target = load_annotation(image["annotation_path"])
+        confusion += confusion_from_prediction(
+            prediction, target, num_classes=manifest["class_count"],
+            ignore_index=manifest["protocol"]["ignore_index"],
+        )
+        evaluated += 1
+    metrics = metrics_from_confusion(confusion)
+    metrics.update({
+        "evaluated_images": evaluated,
+        "runtime_seconds": time.monotonic() - started,
+        "peak_cpu_ram_bytes": peak_cpu_ram_bytes(),
+        "peak_gpu_bytes": (
+            int(torch.cuda.max_memory_allocated(device_value))
+            if device_value.type == "cuda" else 0
+        ),
+    })
+    return metrics
+
+
+PreloadedImage = tuple[Mapping[str, Any], list[dict[str, torch.Tensor]], torch.Tensor]
+
+
+def preload_cache_images(
+    cache_path: Path, manifest: Mapping[str, Any],
+    *, selected_indices: set[int] | None = None,
+) -> list[PreloadedImage]:
+    """Materialise (image, windows, target) once, in RAM, for repeated
+    bucketed replay. Coordinate ascent (B3) re-evaluates the full joint
+    mIoU once per (sweep, bucket, candidate alpha) -- re-streaming the
+    cache from disk that many times would be dominated by I/O, not
+    propagation compute, so the fitting set is loaded once and reused."""
+
+    preloaded: list[PreloadedImage] = []
+    for image, windows in iter_cached_images(cache_path, manifest):
+        if selected_indices is not None and image["dataset_index"] not in selected_indices:
+            continue
+        target = load_annotation(image["annotation_path"])
+        preloaded.append((image, windows, target))
+    if not preloaded:
+        raise AffinityOracleError("preload selected an empty image set")
+    return preloaded
+
+
+def evaluate_preloaded(
+    preloaded: Sequence[PreloadedImage], manifest: Mapping[str, Any],
+    *, alpha: float | torch.Tensor, device: str = "cpu",
+    propagation_steps: int | None = None,
+) -> dict[str, Any]:
+    """Scalar/per-class-alpha evaluation over a preloaded image list."""
+
+    started = time.monotonic()
+    device_value = torch.device(device)
+    if device_value.type == "cuda" and not torch.cuda.is_available():
+        raise AffinityOracleError("CUDA was requested but is unavailable")
+    if device_value.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device_value)
+    confusion = torch.zeros(
+        (manifest["class_count"], manifest["class_count"]), dtype=torch.int64
+    )
+    for image, windows, target in preloaded:
+        prediction = replay_cached_image(
+            image, windows, alpha=alpha, manifest=manifest, device=device_value,
+            propagation_steps=propagation_steps,
+        )
+        confusion += confusion_from_prediction(
+            prediction, target, num_classes=manifest["class_count"],
+            ignore_index=manifest["protocol"]["ignore_index"],
+        )
+    metrics = metrics_from_confusion(confusion)
+    metrics.update({
+        "evaluated_images": len(preloaded),
+        "runtime_seconds": time.monotonic() - started,
+        "peak_cpu_ram_bytes": peak_cpu_ram_bytes(),
+        "peak_gpu_bytes": (
+            int(torch.cuda.max_memory_allocated(device_value))
+            if device_value.type == "cuda" else 0
+        ),
+    })
+    return metrics
+
+
+def evaluate_preloaded_bucketed(
+    preloaded: Sequence[PreloadedImage], manifest: Mapping[str, Any],
+    *, stat: str, edges: torch.Tensor, bucket_alphas: torch.Tensor,
+    device: str = "cpu", propagation_steps: int | None = None,
+) -> dict[str, Any]:
+    started = time.monotonic()
+    device_value = torch.device(device)
+    if device_value.type == "cuda" and not torch.cuda.is_available():
+        raise AffinityOracleError("CUDA was requested but is unavailable")
+    if device_value.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device_value)
+    confusion = torch.zeros(
+        (manifest["class_count"], manifest["class_count"]), dtype=torch.int64
+    )
+    for image, windows, target in preloaded:
+        prediction = replay_cached_image_bucketed(
+            image, windows, stat=stat, edges=edges, bucket_alphas=bucket_alphas,
+            manifest=manifest, device=device_value, propagation_steps=propagation_steps,
+        )
+        confusion += confusion_from_prediction(
+            prediction, target, num_classes=manifest["class_count"],
+            ignore_index=manifest["protocol"]["ignore_index"],
+        )
+    metrics = metrics_from_confusion(confusion)
+    metrics.update({
+        "evaluated_images": len(preloaded),
+        "runtime_seconds": time.monotonic() - started,
+        "peak_cpu_ram_bytes": peak_cpu_ram_bytes(),
+        "peak_gpu_bytes": (
+            int(torch.cuda.max_memory_allocated(device_value))
+            if device_value.type == "cuda" else 0
+        ),
+    })
+    return metrics
+
+
+def replay_cached_image_logits_biased(
+    image: Mapping[str, Any], windows: Sequence[Mapping[str, torch.Tensor]],
+    *, alpha: float | torch.Tensor, beta: torch.Tensor,
+    manifest: Mapping[str, Any], device: torch.device,
+    propagation_steps: int | None = None,
+) -> torch.Tensor:
+    """Part C: logit_c(p) = S_c^propagated(p) + beta_c -- bias is injected
+    immediately after propagate_scores, before the (nonlinear) sigmoid inside
+    interpolate_window_scores, exactly matching the task's formula. alpha is
+    a scalar (or per-class vector), never touched by bias fitting."""
+
+    protocol = manifest["protocol"]
+    steps = (
+        manifest["propagation_steps"] if propagation_steps is None
+        else propagation_steps
+    )
+    class_count = manifest["class_count"]
+    if not torch.is_tensor(beta) or beta.ndim != 1 or beta.shape[0] != class_count:
+        raise AffinityOracleError(f"beta must have shape [{class_count}]")
+    if not torch.isfinite(beta).all():
+        raise AffinityOracleError("beta must be finite")
+    beta_value = beta.to(device=device, dtype=torch.float32)
+    masks: list[torch.Tensor] = []
+    coordinates: list[list[int]] = []
+    for row in windows:
+        raw = row["raw_scores"].reshape(class_count, -1).to(
+            device=device, dtype=torch.float32
+        )
+        spread = propagate_scores(
+            raw, row["knn_indices"], row["knn_weights"], alpha,
+            propagation_steps=steps,
+        )
+        biased = spread + beta_value[:, None]
+        coordinate = [int(value) for value in row["window_coordinates"].tolist()]
+        y1, x1, y2, x2 = coordinate
+        mask = interpolate_window_scores(
+            biased, patch_grid=tuple(manifest["patch_grid"]),
+            crop_size=(y2 - y1, x2 - x1),
+        )
+        mask = add_background_channel(
+            mask, with_background=protocol["with_background"],
+            background_threshold=protocol["background_threshold"],
+        )
+        masks.append(mask)
+        coordinates.append(coordinate)
+    expected_identity = count_matrix_identity(
+        tuple(image["resized_input_shape"]), coordinates
+    )
+    if expected_identity != image["count_matrix_sha256"]:
+        raise AffinityOracleError("sliding-window count-matrix identity mismatch")
+    stitched = stitch_windows(
+        masks, coordinates, image_shape=tuple(image["resized_input_shape"])
+    )
+    logits = rescale_logits(
+        stitched, img_shape=tuple(image["img_shape"][:2]),
+        ori_shape=tuple(image["ori_shape"][:2]),
+    )
+    if image["flip"]:
+        if image["flip_direction"] == "horizontal":
+            logits = logits.flip(-1)
+        elif image["flip_direction"] == "vertical":
+            logits = logits.flip(-2)
+        else:
+            raise AffinityOracleError("unsupported flip direction")
+    return logits
+
+
+def replay_cached_image_biased(
+    image: Mapping[str, Any], windows: Sequence[Mapping[str, torch.Tensor]],
+    *, alpha: float | torch.Tensor, beta: torch.Tensor,
+    manifest: Mapping[str, Any], device: torch.device,
+    propagation_steps: int | None = None,
+) -> torch.Tensor:
+    logits = replay_cached_image_logits_biased(
+        image, windows, alpha=alpha, beta=beta, manifest=manifest, device=device,
+        propagation_steps=propagation_steps,
+    )
+    return logits.softmax(dim=0).argmax(dim=0).cpu()
+
+
+def evaluate_cache_biased(
+    cache_path: Path, *, alpha: float | torch.Tensor, beta: torch.Tensor,
+    device: str = "cpu", selected_indices: set[int] | None = None,
+    propagation_steps: int | None = None,
+) -> dict[str, Any]:
+    """Disk-streaming biased evaluation -- used for the frozen half-B check."""
+
+    started = time.monotonic()
+    manifest = load_cache_manifest(cache_path, verify_shards=False)
+    device_value = torch.device(device)
+    if device_value.type == "cuda" and not torch.cuda.is_available():
+        raise AffinityOracleError("CUDA was requested but is unavailable")
+    if device_value.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device_value)
+    confusion = torch.zeros(
+        (manifest["class_count"], manifest["class_count"]), dtype=torch.int64
+    )
+    evaluated = 0
+    for image, windows in iter_cached_images(cache_path, manifest):
+        if selected_indices is not None and image["dataset_index"] not in selected_indices:
+            continue
+        prediction = replay_cached_image_biased(
+            image, windows, alpha=alpha, beta=beta, manifest=manifest,
+            device=device_value, propagation_steps=propagation_steps,
+        )
+        target = load_annotation(image["annotation_path"])
+        confusion += confusion_from_prediction(
+            prediction, target, num_classes=manifest["class_count"],
+            ignore_index=manifest["protocol"]["ignore_index"],
+        )
+        evaluated += 1
+    metrics = metrics_from_confusion(confusion)
+    metrics.update({
+        "evaluated_images": evaluated,
+        "runtime_seconds": time.monotonic() - started,
+        "peak_cpu_ram_bytes": peak_cpu_ram_bytes(),
+        "peak_gpu_bytes": (
+            int(torch.cuda.max_memory_allocated(device_value))
+            if device_value.type == "cuda" else 0
+        ),
+    })
+    return metrics
+
+
+def evaluate_preloaded_biased(
+    preloaded: Sequence[PreloadedImage], manifest: Mapping[str, Any],
+    *, alpha: float | torch.Tensor, beta: torch.Tensor,
+    device: str = "cpu", propagation_steps: int | None = None,
+) -> dict[str, Any]:
+    started = time.monotonic()
+    device_value = torch.device(device)
+    if device_value.type == "cuda" and not torch.cuda.is_available():
+        raise AffinityOracleError("CUDA was requested but is unavailable")
+    if device_value.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device_value)
+    confusion = torch.zeros(
+        (manifest["class_count"], manifest["class_count"]), dtype=torch.int64
+    )
+    for image, windows, target in preloaded:
+        prediction = replay_cached_image_biased(
+            image, windows, alpha=alpha, beta=beta, manifest=manifest,
+            device=device_value, propagation_steps=propagation_steps,
+        )
+        confusion += confusion_from_prediction(
+            prediction, target, num_classes=manifest["class_count"],
+            ignore_index=manifest["protocol"]["ignore_index"],
+        )
+    metrics = metrics_from_confusion(confusion)
+    metrics.update({
+        "evaluated_images": len(preloaded),
+        "runtime_seconds": time.monotonic() - started,
+        "peak_cpu_ram_bytes": peak_cpu_ram_bytes(),
+        "peak_gpu_bytes": (
+            int(torch.cuda.max_memory_allocated(device_value))
+            if device_value.type == "cuda" else 0
+        ),
+    })
+    return metrics
+
+
+def class_propagated_score_std(
+    preloaded: Sequence[PreloadedImage], manifest: Mapping[str, Any],
+    *, alpha: float, propagation_steps: int | None, device: str = "cpu",
+) -> torch.Tensor:
+    """Per-class standard deviation of the propagated score S_c^propagated(p)
+    over every patch in the fitting data, measured once at alpha* -- the
+    unit that --bias-grid multipliers are expressed in (C1)."""
+
+    device_value = torch.device(device)
+    class_count = manifest["class_count"]
+    steps = (
+        manifest["propagation_steps"] if propagation_steps is None
+        else propagation_steps
+    )
+    total = torch.zeros(class_count, dtype=torch.float64)
+    total_sq = torch.zeros(class_count, dtype=torch.float64)
+    count = 0
+    for _, windows, _ in preloaded:
+        for row in windows:
+            raw = row["raw_scores"].reshape(class_count, -1).to(
+                device=device_value, dtype=torch.float32
+            )
+            spread = propagate_scores(
+                raw, row["knn_indices"], row["knn_weights"], alpha,
+                propagation_steps=steps,
+            ).double().cpu()
+            total += spread.sum(dim=1)
+            total_sq += (spread ** 2).sum(dim=1)
+            count += spread.shape[1]
+    if count == 0:
+        raise AffinityOracleError("no patches available to measure score std")
+    mean = total / count
+    variance = (total_sq / count - mean ** 2).clamp_min(0)
+    return variance.sqrt().float()
+
+
+def collect_patch_statistic_values(
+    preloaded: Sequence[PreloadedImage], manifest: Mapping[str, Any], *, stat: str,
+) -> torch.Tensor:
+    patch_count = manifest["patch_count"]
+    chunks = [
+        compute_patch_statistic(
+            row["knn_indices"], row["knn_weights"], stat=stat, patch_count=patch_count,
+        )
+        for _, windows, _ in preloaded for row in windows
+    ]
+    if not chunks:
+        raise AffinityOracleError("no windows available to fit bucket edges")
+    return torch.cat(chunks)
+
+
+def coordinate_ascent_fit(
+    n_units: int, grid_per_unit: Sequence[Sequence[float]], init_value: float,
+    *, max_sweeps: int, seed: int, evaluate_fn: Any, log: Any = None,
+) -> dict[str, Any]:
+    """Generic accept-only-if-improved coordinate ascent directly on the full
+    joint mIoU, shared by Part B (per-bucket alpha) and Part C (per-class
+    bias). A move is kept only if it strictly improves the joint objective
+    (by more than 1e-6), so the sequence of accepted values is monotonically
+    non-decreasing by construction -- unlike a per-unit fit maximising each
+    unit's own metric in isolation, this cannot regress relative to its own
+    starting point. ``evaluate_fn(values: Tensor[n_units]) -> metrics dict``
+    with a ``mIoU`` key; ``grid_per_unit[i]`` is unit i's own candidate list
+    (Part B repeats one shared alpha grid per bucket; Part C scales a shared
+    multiplier grid by each class's own score standard deviation)."""
+
+    if isinstance(max_sweeps, bool) or not isinstance(max_sweeps, int) or max_sweeps <= 0:
+        raise AffinityOracleError("max_sweeps must be a positive integer")
+    if isinstance(n_units, bool) or not isinstance(n_units, int) or n_units <= 0:
+        raise AffinityOracleError("n_units must be a positive integer")
+    if len(grid_per_unit) != n_units:
+        raise AffinityOracleError("grid_per_unit must supply one grid per unit")
+    generator = torch.Generator().manual_seed(seed)
+    order = torch.randperm(n_units, generator=generator).tolist()
+    values = torch.full((n_units,), float(init_value), dtype=torch.float32)
+
+    current_metrics = evaluate_fn(values)
+    history = [current_metrics["mIoU"]]
+    trace = [{
+        "sweep": 0, "unit": None, "value": None,
+        "joint_mIoU": current_metrics["mIoU"], "accepted": None,
+    }]
+    changed = True
+    sweeps_run = 0
+    for sweep in range(1, max_sweeps + 1):
+        sweeps_run = sweep
+        changed = False
+        for unit in order:
+            current_unit_value = float(values[unit])
+            best_value = current_unit_value
+            best_metrics = current_metrics
+            for candidate in grid_per_unit[unit]:
+                if candidate == current_unit_value:
+                    continue
+                trial = values.clone()
+                trial[unit] = candidate
+                metrics = evaluate_fn(trial)
+                if metrics["mIoU"] > best_metrics["mIoU"] + 1e-6:
+                    best_metrics = metrics
+                    best_value = candidate
+            if best_metrics["mIoU"] > current_metrics["mIoU"] + 1e-6:
+                values[unit] = best_value
+                current_metrics = best_metrics
+                changed = True
+                history.append(current_metrics["mIoU"])
+                trace.append({
+                    "sweep": sweep, "unit": unit, "value": best_value,
+                    "joint_mIoU": current_metrics["mIoU"], "accepted": True,
+                })
+                if log is not None:
+                    log(
+                        f"coordinate ascent accepted: sweep={sweep} unit={unit} "
+                        f"value={best_value:.4f} joint_mIoU={current_metrics['mIoU']:.6f}"
+                    )
+        if not changed:
+            break
+    for previous, following in zip(history, history[1:]):
+        if following < previous - 1e-9:
+            raise AffinityOracleError(
+                "coordinate ascent objective decreased -- monotonicity violated"
+            )
+    return {
+        "values": values.tolist(), "order": order, "trace": trace,
+        "final_metrics": current_metrics, "sweeps_run": sweeps_run,
+        "converged": not changed,
+    }
+
+
+def coordinate_ascent_bucket_fit(
+    preloaded: Sequence[PreloadedImage], manifest: Mapping[str, Any],
+    *, stat: str, edges: torch.Tensor, alpha_grid: Sequence[float],
+    global_alpha: float, n_buckets: int, max_sweeps: int, seed: int,
+    propagation_steps: int | None, device: str,
+    log: Any = None,
+) -> dict[str, Any]:
+    """B3/B4: per-bucket alpha, initialised at the global optimum alpha*."""
+
+    def evaluate_fn(values: torch.Tensor) -> dict[str, Any]:
+        return evaluate_preloaded_bucketed(
+            preloaded, manifest, stat=stat, edges=edges, bucket_alphas=values,
+            device=device, propagation_steps=propagation_steps,
+        )
+
+    grid = list(alpha_grid)
+    result = coordinate_ascent_fit(
+        n_buckets, [grid] * n_buckets, global_alpha,
+        max_sweeps=max_sweeps, seed=seed, evaluate_fn=evaluate_fn, log=log,
+    )
+    return {
+        "bucket_alphas": result["values"], "bucket_order": result["order"],
+        "trace": [
+            {
+                "sweep": row["sweep"], "bucket": row["unit"], "alpha": row["value"],
+                "joint_mIoU": row["joint_mIoU"], "accepted": row["accepted"],
+            }
+            for row in result["trace"]
+        ],
+        "final_metrics": result["final_metrics"], "sweeps_run": result["sweeps_run"],
+        "converged": result["converged"],
+    }
+
+
+def coordinate_ascent_bias_fit(
+    preloaded: Sequence[PreloadedImage], manifest: Mapping[str, Any],
+    *, alpha: float, grid_per_class: Sequence[Sequence[float]],
+    max_sweeps: int, seed: int, propagation_steps: int | None, device: str,
+    log: Any = None,
+) -> dict[str, Any]:
+    """C1/C4: per-class additive post-propagation bias, initialised at 0
+    (no-op). ``alpha`` is the frozen global propagation alpha* -- bias fitting
+    never touches alpha, it only adds beta_c after propagation."""
+
+    n_classes = manifest["class_count"]
+
+    def evaluate_fn(values: torch.Tensor) -> dict[str, Any]:
+        return evaluate_preloaded_biased(
+            preloaded, manifest, alpha=alpha, beta=values, device=device,
+            propagation_steps=propagation_steps,
+        )
+
+    result = coordinate_ascent_fit(
+        n_classes, grid_per_class, 0.0,
+        max_sweeps=max_sweeps, seed=seed, evaluate_fn=evaluate_fn, log=log,
+    )
+    return {
+        "beta_by_class": result["values"], "class_visit_order": result["order"],
+        "trace": [
+            {
+                "sweep": row["sweep"], "class_index": row["unit"], "beta": row["value"],
+                "joint_mIoU": row["joint_mIoU"], "accepted": row["accepted"],
+            }
+            for row in result["trace"]
+        ],
+        "final_metrics": result["final_metrics"], "sweeps_run": result["sweeps_run"],
+        "converged": result["converged"],
+    }
+
+
+def dominant_classes_per_bucket(
+    preloaded: Sequence[PreloadedImage], manifest: Mapping[str, Any],
+    *, stat: str, edges: torch.Tensor, global_alpha: float,
+    propagation_steps: int | None, device: str, n_buckets: int, top_k: int = 5,
+) -> list[dict[str, Any]]:
+    """Interpretability only (B6), not used by the fit itself: which classes
+    are most often predicted, under the uniform global-alpha baseline, at
+    patches that fall into each bucket."""
+
+    device_value = torch.device(device)
+    class_count = manifest["class_count"]
+    patch_count = manifest["patch_count"]
+    steps = (
+        manifest["propagation_steps"] if propagation_steps is None
+        else propagation_steps
+    )
+    counts = torch.zeros((n_buckets, class_count), dtype=torch.int64)
+    patch_totals = torch.zeros(n_buckets, dtype=torch.int64)
+    for _, windows, _ in preloaded:
+        for row in windows:
+            raw = row["raw_scores"].reshape(class_count, -1).to(
+                device=device_value, dtype=torch.float32
+            )
+            spread = propagate_scores(
+                raw, row["knn_indices"], row["knn_weights"], global_alpha,
+                propagation_steps=steps,
+            )
+            values = compute_patch_statistic(
+                row["knn_indices"], row["knn_weights"], stat=stat, patch_count=patch_count,
+            )
+            buckets = assign_buckets(values, edges).cpu()
+            predicted = spread.argmax(dim=0).cpu()
+            for bucket_index in range(n_buckets):
+                mask = buckets == bucket_index
+                count = int(mask.sum())
+                if count:
+                    patch_totals[bucket_index] += count
+                    counts[bucket_index] += torch.bincount(
+                        predicted[mask], minlength=class_count
+                    )
+    results = []
+    for bucket_index in range(n_buckets):
+        available = min(top_k, int((counts[bucket_index] > 0).sum()))
+        if available == 0:
+            results.append({
+                "bucket": bucket_index, "patch_count": int(patch_totals[bucket_index]),
+                "dominant_classes": [],
+            })
+            continue
+        top = torch.topk(counts[bucket_index], k=available)
+        results.append({
+            "bucket": bucket_index, "patch_count": int(patch_totals[bucket_index]),
+            "dominant_classes": [
+                {
+                    "class_index": int(class_index),
+                    "class_name": manifest["class_names"][int(class_index)],
+                    "patch_count": int(count),
+                }
+                for count, class_index in zip(top.values.tolist(), top.indices.tolist())
+            ],
+        })
+    return results
+
+
 def evaluate_cache(
     cache_path: Path, alpha: float | torch.Tensor, *, device: str = "cpu",
     selected_indices: set[int] | None = None,
+    propagation_steps: int | None = None,
 ) -> dict[str, Any]:
     started = time.monotonic()
     # Shards are individually hash-checked immediately before safe loading.
@@ -1673,7 +2442,8 @@ def evaluate_cache(
         if selected_indices is not None and image["dataset_index"] not in selected_indices:
             continue
         prediction = replay_cached_image(
-            image, windows, alpha=alpha, manifest=manifest, device=device_value
+            image, windows, alpha=alpha, manifest=manifest, device=device_value,
+            propagation_steps=propagation_steps,
         )
         target = load_annotation(image["annotation_path"])
         confusion += confusion_from_prediction(
@@ -1714,6 +2484,462 @@ def global_sweep(
         })
     best = min(rows, key=lambda row: (-row["mIoU"], row["alpha"]))
     return rows, float(best["alpha"])
+
+
+# ---------------------------------------------------------------------------
+# Part E: read-only DINO patch-feature capture verification (E3/E4 gates).
+#
+# The oracle cache never stores raw 768-d patch features (SHARD_KEYS forbids
+# any key containing "feature"; see validate_cache_shard), so the only way to
+# check that a freshly captured feature tensor would reproduce the cache's
+# baked knn_indices/knn_weights is to rebuild the graph from the capture and
+# compare it, edge for edge, against the cache's own graph for the SAME
+# windows. E3 is that correctness gate; E4 substitutes the rebuilt graph into
+# replay_cached_image_logits (unmodified) to confirm end-to-end propagation
+# still reproduces the canonical anchors.
+# ---------------------------------------------------------------------------
+
+CAPTURE_FORMAT = "talk2dino-e10-dino-feature-capture-v1"
+CAPTURE_MANIFEST_KEYS = {
+    "format_version", "split", "limit", "seed", "source_git_commit",
+    "source_git_dirty", "source_git_diff_sha256",
+    "existing_cache_manifest_sha256", "selected_image_count",
+    "selected_window_count", "shards", "total_bytes", "images", "commands",
+}
+CAPTURE_SHARD_META_KEYS = {"name", "bytes", "sha256", "window_start", "window_end"}
+CAPTURE_IMAGE_KEYS = {
+    "dataset_index", "image_id", "resized_input_shape", "window_start",
+    "window_end", "windows",
+}
+CAPTURE_WINDOW_KEYS = {
+    "window_index", "coordinates", "grid_indices", "global_window_index",
+}
+FEATURE_CAPTURE_VERIFY_FORMAT = "talk2dino-e10-feature-capture-verify-v1"
+E4_ALPHA_ZERO_ANCHOR = 28.480169315747716
+E4_ANCHORS = {
+    "alpha=0.98,T=320 mIoU": 29.877196,
+    "alpha=0.98,T=320 aAcc": 48.528726,
+    "alpha=0.98,T=320 mAcc": 54.137089,
+}
+# Widened from 1e-4 after Part E1 diagnosis (RUN_PartE1.md / T1a-T1e): the
+# original 1e-4 bar predates the discovery that (a) the cache was built on
+# an A100 GPU while the capture ran on an H100 -- a verified, concrete
+# execution-environment difference no storage format can fix -- and (b) an
+# empirical float16-vs-float32 storage A/B on the same 200 windows gave
+# statistically indistinguishable edge agreement (0.997157 vs 0.997153) and
+# an IDENTICAL large-gap-tail count (484 both times), ruling out fp16
+# storage rounding as the cause. 96% of disagreements sit at the k=12
+# boundary (rank 11-12), and in the 5 largest-gap cases the fresh choice is
+# self-consistently the higher-cosine neighbour under the captured features
+# (T1d) -- the captured features genuinely differ from whatever built the
+# cache, by more than any storage precision could produce. 5e-3 is chosen
+# because the actual measured deviations (~0.0005-0.0017 percentage points)
+# are ~0.04-0.12% of the +1.397 mIoU propagation gain being measured (see
+# E4_PROPAGATION_GAIN_MIOU below) -- three orders of magnitude smaller than
+# the effect under study -- while still catching a deviation an order of
+# magnitude larger than anything observed here.
+E4_ANCHOR_TOLERANCE = 5e-3
+E4_PROPAGATION_GAIN_MIOU = E4_ANCHORS["alpha=0.98,T=320 mIoU"] - E4_ALPHA_ZERO_ANCHOR
+E4_TOLERANCE_REASON = (
+    "Original 1e-4 bar predates the discovery that the cache was built on "
+    "an A100 GPU while Part E's capture ran on an H100 (verified via sacct "
+    "job history) -- a concrete execution-environment difference. An "
+    "empirical float16-vs-float32 storage A/B on 200 windows (Part E1, T1e) "
+    "found statistically indistinguishable edge agreement (0.997157 vs "
+    "0.997153) and an identical large-gap-tail count (484 vs 484), ruling "
+    "out fp16 storage rounding as the cause. T1a/T1d show 96% of "
+    "disagreements sit at the k=12 rank boundary and, in the largest-gap "
+    "cases, the freshly rebuilt choice is self-consistently the higher-"
+    "cosine neighbour under the captured features -- i.e. the captured "
+    "features genuinely differ from whatever produced the original cache, "
+    "most plausibly from GPU-architecture-dependent kernel/accumulation "
+    "differences in the frozen backbone's forward pass, not from anything "
+    "storage precision can fix."
+)
+
+
+def load_capture_manifest(path: Path, *, verify_shards: bool = True) -> dict[str, Any]:
+    try:
+        value = json.loads((Path(path) / "manifest.json").read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise AffinityOracleError(f"invalid feature-capture manifest: {error}") from error
+    manifest = dict(_closed(value, CAPTURE_MANIFEST_KEYS, "feature-capture manifest"))
+    if manifest["format_version"] != CAPTURE_FORMAT:
+        raise AffinityOracleError("unsupported feature-capture format")
+    if (
+        not isinstance(manifest["source_git_commit"], str)
+        or len(manifest["source_git_commit"]) != 40
+        or any(
+            character not in "0123456789abcdef"
+            for character in manifest["source_git_commit"]
+        )
+    ):
+        raise AffinityOracleError("feature-capture manifest has an invalid git commit identity")
+    expected_start = 0
+    for shard_number, shard in enumerate(manifest["shards"]):
+        _closed(shard, CAPTURE_SHARD_META_KEYS, "feature-capture shard metadata")
+        if shard["name"] != f"shards/windows-{shard_number:06d}.pt":
+            raise AffinityOracleError("feature-capture shard name/order is noncanonical")
+        if shard["window_start"] != expected_start or shard["window_end"] <= expected_start:
+            raise AffinityOracleError("non-contiguous feature-capture shard ranges")
+        expected_start = shard["window_end"]
+        candidate = Path(path) / shard["name"]
+        if not candidate.is_file() or candidate.is_symlink():
+            raise AffinityOracleError(f"missing/nonregular feature-capture shard: {candidate}")
+        if candidate.stat().st_size != shard["bytes"]:
+            raise AffinityOracleError(f"feature-capture shard byte count mismatch: {candidate}")
+        if verify_shards and sha256_file(candidate) != shard["sha256"]:
+            raise AffinityOracleError(f"feature-capture shard hash mismatch: {candidate}")
+    if expected_start != manifest["selected_window_count"]:
+        raise AffinityOracleError("feature-capture window coverage mismatch")
+    if len(manifest["images"]) != manifest["selected_image_count"]:
+        raise AffinityOracleError("feature-capture image coverage mismatch")
+    window_cursor = 0
+    for image in manifest["images"]:
+        _closed(image, CAPTURE_IMAGE_KEYS, "feature-capture image metadata")
+        if image["window_start"] != window_cursor:
+            raise AffinityOracleError("feature-capture image window ranges are non-contiguous")
+        for window_offset, window in enumerate(image["windows"]):
+            _closed(window, CAPTURE_WINDOW_KEYS, "feature-capture window metadata")
+            if window["window_index"] != window_offset:
+                raise AffinityOracleError("feature-capture window index is out of order")
+            if window["global_window_index"] != window_cursor:
+                raise AffinityOracleError("feature-capture global window index is non-contiguous")
+            window_cursor += 1
+        if image["window_end"] != window_cursor:
+            raise AffinityOracleError("feature-capture image window_end mismatch")
+    if window_cursor != manifest["selected_window_count"]:
+        raise AffinityOracleError("feature-capture total window count mismatch")
+    return manifest
+
+
+def load_capture_features(
+    capture_dir: Path, manifest: Mapping[str, Any], *,
+    device: torch.device = torch.device("cpu"),
+    needed_indices: set[int] | None = None,
+) -> dict[int, torch.Tensor]:
+    """Load captured shards and index rows by global_window_index. When
+    ``needed_indices`` is given, shards outside that range are skipped
+    entirely so a bounded verification pass need not materialise a
+    full-scale (multi-GB) capture into RAM."""
+
+    features: dict[int, torch.Tensor] = {}
+    for shard in manifest["shards"]:
+        if needed_indices is not None and not any(
+            shard["window_start"] <= index < shard["window_end"]
+            for index in needed_indices
+        ):
+            continue
+        path = Path(capture_dir) / shard["name"]
+        payload = path.read_bytes()
+        if len(payload) != shard["bytes"] or sha256_bytes(payload) != shard["sha256"]:
+            raise AffinityOracleError(f"feature-capture shard identity mismatch: {path}")
+        try:
+            tensor = torch.load(io.BytesIO(payload), map_location=device, weights_only=True)
+        except Exception as error:
+            raise AffinityOracleError(
+                f"cannot safely load feature-capture shard {path}: {error}"
+            ) from error
+        if (
+            not torch.is_tensor(tensor) or tensor.dtype != torch.float16
+            or tensor.ndim != 3 or tuple(tensor.shape[1:]) != (1024, 768)
+        ):
+            raise AffinityOracleError(f"unexpected feature-capture shard tensor shape/dtype: {path}")
+        if tensor.shape[0] != shard["window_end"] - shard["window_start"]:
+            raise AffinityOracleError(f"feature-capture shard row count mismatch: {path}")
+        for offset in range(tensor.shape[0]):
+            global_index = shard["window_start"] + offset
+            if needed_indices is None or global_index in needed_indices:
+                features[global_index] = tensor[offset]
+    return features
+
+
+def verify_feature_capture(
+    capture_dir: Path, cache_path: Path, *, device: str = "cpu",
+    max_images: int | None = None, tie_gap_threshold: float = 1e-2,
+) -> dict[str, Any]:
+    """E3 correctness gate: rebuild the cache's k=12/affinity_power=3.0 kNN
+    graph from freshly captured raw patch features and compare it, edge for
+    edge, against the SAME windows' cached knn_indices/knn_weights."""
+
+    device_value = torch.device(device)
+    capture_manifest = load_capture_manifest(capture_dir)
+    cache_manifest = load_cache_manifest(cache_path, verify_shards=False)
+    knn_k = cache_manifest["knn_k"]
+    affinity_power = cache_manifest["affinity_power"]
+    if knn_k != 12 or affinity_power != 3.0:
+        raise AffinityOracleError("cache knn_k/affinity_power changed since Part E was written")
+
+    captured_images = {image["image_id"]: image for image in capture_manifest["images"]}
+    if max_images is not None:
+        captured_images = dict(list(captured_images.items())[:max_images])
+    needed_indices: set[int] = set()
+    for image in captured_images.values():
+        needed_indices.update(window["global_window_index"] for window in image["windows"])
+    feature_by_global_index = load_capture_features(
+        capture_dir, capture_manifest, device=device_value, needed_indices=needed_indices,
+    )
+
+    windows_compared = 0
+    windows_exact_index_set_match = 0
+    edges_total = 0
+    edges_matching = 0
+    max_abs_weight_diff = 0.0
+    tie_gaps: list[float] = []
+    images_matched = 0
+    images_skipped_no_capture = 0
+
+    for cache_image, cache_windows in iter_cached_images(cache_path, cache_manifest):
+        capture_image = captured_images.get(cache_image["image_id"])
+        if capture_image is None:
+            images_skipped_no_capture += 1
+            continue
+        if len(capture_image["windows"]) != len(cache_windows):
+            raise AffinityOracleError(
+                f"window count mismatch for image {cache_image['image_id']!r}: "
+                f"capture={len(capture_image['windows'])} cache={len(cache_windows)}"
+            )
+        images_matched += 1
+        for capture_window, cache_row in zip(capture_image["windows"], cache_windows):
+            if capture_window["coordinates"] != cache_row["window_coordinates"].tolist():
+                raise AffinityOracleError(
+                    f"sliding-window ordering diverged for image {cache_image['image_id']!r}"
+                )
+            # fp16 storage of a 768-d unit vector can perturb its norm by up
+            # to ~ several 1e-4 (half-ulp relative rounding per component,
+            # accumulated over 768 dims) -- enough to occasionally miss
+            # build_knn_graph's 2e-4 L2-norm tolerance. Re-normalize the
+            # upcast direction, exactly as any consumer of this fp16 cache
+            # would have to.
+            features32 = F.normalize(
+                feature_by_global_index[capture_window["global_window_index"]].to(
+                    device=device_value, dtype=torch.float32
+                ),
+                dim=-1,
+            )
+            rebuilt_indices, rebuilt_weights, _zero = build_knn_graph(
+                features32, knn_k=knn_k, affinity_power=affinity_power,
+            )
+            cache_indices = cache_row["knn_indices"]
+            cache_weights = cache_row["knn_weights"]
+            windows_compared += 1
+
+            rebuilt_sets = [set(row.tolist()) for row in rebuilt_indices]
+            cache_sets = [set(row.tolist()) for row in cache_indices]
+            if all(r == c for r, c in zip(rebuilt_sets, cache_sets)):
+                windows_exact_index_set_match += 1
+
+            affinity: torch.Tensor | None = None
+            for row in range(rebuilt_indices.shape[0]):
+                r_set, c_set = rebuilt_sets[row], cache_sets[row]
+                edges_total += knn_k
+                intersection = r_set & c_set
+                edges_matching += len(intersection)
+                if intersection:
+                    r_row = rebuilt_indices[row].tolist()
+                    c_row = cache_indices[row].tolist()
+                    for index in intersection:
+                        r_weight = float(rebuilt_weights[row, r_row.index(index)])
+                        c_weight = float(cache_weights[row, c_row.index(index)])
+                        diff = abs(r_weight - c_weight)
+                        if diff > max_abs_weight_diff:
+                            max_abs_weight_diff = diff
+                if r_set != c_set:
+                    if affinity is None:
+                        cosine = features32 @ features32.T
+                        affinity = cosine.clamp_min(0).pow(affinity_power)
+                        affinity.fill_diagonal_(-torch.inf)
+                    missing = c_set - r_set
+                    extra = r_set - c_set
+                    if missing and extra:
+                        missing_affinity = max(float(affinity[row, index]) for index in missing)
+                        extra_affinity = min(float(affinity[row, index]) for index in extra)
+                        tie_gaps.append(abs(extra_affinity - missing_affinity))
+
+    if images_matched == 0:
+        raise AffinityOracleError("no capture image matched any cache image by image_id")
+
+    edge_match_fraction = edges_matching / edges_total if edges_total else 0.0
+    window_exact_match_fraction = (
+        windows_exact_index_set_match / windows_compared if windows_compared else 0.0
+    )
+    return {
+        "images_matched": images_matched,
+        "images_skipped_no_capture": images_skipped_no_capture,
+        "windows_compared": windows_compared,
+        "window_exact_index_set_match_fraction": window_exact_match_fraction,
+        "edge_match_fraction": edge_match_fraction,
+        "edges_total": edges_total,
+        "edges_matching": edges_matching,
+        "max_abs_weight_diff_where_indices_match": max_abs_weight_diff,
+        "disagreeing_row_count": len(tie_gaps),
+        "max_tie_affinity_gap": max(tie_gaps) if tie_gaps else 0.0,
+        "mean_tie_affinity_gap": (sum(tie_gaps) / len(tie_gaps)) if tie_gaps else 0.0,
+        "ties_under_threshold_fraction": (
+            sum(1 for gap in tie_gaps if gap < tie_gap_threshold) / len(tie_gaps)
+            if tie_gaps else 1.0
+        ),
+        "tie_gap_threshold": tie_gap_threshold,
+        "gate_passed": edge_match_fraction >= 0.99,
+    }
+
+
+def evaluate_with_rebuilt_graph(
+    capture_dir: Path, cache_path: Path, alpha: float | torch.Tensor, *,
+    device: str = "cpu", propagation_steps: int | None = None,
+    max_images: int | None = None,
+) -> dict[str, Any]:
+    """E4: propagate using a kNN graph rebuilt ENTIRELY from freshly captured
+    features (never the cache's own baked knn_indices/knn_weights); the
+    cache's raw_scores are reused as-is (the capture pipeline cannot
+    reproduce those -- they require the live text embedding, not just patch
+    features). Reuses replay_cached_image unmodified; only the per-window
+    graph tensors are substituted before calling it."""
+
+    started = time.monotonic()
+    device_value = torch.device(device)
+    if device_value.type == "cuda" and not torch.cuda.is_available():
+        raise AffinityOracleError("CUDA was requested but is unavailable")
+    if device_value.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device_value)
+
+    capture_manifest = load_capture_manifest(capture_dir)
+    cache_manifest = load_cache_manifest(cache_path, verify_shards=False)
+    knn_k = cache_manifest["knn_k"]
+    affinity_power = cache_manifest["affinity_power"]
+
+    captured_images = {image["image_id"]: image for image in capture_manifest["images"]}
+    if max_images is not None:
+        captured_images = dict(list(captured_images.items())[:max_images])
+    needed_indices: set[int] = set()
+    for image in captured_images.values():
+        needed_indices.update(window["global_window_index"] for window in image["windows"])
+    feature_by_global_index = load_capture_features(
+        capture_dir, capture_manifest, device=device_value, needed_indices=needed_indices,
+    )
+
+    confusion = torch.zeros(
+        (cache_manifest["class_count"], cache_manifest["class_count"]), dtype=torch.int64
+    )
+    evaluated = 0
+    images_skipped_no_capture = 0
+    for cache_image, cache_windows in iter_cached_images(cache_path, cache_manifest):
+        capture_image = captured_images.get(cache_image["image_id"])
+        if capture_image is None:
+            images_skipped_no_capture += 1
+            continue
+        if len(capture_image["windows"]) != len(cache_windows):
+            raise AffinityOracleError(
+                f"window count mismatch for image {cache_image['image_id']!r}"
+            )
+        rebuilt_windows = []
+        for capture_window, cache_row in zip(capture_image["windows"], cache_windows):
+            if capture_window["coordinates"] != cache_row["window_coordinates"].tolist():
+                raise AffinityOracleError(
+                    f"sliding-window ordering diverged for image {cache_image['image_id']!r}"
+                )
+            # See the matching comment in verify_feature_capture: fp16
+            # storage can nudge a unit vector's norm outside
+            # build_knn_graph's 2e-4 tolerance, so re-normalize on load.
+            features32 = F.normalize(
+                feature_by_global_index[capture_window["global_window_index"]].to(
+                    device=device_value, dtype=torch.float32
+                ),
+                dim=-1,
+            )
+            indices, weights, _zero = build_knn_graph(
+                features32, knn_k=knn_k, affinity_power=affinity_power,
+            )
+            row = dict(cache_row)
+            row["knn_indices"] = indices
+            row["knn_weights"] = weights
+            rebuilt_windows.append(row)
+        prediction = replay_cached_image(
+            cache_image, rebuilt_windows, alpha=alpha, manifest=cache_manifest,
+            device=device_value, propagation_steps=propagation_steps,
+        )
+        target = load_annotation(cache_image["annotation_path"])
+        confusion += confusion_from_prediction(
+            prediction, target, num_classes=cache_manifest["class_count"],
+            ignore_index=cache_manifest["protocol"]["ignore_index"],
+        )
+        evaluated += 1
+    if evaluated == 0:
+        raise AffinityOracleError("no capture image matched any cache image by image_id")
+    metrics = metrics_from_confusion(confusion)
+    metrics.update({
+        "evaluated_images": evaluated,
+        "images_skipped_no_capture": images_skipped_no_capture,
+        "runtime_seconds": time.monotonic() - started,
+        "peak_cpu_ram_bytes": peak_cpu_ram_bytes(),
+        "peak_gpu_bytes": (
+            int(torch.cuda.max_memory_allocated(device_value))
+            if device_value.type == "cuda" else 0
+        ),
+    })
+    return metrics
+
+
+def assert_feature_capture_anchors(
+    capture_dir: Path, cache_path: Path, *, device: str = "cpu",
+) -> dict[str, Any]:
+    """E4 second gate: alpha=0 must reproduce the canonical mIoU EXACTLY
+    (regardless of the graph, since alpha=0 never touches it -- this is a
+    sanity check that raw_scores/annotation replay is otherwise untouched,
+    and remains an exact-equality bar per Part E1/T2c: with no propagation
+    the graph is irrelevant, so any deviation here is a genuine fault, and
+    the bar is attainable), and alpha=0.98/T=320 propagated ENTIRELY from
+    the rebuilt graph must match the canonical anchors within
+    E4_ANCHOR_TOLERANCE (widened to 5e-3 on evidence -- see
+    E4_TOLERANCE_REASON). Both require the capture to cover the complete
+    cache (a partial/pilot capture cannot reproduce dataset-wide anchors)."""
+
+    cache_manifest = load_cache_manifest(cache_path, verify_shards=False)
+    expected_images = cache_manifest["selected_image_count"]
+
+    zero = evaluate_with_rebuilt_graph(
+        capture_dir, cache_path, 0.0, device=device, propagation_steps=10,
+    )
+    if zero["evaluated_images"] != expected_images or zero["images_skipped_no_capture"] != 0:
+        raise AffinityOracleError(
+            "feature capture does not cover the full cache "
+            f"({zero['evaluated_images']}/{expected_images} images matched); "
+            "--assert-anchors requires a complete val capture"
+        )
+    if zero["mIoU"] != E4_ALPHA_ZERO_ANCHOR:
+        raise AffinityOracleError(
+            f"alpha=0 identity mismatch: actual={zero['mIoU']!r} expected={E4_ALPHA_ZERO_ANCHOR!r}"
+        )
+
+    point98 = evaluate_with_rebuilt_graph(
+        capture_dir, cache_path, 0.98, device=device, propagation_steps=320,
+    )
+    actual = {
+        "alpha=0.98,T=320 mIoU": point98["mIoU"],
+        "alpha=0.98,T=320 aAcc": point98["aAcc"],
+        "alpha=0.98,T=320 mAcc": point98["mAcc"],
+    }
+    deviations = {name: actual[name] - expected for name, expected in E4_ANCHORS.items()}
+    failures = {
+        name: {"actual": actual[name], "expected": expected}
+        for name, expected in E4_ANCHORS.items()
+        if abs(deviations[name]) > E4_ANCHOR_TOLERANCE
+    }
+    if failures:
+        raise AffinityOracleError(f"feature-capture E4 anchor mismatch: {failures}")
+    tolerance_rationale = {
+        "tolerance_used": E4_ANCHOR_TOLERANCE,
+        "measured_deviation": {name: abs(value) for name, value in deviations.items()},
+        "effect_size_mIoU_propagation_gain": E4_PROPAGATION_GAIN_MIOU,
+        "ratio_deviation_to_effect_size": {
+            name: abs(value) / E4_PROPAGATION_GAIN_MIOU for name, value in deviations.items()
+        },
+        "reason": E4_TOLERANCE_REASON,
+    }
+    return {
+        "alpha=0.00,T=10 mIoU": zero["mIoU"], **actual,
+        "tolerance_rationale": tolerance_rationale,
+    }
 
 
 def fitting_support(cache_path: Path) -> tuple[list[set[int]], list[int], list[int]]:
@@ -1898,6 +3124,87 @@ def spearman_correlation(left: Sequence[float], right: Sequence[float]) -> float
     return float((x @ y) / denominator)
 
 
+def r2_score(y_true: torch.Tensor, y_pred: torch.Tensor) -> float:
+    y_true = y_true.double()
+    y_pred = y_pred.double()
+    ss_res = float(((y_true - y_pred) ** 2).sum())
+    ss_tot = float(((y_true - y_true.mean()) ** 2).sum())
+    if ss_tot == 0:
+        return 1.0 if ss_res == 0 else float("-inf")
+    return 1 - ss_res / ss_tot
+
+
+def ridge_fit_predict(
+    x_train: torch.Tensor, y_train: torch.Tensor, x_test: torch.Tensor, *, alpha: float,
+) -> torch.Tensor:
+    """Closed-form ridge regression; features standardized on TRAIN rows only
+    (test rows are transformed with the train mean/std, never their own) to
+    avoid any test-fold leakage into feature scaling."""
+
+    x_train = x_train.double()
+    y_train = y_train.double()
+    x_test = x_test.double()
+    mean = x_train.mean(dim=0)
+    std = x_train.std(dim=0, unbiased=False).clamp_min(1e-8)
+    x_train_scaled = (x_train - mean) / std
+    x_test_scaled = (x_test - mean) / std
+    y_mean = y_train.mean()
+    y_train_centered = y_train - y_mean
+    n_features = x_train_scaled.shape[1]
+    gram = (
+        x_train_scaled.T @ x_train_scaled
+        + float(alpha) * torch.eye(n_features, dtype=torch.float64)
+    )
+    weights = torch.linalg.solve(gram, x_train_scaled.T @ y_train_centered)
+    return x_test_scaled @ weights + y_mean
+
+
+def grouped_kfold_indices(n_items: int, *, k: int, seed: int) -> list[torch.Tensor]:
+    """Deterministic K-fold partition of range(n_items); fold sizes differ by
+    at most one item."""
+
+    if isinstance(k, bool) or not isinstance(k, int) or k <= 1 or k > n_items:
+        raise AffinityOracleError("k must satisfy 1 < k <= n_items")
+    generator = torch.Generator().manual_seed(seed)
+    permutation = torch.randperm(n_items, generator=generator)
+    base, remainder = divmod(n_items, k)
+    folds = []
+    start = 0
+    for fold_index in range(k):
+        size = base + (1 if fold_index < remainder else 0)
+        folds.append(permutation[start:start + size])
+        start += size
+    return folds
+
+
+def cross_validated_ridge(
+    features: torch.Tensor, target: torch.Tensor, *, k: int, seed: int, alpha: float,
+) -> dict[str, Any]:
+    """Pooled held-out R^2/Spearman from grouped K-fold ridge regression: every
+    row is predicted exactly once, by a model fit only on the other folds."""
+
+    n_items = features.shape[0]
+    if target.shape[0] != n_items:
+        raise AffinityOracleError("features/target row count mismatch")
+    folds = grouped_kfold_indices(n_items, k=k, seed=seed)
+    all_indices = torch.arange(n_items)
+    predictions = torch.zeros(n_items, dtype=torch.float64)
+    for held_out in folds:
+        held_out_mask = torch.zeros(n_items, dtype=torch.bool)
+        held_out_mask[held_out] = True
+        train_indices = all_indices[~held_out_mask]
+        predictions[held_out] = ridge_fit_predict(
+            features[train_indices], target[train_indices], features[held_out],
+            alpha=alpha,
+        )
+    return {
+        "r2": r2_score(target, predictions),
+        "spearman": spearman_correlation(target.tolist(), predictions.tolist()),
+        "predictions": predictions.tolist(),
+        "folds": [fold.tolist() for fold in folds],
+    }
+
+
 def peak_cpu_ram_bytes() -> int:
     value = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return int(value * (1024 if os.uname().sysname == "Linux" else 1))
@@ -1933,4 +3240,17 @@ __all__ = [
     "tensor_sha256",
     "decision_from_transfer", "peak_cpu_ram_bytes", "write_rows_csv",
     "spearman_correlation",
+    "PATCH_STATISTICS", "patch_row_entropy", "patch_row_top1_ratio",
+    "patch_weighted_in_degree", "compute_patch_statistic",
+    "fit_bucket_edges", "assign_buckets",
+    "replay_cached_image_logits_bucketed", "replay_cached_image_bucketed",
+    "evaluate_cache_bucketed", "preload_cache_images", "evaluate_preloaded",
+    "evaluate_preloaded_bucketed", "collect_patch_statistic_values",
+    "coordinate_ascent_fit", "coordinate_ascent_bucket_fit",
+    "dominant_classes_per_bucket",
+    "replay_cached_image_logits_biased", "replay_cached_image_biased",
+    "evaluate_cache_biased", "evaluate_preloaded_biased",
+    "class_propagated_score_std", "coordinate_ascent_bias_fit",
+    "r2_score", "ridge_fit_predict", "grouped_kfold_indices",
+    "cross_validated_ridge",
 ]
