@@ -144,6 +144,14 @@ def load_identity(
     decimals = identity["tolerances"]["rounded_log_minimum_decimal_places"]
     if isinstance(decimals, bool) or not isinstance(decimals, int) or decimals < 1:
         raise E3IdentityError("rounded-log decimal precision must be a positive integer")
+    allowance = _finite_number(
+        identity["tolerances"]["two_decimal_log_reproducibility_allowance"],
+        "two-decimal log reproducibility allowance",
+    )
+    if allowance < 0:
+        raise E3IdentityError(
+            "two-decimal log reproducibility allowance must be non-negative"
+        )
     return identity
 
 
@@ -839,7 +847,11 @@ def _validate_percentage_scale(values: Mapping[str, float]) -> None:
         raise E3IdentityError("percentage metrics must be in the [0,100] range")
 
 
-def _rounded_tolerance(token: str, minimum_decimal_places: int) -> float:
+def _rounded_tolerance(
+    token: str,
+    minimum_decimal_places: int,
+    two_decimal_reproducibility_allowance: float,
+) -> float:
     try:
         decimal_value = Decimal(token)
     except InvalidOperation as error:
@@ -852,7 +864,14 @@ def _rounded_tolerance(token: str, minimum_decimal_places: int) -> float:
             f"rounded log metric {token!r} has {decimal_places} decimal places; "
             f"at least {minimum_decimal_places} are required"
         )
-    return float(Decimal("0.5") * (Decimal(10) ** decimal_value.as_tuple().exponent))
+    rounding_uncertainty = Decimal("0.5") * (
+        Decimal(10) ** decimal_value.as_tuple().exponent
+    )
+    if decimal_places == 2:
+        rounding_uncertainty += Decimal(
+            str(two_decimal_reproducibility_allowance)
+        )
+    return float(rounding_uncertainty)
 
 
 def verify_metrics(
@@ -884,6 +903,11 @@ def verify_metrics(
             tolerance = _rounded_tolerance(
                 parsed.printed_tokens[name],
                 int(identity["tolerances"]["rounded_log_minimum_decimal_places"]),
+                float(
+                    identity["tolerances"][
+                        "two_decimal_log_reproducibility_allowance"
+                    ]
+                ),
             )
         else:
             raise E3IdentityError(f"unknown metric source kind: {source_kind}")

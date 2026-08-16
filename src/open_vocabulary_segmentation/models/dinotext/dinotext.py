@@ -1,4 +1,5 @@
 import os
+from dataclasses import dataclass
 from math import sqrt
 import yaml
 
@@ -24,6 +25,104 @@ from src.hooks import average_text_tokens, get_vit_out, feats
 from src.local_weights import DEFAULT_WEIGHT_DIR, load_local_clip, load_local_vision_backbone, load_state_dict_from_local_file, resolve_weight_path
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+@dataclass(frozen=True)
+class E3PatchSnapshot:
+    """Ownership-isolated E3 patch state for read-only consumers.
+
+    PyTorch tensors have no general read-only storage flag.  Immutability here
+    means that the container fields cannot be rebound and that both tensors own
+    detached, independent storage.  Consumers must still treat the tensor
+    contents as read-only.
+    """
+
+    unary_scores: torch.Tensor
+    dino_features: torch.Tensor
+    grid_hw: tuple[int, int]
+
+
+def _build_e3_patch_snapshot(simmap, dino_features, grid_hw):
+    """Validate and copy patch-level E3 state into independent storage."""
+    if simmap.ndim != 4:
+        raise ValueError(
+            "E3 snapshot scores must have shape [B, C, H, W], but received "
+            f"{tuple(simmap.shape)}"
+        )
+    if dino_features.ndim != 3:
+        raise ValueError(
+            "E3 snapshot DINO features must have shape [B, N, D], but received "
+            f"{tuple(dino_features.shape)}"
+        )
+    if (
+        not isinstance(grid_hw, tuple)
+        or len(grid_hw) != 2
+        or any(type(value) is not int for value in grid_hw)
+    ):
+        raise ValueError(
+            "E3 snapshot grid_hw must be a pair of integers, got "
+            f"{grid_hw!r}"
+        )
+
+    batch_size, num_classes, grid_h, grid_w = simmap.shape
+    feature_batch, num_patches, embed_dim = dino_features.shape
+    if batch_size <= 0 or num_classes <= 0:
+        raise ValueError(
+            "E3 snapshot scores require non-empty batch and class dimensions"
+        )
+    if feature_batch <= 0 or num_patches <= 0 or embed_dim <= 0:
+        raise ValueError(
+            "E3 snapshot features require non-empty batch, patch, and "
+            "embedding dimensions"
+        )
+    if grid_h <= 0 or grid_w <= 0:
+        raise ValueError(
+            "E3 snapshot patch grid must be non-empty, got "
+            f"{(grid_h, grid_w)}"
+        )
+    if grid_hw != (grid_h, grid_w):
+        raise ValueError(
+            "E3 snapshot grid metadata does not match score geometry: "
+            f"grid_hw={grid_hw}, scores={(grid_h, grid_w)}"
+        )
+    if batch_size != feature_batch:
+        raise ValueError(
+            "E3 snapshot batch-size mismatch: "
+            f"scores={batch_size}, features={feature_batch}"
+        )
+    if grid_h * grid_w != num_patches:
+        raise ValueError(
+            "E3 snapshot patch-count mismatch: "
+            f"grid={(grid_h, grid_w)} contains {grid_h * grid_w} patches, "
+            f"features contain {num_patches}"
+        )
+    if not torch.isfinite(simmap).all():
+        raise ValueError("E3 snapshot scores must be finite")
+    if not torch.isfinite(dino_features).all():
+        raise ValueError("E3 snapshot DINO features must be finite")
+    if torch.any(dino_features.norm(dim=-1) < 1e-6):
+        raise ValueError(
+            "E3 snapshot DINO features must have non-zero L2 norm"
+        )
+
+    unary_scores = (
+        simmap.permute(0, 2, 3, 1)
+        .reshape(batch_size, num_patches, num_classes)
+        .detach()
+        .clone()
+        .contiguous()
+    )
+    normalized_features = (
+        us.normalize(dino_features.detach(), dim=-1).clone().contiguous()
+    )
+    if not torch.isfinite(normalized_features).all():
+        raise ValueError("E3 snapshot normalized DINO features must be finite")
+
+    return E3PatchSnapshot(
+        unary_scores=unary_scores,
+        dino_features=normalized_features,
+        grid_hw=grid_hw,
+    )
 
 
 @MODELS.register_module()
@@ -306,6 +405,32 @@ class DINOText(nn.Module):
         Returns:
             softmask [B, N, H, W]: softmasks for each text embeddings
         """
+        return self._generate_masks(
+            image,
+            text_emb,
+            apply_pamr=apply_pamr,
+            lambda_bg=lambda_bg,
+            return_patch_snapshot=False,
+        )
+
+    @torch.no_grad()
+    def generate_masks_with_patch_snapshot(
+            self, image, text_emb, apply_pamr=False, lambda_bg=0.2,
+            # kp_w=0.3,
+    ):
+        """Generate masks and an ownership-isolated E3 patch snapshot."""
+        return self._generate_masks(
+            image,
+            text_emb,
+            apply_pamr=apply_pamr,
+            lambda_bg=lambda_bg,
+            return_patch_snapshot=True,
+        )
+
+    def _generate_masks(
+            self, image, text_emb, apply_pamr, lambda_bg,
+            return_patch_snapshot,
+    ):
 
         H, W = image.shape[2:]  # original image shape
 
@@ -326,7 +451,9 @@ class DINOText(nn.Module):
         elif 'sam' in self.model_name:
             self.model.forward_features(img_preprocessed)
             image_feat = feats['vit_out'].reshape(feats['vit_out'].shape[0], feats['vit_out'].shape[1]**2, feats['vit_out'].shape[-1]) # BS x N_PATCHES x EMBED_DIM
-              
+
+        if return_patch_snapshot:
+            dino_patch_features = image_feat
         batch_size, num_tokens, embed_dim = image_feat.shape
         if type(self.proj) == VisualProjectionLayer:
             image_feat = self.proj.project_dino(image_feat.float())
@@ -334,11 +461,23 @@ class DINOText(nn.Module):
             image_feat = self.proj.project_visual(image_feat.float())
         b, np, c = image_feat.shape
         np_h = np_w = int(sqrt(np))
+        if return_patch_snapshot and np_h * np_w != np:
+            raise ValueError(
+                "E3 snapshot requires a square patch grid, but received "
+                f"{np} patch tokens"
+            )
         image_feat = image_feat.reshape(b, np_h, np_w, c).permute(0, 3, 1, 2)
         
         self_attn, self_attn_maps = self.process_self_attention(self.feats['self_attn'], batch_size, num_tokens + self.num_global_tokens, self.num_attn_heads, embed_dim, self.scale, self.num_global_tokens, ret_self_attn_maps=True)
         mask, simmap = self.masker.forward_seg(image_feat, text_emb, hard=False)  # [B, N, H', W']
-        
+
+        if return_patch_snapshot:
+            snapshot = _build_e3_patch_snapshot(
+                simmap,
+                dino_patch_features,
+                (simmap.shape[-2], simmap.shape[-1]),
+            )
+
         if self.with_bg_clean:
             mask = self.similarity_assignment_weighted(mask, image_feat, self_attn_maps, text_emb, lambda_bg)
 
@@ -351,6 +490,8 @@ class DINOText(nn.Module):
 
         assert mask.shape[2] == H and mask.shape[3] == W, f"shape mismatch: ({H}, {W}) / {mask.shape}"
 
+        if return_patch_snapshot:
+            return mask, simmap, snapshot
         return mask, simmap
     
     def similarity_assignment_weighted(self, mask, image_feat, self_attn_maps, text_emb, lambda_bg=0.2):

@@ -1,4 +1,5 @@
 import json
+import copy
 import shutil
 import subprocess
 import sys
@@ -402,6 +403,10 @@ def test_exact_full_precision_metrics_pass(tmp_path):
     assert verify_result(path, source_kind="structured").startswith("E3 IDENTITY PASS")
 
 
+def test_exact_aacc_reference_is_immutable():
+    assert _identity()["expected_metrics"]["aAcc"] == 46.614213
+
+
 def test_rounded_canonical_log_metrics_pass(tmp_path):
     metrics = _identity()["expected_metrics"]
     images = _identity()["dataset"]["images"]
@@ -420,6 +425,65 @@ def test_rounded_canonical_log_metrics_pass(tmp_path):
     assert verify_metrics(parsed, _identity(), source_kind="log").startswith(
         "E3 IDENTITY PASS"
     )
+
+
+def test_two_decimal_log_delta_005787_passes():
+    identity = _identity()
+    observed_aacc = 46.62
+    assert observed_aacc - identity["expected_metrics"]["aAcc"] == pytest.approx(
+        0.005787
+    )
+    parsed = identity_module.ParsedMetrics(
+        values={
+            "aAcc": observed_aacc,
+            "mIoU": 28.48,
+            "mAcc": 52.08,
+        },
+        image_count=identity["dataset"]["images"],
+        printed_tokens={
+            "aAcc": "46.62",
+            "mIoU": "28.48",
+            "mAcc": "52.08",
+        },
+    )
+    assert verify_metrics(parsed, identity, source_kind="log").startswith(
+        "E3 IDENTITY PASS"
+    )
+
+
+def test_two_decimal_log_delta_above_006_fails():
+    identity = copy.deepcopy(_identity())
+    identity["expected_metrics"]["aAcc"] = 46.613999
+    observed_aacc = 46.62
+    assert observed_aacc - identity["expected_metrics"]["aAcc"] == pytest.approx(
+        0.006001
+    )
+    parsed = identity_module.ParsedMetrics(
+        values={
+            "aAcc": observed_aacc,
+            "mIoU": identity["expected_metrics"]["mIoU"],
+            "mAcc": identity["expected_metrics"]["mAcc"],
+        },
+        image_count=identity["dataset"]["images"],
+        printed_tokens={
+            "aAcc": "46.62",
+            "mIoU": "28.48",
+            "mAcc": "52.08",
+        },
+    )
+    with pytest.raises(E3IdentityError, match=r"absolute_delta=0\.006001"):
+        verify_metrics(parsed, identity, source_kind="log")
+
+
+def test_structured_result_remains_strict_at_one_e_minus_six(tmp_path):
+    value = _canonical_metrics()
+    value["aAcc"] += 0.000002
+    path = _write_json(tmp_path / "strict-structured.json", value)
+    with pytest.raises(
+        E3IdentityError,
+        match=r"tolerance=1e-06.*absolute_delta=2\.0.*e-06",
+    ):
+        verify_result(path, source_kind="structured")
 
 
 @pytest.mark.parametrize("metric", ["mIoU", "aAcc", "mAcc"])

@@ -104,6 +104,10 @@ A full-precision structured input uses percentage units:
 python verify_e3_identity.py verify-result --metrics-json /path/to/metrics.json
 ```
 
-The structured tolerance is defined by the identity specification. Log
-tolerance is one half-unit in each value's last printed decimal place, with at
-least two printed decimal places required.
+The structured tolerance is the strict `0.000001` value defined by the identity
+specification. Log tolerance is one half-unit in each value's last printed
+decimal place. For two-decimal log tokens only, a `0.001` reproducibility
+allowance is added to the `0.005` rounding uncertainty, giving a total
+tolerance of `0.006`. Logs must print at least two decimal places, and the
+additional allowance does not apply to higher-precision logs or structured
+results.

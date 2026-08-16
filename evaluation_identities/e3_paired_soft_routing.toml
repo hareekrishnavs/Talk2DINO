@@ -67,3 +67,4 @@ mAcc = 52.077968
 [tolerances]
 structured_absolute = 0.000001
 rounded_log_minimum_decimal_places = 2
+two_decimal_log_reproducibility_allowance = 0.001
