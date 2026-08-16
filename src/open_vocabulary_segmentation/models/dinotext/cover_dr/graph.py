@@ -225,6 +225,41 @@ class DirectedTopKGraph:
             return (weights * gathered).sum(dim=1)
         return (weights.unsqueeze(-1) * gathered).sum(dim=1)
 
+    def transpose_matmul(self, rhs: torch.Tensor) -> torch.Tensor:
+        """Compute ``A.T @ rhs`` without materializing a dense transpose."""
+        if not isinstance(rhs, torch.Tensor):
+            raise TypeError("graph transpose matmul RHS must be a torch.Tensor")
+        if rhs.ndim not in (1, 2):
+            raise ValueError(
+                "graph transpose matmul RHS must have shape [N] or [N, R], got "
+                f"{tuple(rhs.shape)}"
+            )
+        if rhs.shape[0] != self.num_nodes:
+            raise ValueError(
+                "graph transpose matmul node mismatch: "
+                f"graph={self.num_nodes}, rhs={rhs.shape[0]}"
+            )
+        if rhs.device != self.transition_weights.device:
+            raise ValueError(
+                "graph and transpose matmul RHS must be on the same device"
+            )
+        if not rhs.is_floating_point():
+            raise TypeError("graph transpose matmul RHS must be floating point")
+
+        destinations = self.neighbor_indices.reshape(-1)
+        weights = self.transition_weights.to(dtype=rhs.dtype)
+        if rhs.ndim == 1:
+            contributions = (weights * rhs[:, None]).reshape(-1)
+            return torch.zeros_like(rhs).index_add_(
+                0, destinations, contributions
+            )
+        contributions = (weights[:, :, None] * rhs[:, None, :]).reshape(
+            -1, rhs.shape[1]
+        )
+        return torch.zeros_like(rhs).index_add_(
+            0, destinations, contributions
+        )
+
     def to_dense(self) -> torch.Tensor:
         """Materialize ``[N,N]`` adjacency for diagnostics and tests only."""
         dense = torch.zeros(
