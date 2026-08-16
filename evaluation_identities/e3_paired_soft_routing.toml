@@ -1,0 +1,69 @@
+format_version = "talk2dino-e3-evaluation-identity-v1"
+identity_name = "e3-paired-soft-routing"
+base_commit = "9f314dc"
+expected_branch_ancestry = "e3-paired-soft-routing"
+seed = 42
+
+[dataset]
+name = "COCO-Stuff 164k validation"
+task = "coco_stuff"
+dataset_type = "COCOStuffDataset"
+class_metadata_distribution = "mmsegmentation"
+class_metadata_path = "mmseg/datasets/coco_stuff.py"
+images = 5000
+classes = 171
+background_class = false
+config_path = "src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/stuff.py"
+configured_root = "./data/coco_stuff164k"
+image_dir = "images/val2017"
+annotation_dir = "annotations/val2017"
+
+[model]
+type = "DINOText"
+name = "dinov2_vitb14_reg"
+constructor_path = "src/open_vocabulary_segmentation/models/dinotext/dinotext.py"
+constructor_class = "DINOText"
+resize_dimension = 448
+clip_model_name = "ViT-B/16"
+backbone_checkpoint_name = "dinov2_vitb14_reg4_pretrain.pth"
+clip_checkpoint_name = "ViT-B-16.pt"
+
+[model.flags]
+avg_self_attn_token = false
+disentangled_self_attn_token = true
+pre_trained = true
+is_eval = true
+use_avg_text_token = false
+keep_cls = false
+keep_end_seq = false
+with_bg_clean = false
+
+[projection]
+class = "vitb_mlp_infonce_paired_soft_routing_tau010"
+name = "vitb_mlp_infonce_paired_soft_routing_tau010"
+model = "ProjectionLayer"
+alignment_strategy = "paired_soft_routing"
+routing_temperature = 0.10
+checkpoint_loading_required = true
+config_path = "configs/vitb_mlp_infonce_paired_soft_routing_tau010.yaml"
+checkpoint_path = "weights/vitb_mlp_infonce_paired_soft_routing_tau010.pth"
+
+[evaluation]
+config_path = "src/open_vocabulary_segmentation/configs/stuff/dinotext_stuff_vitb_mlp_infonce_paired_soft_routing_tau010.yml"
+base_config_path = "src/open_vocabulary_segmentation/configs/stuff/eval_stuff.yml"
+mode = "slide"
+crop = [448, 448]
+stride = [224, 224]
+template = "sub_imagenet_template"
+pamr = false
+diffusion = false
+rwr = false
+
+[expected_metrics]
+aAcc = 46.614213
+mIoU = 28.480169
+mAcc = 52.077968
+
+[tolerances]
+structured_absolute = 0.000001
+rounded_log_minimum_decimal_places = 2
