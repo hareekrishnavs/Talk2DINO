@@ -478,10 +478,21 @@ def _load_segmentation_module():
     models.__path__ = []
     dinotext = types.ModuleType("models.dinotext")
     dinotext.__path__ = []
-    previous = {
-        name: sys.modules.get(name)
-        for name in ("mmcv", "utils", "models", "models.dinotext", "models.dinotext.cover_dr")
-    }
+    # dinotext_seg.py imports its sliding-window geometry helper with a
+    # relative import, so it needs a real package context (pointing at the
+    # actual directory on disk) to resolve "from .sliding_window_geometry
+    # import ...".
+    path = ROOT / "src/open_vocabulary_segmentation/segmentation/evaluation/dinotext_seg.py"
+    segmentation = types.ModuleType("segmentation")
+    segmentation.__path__ = [str(path.parent.parent)]
+    evaluation = types.ModuleType("segmentation.evaluation")
+    evaluation.__path__ = [str(path.parent)]
+    module_names = (
+        "mmcv", "utils", "models", "models.dinotext", "models.dinotext.cover_dr",
+        "segmentation", "segmentation.evaluation",
+        "segmentation.evaluation.sliding_window_geometry",
+    )
+    previous = {name: sys.modules.get(name) for name in module_names}
     sys.modules.update(
         {
             "mmcv": mmcv,
@@ -489,16 +500,21 @@ def _load_segmentation_module():
             "models": models,
             "models.dinotext": dinotext,
             "models.dinotext.cover_dr": cover_dr,
+            "segmentation": segmentation,
+            "segmentation.evaluation": evaluation,
         }
     )
-    path = ROOT / "src/open_vocabulary_segmentation/segmentation/evaluation/dinotext_seg.py"
+    sys.modules.pop("segmentation.evaluation.sliding_window_geometry", None)
     try:
-        spec = importlib.util.spec_from_file_location("rwr_seg_under_test", path)
+        spec = importlib.util.spec_from_file_location(
+            "segmentation.evaluation.dinotext_seg", path
+        )
         module = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = module
         spec.loader.exec_module(module)
         return module
     finally:
+        sys.modules.pop("segmentation.evaluation.dinotext_seg", None)
         for name, value in previous.items():
             if value is None:
                 sys.modules.pop(name, None)

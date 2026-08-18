@@ -10,6 +10,8 @@ from models.dinotext.cover_dr import (
     apply_rwr_to_e3_snapshot,
 )
 
+from .sliding_window_geometry import SlidingWindowPlan, SpatialSize
+
 
 class DINOTextSegInference(nn.Module):
     def __init__(
@@ -123,26 +125,29 @@ class DINOTextSegInference(nn.Module):
         h_stride, w_stride = self.test_cfg.stride
         h_crop, w_crop = self.test_cfg.crop_size
         batch_size, _, h_img, w_img = img.shape
-        h_grids = max(h_img - h_crop + h_stride - 1, 0) // h_stride + 1
-        w_grids = max(w_img - w_crop + w_stride - 1, 0) // w_stride + 1
+        plan = SlidingWindowPlan.build(
+            image_size=SpatialSize(h_img, w_img),
+            crop_size=SpatialSize(h_crop, w_crop),
+            stride=SpatialSize(h_stride, w_stride),
+        )
         preds = img.new_zeros((batch_size, self.num_classes, h_img, w_img))
         count_mat = img.new_zeros((batch_size, 1, h_img, w_img))
 
-        for h_idx in range(h_grids):
-            for w_idx in range(w_grids):
-                y1 = h_idx * h_stride
-                x1 = w_idx * w_stride
-                y2 = min(y1 + h_crop, h_img)
-                x2 = min(x1 + w_crop, w_img)
-                y1 = max(y2 - h_crop, 0)
-                x1 = max(x2 - w_crop, 0)
-                crop = img[:, :, y1:y2, x1:x2]
-                crop_logits = self.encode_decode(crop, img_meta)
-                preds += F.pad(
-                    crop_logits,
-                    (x1, preds.shape[3] - x2, y1, preds.shape[2] - y2),
-                )
-                count_mat[:, :, y1:y2, x1:x2] += 1
+        for window in plan.windows:
+            crop_rows, crop_cols = window.crop_slice
+            crop = img[:, :, crop_rows, crop_cols]
+            crop_logits = self.encode_decode(crop, img_meta)
+            accum_rows, accum_cols = window.accumulation_slice
+            preds += F.pad(
+                crop_logits,
+                (
+                    accum_cols.start,
+                    preds.shape[3] - accum_cols.stop,
+                    accum_rows.start,
+                    preds.shape[2] - accum_rows.stop,
+                ),
+            )
+            count_mat[:, :, accum_rows, accum_cols] += 1
 
         if torch.any(count_mat == 0):
             raise RuntimeError("Sliding-window inference left uncovered pixels")
