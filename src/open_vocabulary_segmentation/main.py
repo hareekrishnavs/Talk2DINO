@@ -8,6 +8,7 @@ import argparse
 import datetime
 import json
 import os
+import subprocess
 import tempfile
 import time
 from collections import defaultdict
@@ -149,7 +150,10 @@ def train(cfg, args):
             last_sample = len_dataset
 
         dataset = Subset(dataset, range(first_sample, last_sample))
-        loader = build_seg_dataloader(dataset)
+        loader = build_seg_dataloader(
+            dataset,
+            num_workers=cfg.data.num_workers,
+        )
         val_loaders[key] = loader
 
     logger = get_logger()
@@ -404,6 +408,7 @@ def evaluate(cfg, model, val_loaders):
 @torch.no_grad()
 def validate_seg(config, seg_config, data_loader, model):
     logger = get_logger()
+    evaluation_started = time.monotonic()
     if device == "cuda":
         dist.barrier()
 
@@ -448,6 +453,73 @@ def validate_seg(config, seg_config, data_loader, model):
     if device == "cuda":
         dist.broadcast_object_list(metric)
     miou_result = metric[0]["mIoU"] * 100
+
+    if seg_model.rwr_config.enabled and (device == "cpu" or dist.get_rank() == 0):
+        from models.dinotext.cover_dr import build_rwr_structured_record
+        from src.rwr_reproduction_identity import load_identity as load_rwr_identity
+
+        repository = Path(__file__).resolve().parents[2]
+
+        def git_output(*arguments):
+            return subprocess.run(
+                ["git", "-C", str(repository), *arguments],
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            ).stdout.strip()
+
+        source_commit = git_output("rev-parse", "HEAD")
+        source_branch = git_output("branch", "--show-current")
+        source_dirty = bool(
+            git_output("status", "--porcelain", "--untracked-files=normal")
+        )
+        checkpoint_path = str(
+            Path("weights") / f"{config.model.proj_name}.pth"
+        )
+        gpu_model = (
+            torch.cuda.get_device_name(torch.cuda.current_device())
+            if device == "cuda"
+            else "CPU"
+        )
+        trusted_metrics = {}
+        for metric_name in ("aAcc", "mIoU", "mAcc"):
+            metric_value = metric[0][metric_name]
+            if type(metric_value) is float:
+                trusted_metrics[metric_name] = metric_value
+            elif isinstance(metric_value, np.floating):
+                trusted_metrics[metric_name] = float(metric_value)
+            else:
+                raise TypeError(
+                    f"trusted MMSeg metric {metric_name} has unsupported type "
+                    f"{type(metric_value).__name__}"
+                )
+        if type(torch.version.cuda) is not str or not torch.version.cuda:
+            raise RuntimeError("canonical RWR evaluation requires a CUDA build")
+        record = build_rwr_structured_record(
+            config=seg_model.rwr_config,
+            canonical_identity=load_rwr_identity(repo_root=repository),
+            metrics=trusted_metrics,
+            image_count=len(data_loader.dataset),
+            class_count=seg_model.num_classes,
+            crop=tuple(seg_model.test_cfg.crop_size),
+            stride=tuple(seg_model.test_cfg.stride),
+            pamr=seg_model.pamr,
+            background_class=seg_model.with_bg,
+            checkpoint_path=checkpoint_path,
+            source_git_commit=source_commit,
+            source_git_branch=source_branch,
+            source_git_dirty=source_dirty,
+            gpu_model=gpu_model,
+            torch_version=str(torch.__version__),
+            cuda_version=torch.version.cuda,
+            elapsed_seconds=time.monotonic() - evaluation_started,
+            solver_summary=seg_model.rwr_runtime.as_dict(),
+        )
+        logger.info(
+            "TALK2DINO_RWR_RESULT "
+            + json.dumps(record, sort_keys=True, allow_nan=False)
+        )
 
     torch.cuda.empty_cache()
     if device == "cuda":

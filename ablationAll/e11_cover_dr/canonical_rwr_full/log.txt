@@ -1,0 +1,471 @@
+[2026-08-17 17:45:39 default] (main.py 598): INFO Full config saved to /project/6114407/haree/Talk2DINO/ablationAll/e11_cover_dr/canonical_rwr_full/config.json
+[2026-08-17 17:45:39 default] (main.py 604): INFO Environment info:
+------------------------------------------------------------
+sys.platform: linux
+Python: 3.11.5 (main, Sep 18 2023, 12:23:42) [GCC 12.3.1 20230526]
+CUDA available: True
+GPU 0: NVIDIA H100 80GB HBM3
+CUDA_HOME: None
+GCC: gcc (Gentoo 12.3.1_p20230526 p2) 12.3.1 20230526
+PyTorch: 2.12.0
+PyTorch compiling details: PyTorch built with:
+  - GCC 12.3
+  - C++ Version: 202002
+  - Intel(R) MKL-DNN v3.11.2 (Git Hash 03c022d3ffdcee958cfacbe720048e725fdf644c)
+  - OpenMP 201511 (a.k.a. OpenMP 4.5)
+  - LAPACK is enabled (usually provided by MKL)
+  - NNPACK is enabled
+  - CPU capability usage: AVX512
+  - CUDA Runtime 13.2
+  - NVCC architecture flags: -gencode;arch=compute_80,code=sm_80;-gencode;arch=compute_90,code=sm_90;-gencode;arch=compute_100,code=sm_100;-gencode;arch=compute_100,code=compute_100
+  - CuDNN 92.1.1
+  - Build settings: BLAS_INFO=flexi, BUILD_TYPE=Release, COMMIT_SHA=0d62256a2b23365f8e1604297eb23a6545102aa8, CUDA_FLAGS= -DLIBCUDACXX_ENABLE_SIMPLIFIED_COMPLEX_OPERATIONS -Xfatbin -compress-all -DONNX_NAMESPACE=onnx_torch -gencode arch=compute_80,code=sm_80 -gencode arch=compute_90,code=sm_90 -gencode arch=compute_100,code=sm_100 -gencode arch=compute_100,code=compute_100 -Xcudafe --diag_suppress=cc_clobber_ignored,--diag_suppress=field_without_dll_interface,--diag_suppress=base_class_has_different_dll_interface,--diag_suppress=dll_interface_conflict_none_assumed,--diag_suppress=dll_interface_conflict_dllexport_assumed,--diag_suppress=bad_friend_decl --expt-relaxed-constexpr --expt-extended-lambda  -Wno-deprecated-gpu-targets --expt-extended-lambda -DCUB_WRAPPED_NAMESPACE=at_cuda_detail -DDISABLE_CUSPARSE_DEPRECATED -DCUDA_HAS_FP16=1 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -DC10_NODEPRECATED, CUDA_VERSION=13.2, CUDNN_VERSION=9.21.1, CXX_COMPILER=/cvmfs/soft.computecanada.ca/gentoo/2023/x86-64-v3/usr/x86_64-pc-linux-gnu/gcc-bin/12/c++, CXX_FLAGS= -fvisibility-inlines-hidden -DUSE_PTHREADPOOL -DNDEBUG -DUSE_KINETO -DLIBKINETO_NOROCTRACER -DLIBKINETO_NOXPUPTI=ON -DUSE_FBGEMM -DUSE_MSLK -DUSE_PYTORCH_QNNPACK -DUSE_XNNPACK -DSYMBOLICATE_MOBILE_DEBUG_HANDLE -O2 -fPIC -DC10_NODEPRECATED -Wall -Wextra -Werror=return-type -Werror=non-virtual-dtor -Werror=range-loop-construct -Werror=bool-operation -Wnarrowing -Wno-missing-field-initializers -Wno-unknown-pragmas -Wno-unused-parameter -Wno-strict-overflow -Wno-strict-aliasing -Wno-stringop-overflow -Wsuggest-override -Wno-psabi -Wno-error=old-style-cast -faligned-new -Wno-maybe-uninitialized -fno-math-errno -fno-trapping-math -Werror=format -Wno-stringop-overflow, LAPACK_INFO=flexi, PERF_WITH_AVX=1, PERF_WITH_AVX2=1, TORCH_VERSION=2.12.0, USE_CUDA=ON, USE_CUDNN=ON, USE_CUSPARSELT=ON, USE_GFLAGS=OFF, USE_GLOG=OFF, USE_GLOO=ON, USE_MKLDNN=ON, USE_MPI=ON, USE_NCCL=ON, USE_NNPACK=ON, USE_OPENMP=ON, USE_ROCM=OFF, USE_ROCM_KERNEL_ASSERT=OFF, USE_XCCL=OFF, USE_XPU=OFF, 
+
+TorchVision: 0.27.0
+OpenCV: 4.14.0
+MMCV: 1.7.2
+MMCV Compiler: n/a
+MMCV CUDA Compiler: n/a
+------------------------------------------------------------
+
+[2026-08-17 17:45:39 default] (main.py 606): INFO Git hash: ad63303
+[2026-08-17 17:45:39 default] (main.py 609): INFO evaluate:
+  pamr: false
+  bg_thresh: 0.4
+  kp_w: 0.3
+  pred_qual_path: null
+  gt_qual_path: null
+  eval_only: true
+  template: sub_imagenet_template
+  task:
+  - coco_stuff
+  t_voc20: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/t_pascal_voc12_20.py
+  t_context59: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/t_pascal_context59.py
+  voc: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/pascal_voc12.py
+  voc20: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/pascal_voc12_20.py
+  context: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/pascal_context.py
+  context59: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/pascal_context59.py
+  coco_stuff: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/stuff.py
+  coco_object: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/coco.py
+  cityscapes: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/cityscapes.py
+  ade20k: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/ade20k.py
+  save_logits: null
+  eval_freq: 5000
+  rwr:
+    enabled: true
+    identity_path: evaluation_identities/e3_canonical_directed_rwr.toml
+_base_: dinotext_stuff_vitb_mlp_infonce_paired_soft_routing_tau010.yml
+data:
+  batch_size: 256
+  pin_memory: true
+  num_workers: 0
+  seed: ${train.seed}
+  dataset:
+    meta:
+      gcc3m:
+        type: img_txt_pair
+        path: ./data/gcc3m
+        prefix: gcc-train-{000000..00347}.tar
+        length: 2881393
+      gcc12m:
+        type: img_txt_pair
+        path: ./data/gcc12m
+        prefix: cc-{000000..001175}.tar
+        length: 11286526
+    train:
+    - gcc3m
+    - gcc12m
+  img_aug:
+    deit_aug: true
+    img_size: 224
+    img_scale:
+    - 0.08
+    - 1.0
+    interpolation: bilinear
+    color_jitter: 0.4
+    auto_augment: rand-m9-mstd0.5-inc1
+    re_prob: 0.25
+    re_mode: pixel
+    re_count: 1
+  text_aug: null
+train:
+  start_step: 0
+  total_steps: 50000
+  warmup_steps: 20000
+  ust_steps: 0
+  base_lr: 0.0016
+  weight_decay: 0.05
+  min_lr: 4.0e-05
+  clip_grad: 5.0
+  fp16: true
+  fp16_comm: true
+  seed: 42
+  lr_scheduler:
+    name: cosine
+  optimizer:
+    name: adamw
+    eps: 1.0e-08
+    betas:
+    - 0.9
+    - 0.999
+checkpoint:
+  resume: ''
+  save_topk: 0
+  save_all: false
+model_name: default
+output: /project/6114407/haree/Talk2DINO/ablationAll/e11_cover_dr/canonical_rwr_full
+tag: default
+print_freq: 20
+seed: 42
+wandb: false
+model:
+  clip_model_name: ViT-B/16
+  keep_cls: false
+  keep_end_seq: false
+  model_name: dinov2_vitb14_reg
+  proj_class: vitb_mlp_infonce_paired_soft_routing_tau010
+  proj_model: ProjectionLayer
+  proj_name: vitb_mlp_infonce_paired_soft_routing_tau010
+  resize_dim: 448
+  type: DINOText
+  use_avg_text_token: false
+  backbone_weights: /scratch/haree/weights/dinov2_vitb14_reg4_pretrain.pth
+  clip_model_path: /scratch/haree/weights/ViT-B-16.pt
+
+[2026-08-17 17:45:39 default] (main.py 162): INFO Creating model:DINOText/default
+[2026-08-17 17:45:42 default] (main.py 180): INFO number of params: 984577 (1.0M)
+[2026-08-17 17:45:42 default] (main.py 184): INFO GROUP_RANK = 0 | LOCAL_RANK = 0 | RANK = 0 | MASTER_ADDR = g23 | MASTER_PORT = 37335 | ROLE_RANK = 0 | LOCAL_WORLD_SIZE = 1 | WORLD_SIZE = 1 | ROLE_WORLD_SIZE = 1 | TORCHELASTIC_RESTART_COUNT = 0 | TORCHELASTIC_MAX_RESTARTS = 0 | TORCHELASTIC_RUN_ID = b53a7dc8-26d6-4e7c-8e88-9d10a82e43b2
+[2026-08-17 17:45:42 default] (main.py 191): INFO !!! Single-node setting :: skip fp16 compression hook
+[2026-08-17 17:45:42 default] (main.py 393): INFO ### Validation dataset: coco_stuff (Subset)
+[2026-08-17 17:45:43 default] (dinotext_seg.py 74): INFO Building DINOTextSegInference with 171 classes, test_cfg=Config (path: None): {'mode': 'slide', 'stride': (224, 224), 'crop_size': (448, 448)}, with_bg=False, pamr=False, bg_thresh=0.4
+[2026-08-17 22:50:16 default] (main.py 598): INFO Full config saved to /project/6114407/haree/Talk2DINO/ablationAll/e11_cover_dr/canonical_rwr_full/config.json
+[2026-08-17 22:50:16 default] (main.py 604): INFO Environment info:
+------------------------------------------------------------
+sys.platform: linux
+Python: 3.11.5 (main, Sep 18 2023, 12:23:42) [GCC 12.3.1 20230526]
+CUDA available: True
+GPU 0: NVIDIA H100 80GB HBM3
+CUDA_HOME: None
+GCC: gcc (Gentoo 12.3.1_p20230526 p2) 12.3.1 20230526
+PyTorch: 2.12.0
+PyTorch compiling details: PyTorch built with:
+  - GCC 12.3
+  - C++ Version: 202002
+  - Intel(R) MKL-DNN v3.11.2 (Git Hash 03c022d3ffdcee958cfacbe720048e725fdf644c)
+  - OpenMP 201511 (a.k.a. OpenMP 4.5)
+  - LAPACK is enabled (usually provided by MKL)
+  - NNPACK is enabled
+  - CPU capability usage: AVX512
+  - CUDA Runtime 13.2
+  - NVCC architecture flags: -gencode;arch=compute_80,code=sm_80;-gencode;arch=compute_90,code=sm_90;-gencode;arch=compute_100,code=sm_100;-gencode;arch=compute_100,code=compute_100
+  - CuDNN 92.1.1
+  - Build settings: BLAS_INFO=flexi, BUILD_TYPE=Release, COMMIT_SHA=0d62256a2b23365f8e1604297eb23a6545102aa8, CUDA_FLAGS= -DLIBCUDACXX_ENABLE_SIMPLIFIED_COMPLEX_OPERATIONS -Xfatbin -compress-all -DONNX_NAMESPACE=onnx_torch -gencode arch=compute_80,code=sm_80 -gencode arch=compute_90,code=sm_90 -gencode arch=compute_100,code=sm_100 -gencode arch=compute_100,code=compute_100 -Xcudafe --diag_suppress=cc_clobber_ignored,--diag_suppress=field_without_dll_interface,--diag_suppress=base_class_has_different_dll_interface,--diag_suppress=dll_interface_conflict_none_assumed,--diag_suppress=dll_interface_conflict_dllexport_assumed,--diag_suppress=bad_friend_decl --expt-relaxed-constexpr --expt-extended-lambda  -Wno-deprecated-gpu-targets --expt-extended-lambda -DCUB_WRAPPED_NAMESPACE=at_cuda_detail -DDISABLE_CUSPARSE_DEPRECATED -DCUDA_HAS_FP16=1 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -DC10_NODEPRECATED, CUDA_VERSION=13.2, CUDNN_VERSION=9.21.1, CXX_COMPILER=/cvmfs/soft.computecanada.ca/gentoo/2023/x86-64-v3/usr/x86_64-pc-linux-gnu/gcc-bin/12/c++, CXX_FLAGS= -fvisibility-inlines-hidden -DUSE_PTHREADPOOL -DNDEBUG -DUSE_KINETO -DLIBKINETO_NOROCTRACER -DLIBKINETO_NOXPUPTI=ON -DUSE_FBGEMM -DUSE_MSLK -DUSE_PYTORCH_QNNPACK -DUSE_XNNPACK -DSYMBOLICATE_MOBILE_DEBUG_HANDLE -O2 -fPIC -DC10_NODEPRECATED -Wall -Wextra -Werror=return-type -Werror=non-virtual-dtor -Werror=range-loop-construct -Werror=bool-operation -Wnarrowing -Wno-missing-field-initializers -Wno-unknown-pragmas -Wno-unused-parameter -Wno-strict-overflow -Wno-strict-aliasing -Wno-stringop-overflow -Wsuggest-override -Wno-psabi -Wno-error=old-style-cast -faligned-new -Wno-maybe-uninitialized -fno-math-errno -fno-trapping-math -Werror=format -Wno-stringop-overflow, LAPACK_INFO=flexi, PERF_WITH_AVX=1, PERF_WITH_AVX2=1, TORCH_VERSION=2.12.0, USE_CUDA=ON, USE_CUDNN=ON, USE_CUSPARSELT=ON, USE_GFLAGS=OFF, USE_GLOG=OFF, USE_GLOO=ON, USE_MKLDNN=ON, USE_MPI=ON, USE_NCCL=ON, USE_NNPACK=ON, USE_OPENMP=ON, USE_ROCM=OFF, USE_ROCM_KERNEL_ASSERT=OFF, USE_XCCL=OFF, USE_XPU=OFF, 
+
+TorchVision: 0.27.0
+OpenCV: 4.14.0
+MMCV: 1.7.2
+MMCV Compiler: n/a
+MMCV CUDA Compiler: n/a
+------------------------------------------------------------
+
+[2026-08-17 22:50:16 default] (main.py 606): INFO Git hash: ad63303
+[2026-08-17 22:50:16 default] (main.py 609): INFO evaluate:
+  pamr: false
+  bg_thresh: 0.4
+  kp_w: 0.3
+  pred_qual_path: null
+  gt_qual_path: null
+  eval_only: true
+  template: sub_imagenet_template
+  task:
+  - coco_stuff
+  t_voc20: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/t_pascal_voc12_20.py
+  t_context59: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/t_pascal_context59.py
+  voc: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/pascal_voc12.py
+  voc20: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/pascal_voc12_20.py
+  context: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/pascal_context.py
+  context59: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/pascal_context59.py
+  coco_stuff: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/stuff.py
+  coco_object: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/coco.py
+  cityscapes: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/cityscapes.py
+  ade20k: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/ade20k.py
+  save_logits: null
+  eval_freq: 5000
+  rwr:
+    enabled: true
+    identity_path: evaluation_identities/e3_canonical_directed_rwr.toml
+_base_: dinotext_stuff_vitb_mlp_infonce_paired_soft_routing_tau010.yml
+data:
+  batch_size: 256
+  pin_memory: true
+  num_workers: 0
+  seed: ${train.seed}
+  dataset:
+    meta:
+      gcc3m:
+        type: img_txt_pair
+        path: ./data/gcc3m
+        prefix: gcc-train-{000000..00347}.tar
+        length: 2881393
+      gcc12m:
+        type: img_txt_pair
+        path: ./data/gcc12m
+        prefix: cc-{000000..001175}.tar
+        length: 11286526
+    train:
+    - gcc3m
+    - gcc12m
+  img_aug:
+    deit_aug: true
+    img_size: 224
+    img_scale:
+    - 0.08
+    - 1.0
+    interpolation: bilinear
+    color_jitter: 0.4
+    auto_augment: rand-m9-mstd0.5-inc1
+    re_prob: 0.25
+    re_mode: pixel
+    re_count: 1
+  text_aug: null
+train:
+  start_step: 0
+  total_steps: 50000
+  warmup_steps: 20000
+  ust_steps: 0
+  base_lr: 0.0016
+  weight_decay: 0.05
+  min_lr: 4.0e-05
+  clip_grad: 5.0
+  fp16: true
+  fp16_comm: true
+  seed: 42
+  lr_scheduler:
+    name: cosine
+  optimizer:
+    name: adamw
+    eps: 1.0e-08
+    betas:
+    - 0.9
+    - 0.999
+checkpoint:
+  resume: ''
+  save_topk: 0
+  save_all: false
+model_name: default
+output: /project/6114407/haree/Talk2DINO/ablationAll/e11_cover_dr/canonical_rwr_full
+tag: default
+print_freq: 20
+seed: 42
+wandb: false
+model:
+  clip_model_name: ViT-B/16
+  keep_cls: false
+  keep_end_seq: false
+  model_name: dinov2_vitb14_reg
+  proj_class: vitb_mlp_infonce_paired_soft_routing_tau010
+  proj_model: ProjectionLayer
+  proj_name: vitb_mlp_infonce_paired_soft_routing_tau010
+  resize_dim: 448
+  type: DINOText
+  use_avg_text_token: false
+  backbone_weights: /scratch/haree/weights/dinov2_vitb14_reg4_pretrain.pth
+  clip_model_path: /scratch/haree/weights/ViT-B-16.pt
+
+[2026-08-17 22:50:17 default] (main.py 162): INFO Creating model:DINOText/default
+[2026-08-17 22:50:21 default] (main.py 180): INFO number of params: 984577 (1.0M)
+[2026-08-17 22:50:21 default] (main.py 184): INFO GROUP_RANK = 0 | LOCAL_RANK = 0 | RANK = 0 | MASTER_ADDR = g12 | MASTER_PORT = 46255 | ROLE_RANK = 0 | LOCAL_WORLD_SIZE = 1 | WORLD_SIZE = 1 | ROLE_WORLD_SIZE = 1 | TORCHELASTIC_RESTART_COUNT = 0 | TORCHELASTIC_MAX_RESTARTS = 0 | TORCHELASTIC_RUN_ID = d3b31558-6fe2-4653-a17f-8cd5ef7fc252
+[2026-08-17 22:50:21 default] (main.py 191): INFO !!! Single-node setting :: skip fp16 compression hook
+[2026-08-17 22:50:21 default] (main.py 393): INFO ### Validation dataset: coco_stuff (Subset)
+[2026-08-17 22:50:22 default] (dinotext_seg.py 74): INFO Building DINOTextSegInference with 171 classes, test_cfg=Config (path: None): {'mode': 'slide', 'stride': (224, 224), 'crop_size': (448, 448)}, with_bg=False, pamr=False, bg_thresh=0.4
+[2026-08-18 02:43:06 default] (logging.py 102): INFO per class results:
+[2026-08-18 02:43:06 default] (logging.py 102): INFO 
++------------------+-------+-------+
+|      Class       |  IoU  |  Acc  |
++------------------+-------+-------+
+|      person      |  61.2 |  70.0 |
+|     bicycle      | 47.45 | 87.32 |
+|       car        | 49.61 | 73.49 |
+|    motorcycle    | 66.06 | 91.65 |
+|     airplane     | 48.58 | 97.57 |
+|       bus        | 68.89 | 90.96 |
+|      train       | 68.96 | 75.42 |
+|      truck       | 44.33 | 57.26 |
+|       boat       | 51.12 | 77.88 |
+|  traffic light   |  17.3 |  94.3 |
+|   fire hydrant   | 59.84 | 96.12 |
+|    stop sign     | 26.93 | 95.16 |
+|  parking meter   | 27.79 | 89.51 |
+|      bench       | 42.66 |  66.7 |
+|       bird       | 55.24 | 91.87 |
+|       cat        | 77.02 | 96.05 |
+|       dog        | 71.18 | 90.13 |
+|      horse       | 63.04 | 94.43 |
+|      sheep       | 74.59 | 96.03 |
+|       cow        | 75.38 | 94.57 |
+|     elephant     | 80.14 | 96.57 |
+|       bear       | 79.99 | 95.88 |
+|      zebra       | 76.96 | 96.35 |
+|     giraffe      | 67.45 | 93.61 |
+|     backpack     | 14.21 | 72.41 |
+|     umbrella     | 66.88 | 91.05 |
+|     handbag      | 12.62 | 18.09 |
+|       tie        |  2.76 | 73.06 |
+|     suitcase     | 55.13 | 72.34 |
+|     frisbee      | 23.13 | 84.81 |
+|       skis       | 10.69 | 70.62 |
+|    snowboard     |  5.56 | 69.15 |
+|   sports ball    | 10.57 | 65.42 |
+|       kite       | 22.55 | 75.38 |
+|   baseball bat   |  10.1 | 89.93 |
+|  baseball glove  | 10.97 |  92.2 |
+|    skateboard    | 12.01 | 92.99 |
+|    surfboard     | 51.05 | 81.38 |
+|  tennis racket   | 33.47 | 93.64 |
+|      bottle      | 38.26 | 62.56 |
+|    wine glass    | 31.47 | 86.69 |
+|       cup        | 33.24 | 51.85 |
+|       fork       | 22.37 | 86.07 |
+|      knife       | 13.76 | 35.64 |
+|      spoon       | 14.89 | 43.24 |
+|       bowl       |  23.3 | 28.98 |
+|      banana      | 56.09 | 93.53 |
+|      apple       | 51.12 | 70.72 |
+|     sandwich     | 43.78 | 73.21 |
+|      orange      | 58.62 | 72.22 |
+|     broccoli     | 47.01 | 81.71 |
+|      carrot      | 47.53 | 74.45 |
+|     hot dog      | 42.69 | 61.57 |
+|      pizza       | 55.97 | 75.88 |
+|      donut       | 53.92 | 94.42 |
+|       cake       | 50.74 | 73.76 |
+|      chair       | 39.08 | 51.46 |
+|      couch       | 53.05 | 81.49 |
+|   potted plant   | 22.39 |  32.4 |
+|       bed        | 38.09 |  42.9 |
+|   dining table   | 16.06 | 18.93 |
+|      toilet      | 64.77 | 93.17 |
+|        tv        |  42.1 | 64.03 |
+|      laptop      | 60.42 | 86.97 |
+|      mouse       | 53.69 | 68.91 |
+|      remote      |  42.1 | 66.89 |
+|     keyboard     | 55.26 | 76.91 |
+|    cell phone    | 49.62 | 82.58 |
+|    microwave     | 54.25 | 72.12 |
+|       oven       | 41.97 | 75.68 |
+|     toaster      | 21.92 | 84.32 |
+|       sink       | 32.94 | 89.09 |
+|   refrigerator   | 65.74 | 88.32 |
+|       book       | 33.11 | 55.33 |
+|      clock       | 54.42 |  90.3 |
+|       vase       | 39.45 |  54.7 |
+|     scissors     | 65.94 | 86.86 |
+|    teddy bear    | 67.51 | 89.03 |
+|    hair drier    | 11.85 | 98.36 |
+|    toothbrush    |  5.75 | 83.75 |
+|      banner      |  19.1 | 56.46 |
+|     blanket      |  12.2 | 43.27 |
+|      branch      | 14.63 | 37.57 |
+|      bridge      | 29.89 | 63.52 |
+|  building-other  |  37.2 | 53.18 |
+|       bush       | 16.93 | 24.02 |
+|     cabinet      | 26.07 | 29.99 |
+|       cage       |  5.51 |  6.99 |
+|    cardboard     | 30.12 | 36.84 |
+|      carpet      | 31.46 |  41.9 |
+|  ceiling-other   | 28.98 | 63.44 |
+|   ceiling-tile   |  0.03 |  0.12 |
+|      cloth       |  0.6  |  0.8  |
+|     clothes      |  6.6  | 10.92 |
+|      clouds      | 27.04 | 42.44 |
+|     counter      | 12.69 | 41.24 |
+|     cupboard     |  3.09 | 49.55 |
+|     curtain      | 43.85 | 73.16 |
+|    desk-stuff    | 21.24 | 47.36 |
+|       dirt       |  27.2 | 37.88 |
+|    door-stuff    | 26.95 |  65.1 |
+|      fence       | 26.37 | 65.06 |
+|   floor-marble   |  5.44 |  7.2  |
+|   floor-other    | 11.69 | 30.72 |
+|   floor-stone    |  1.44 |  1.99 |
+|    floor-tile    | 24.98 | 37.73 |
+|    floor-wood    | 25.03 | 35.95 |
+|      flower      | 35.92 | 59.82 |
+|       fog        |  6.29 |  7.4  |
+|    food-other    |  5.87 | 28.88 |
+|      fruit       | 28.16 | 56.41 |
+| furniture-other  |  4.27 |  5.52 |
+|      grass       | 29.11 | 36.02 |
+|      gravel      | 12.02 | 14.37 |
+|   ground-other   |  2.0  | 14.64 |
+|       hill       |  6.8  | 26.15 |
+|      house       |  9.26 | 29.94 |
+|      leaves      |  5.54 |  5.86 |
+|      light       | 12.31 | 27.31 |
+|       mat        |  0.29 |  0.68 |
+|      metal       |  2.11 |  2.16 |
+|   mirror-stuff   | 22.46 | 43.08 |
+|       moss       |  0.0  |  0.0  |
+|     mountain     | 34.22 | 74.76 |
+|       mud        |  4.87 |  27.9 |
+|      napkin      |  8.82 | 46.98 |
+|       net        | 20.62 | 38.88 |
+|      paper       | 10.67 | 12.41 |
+|     pavement     | 40.59 | 62.77 |
+|      pillow      |  3.48 | 20.64 |
+|   plant-other    |  8.0  | 10.22 |
+|     plastic      |  4.31 |  4.67 |
+|     platform     |  3.11 |  5.64 |
+|   playingfield   | 45.18 | 79.15 |
+|     railing      |  5.5  | 24.94 |
+|     railroad     | 21.33 | 93.49 |
+|      river       |  28.3 | 58.01 |
+|       road       | 48.12 | 66.72 |
+|       rock       | 38.08 | 52.85 |
+|       roof       | 18.74 | 28.25 |
+|       rug        |  28.6 | 43.54 |
+|      salad       |  4.56 | 65.59 |
+|       sand       | 54.65 | 62.86 |
+|       sea        | 59.23 | 85.41 |
+|      shelf       |  13.4 |  20.8 |
+|    sky-other     | 37.98 | 45.57 |
+|    skyscraper    | 20.94 |  68.6 |
+|       snow       | 68.34 | 84.11 |
+|   solid-other    |  0.0  |  0.0  |
+|      stairs      | 22.97 | 64.33 |
+|      stone       |  6.41 |  6.78 |
+|      straw       |  0.07 |  0.07 |
+| structural-other |  0.08 |  0.12 |
+|      table       |  9.47 | 12.88 |
+|       tent       |  4.52 | 15.22 |
+|  textile-other   |  3.11 |  3.32 |
+|      towel       | 25.43 | 46.18 |
+|       tree       | 31.85 | 33.89 |
+|    vegetable     | 28.32 | 37.22 |
+|    wall-brick    | 26.57 | 33.15 |
+|  wall-concrete   |  3.78 |  3.91 |
+|    wall-other    |  5.37 |  7.69 |
+|    wall-panel    |  0.52 |  0.61 |
+|    wall-stone    | 24.16 | 39.39 |
+|    wall-tile     | 37.42 | 50.14 |
+|    wall-wood     | 13.71 | 15.36 |
+|   water-other    |  12.1 | 20.08 |
+|    waterdrops    |  0.94 | 14.64 |
+|   window-blind   | 11.99 |  72.6 |
+|   window-other   | 33.72 | 55.72 |
+|       wood       | 16.59 | 24.62 |
++------------------+-------+-------+
+[2026-08-18 02:43:06 default] (logging.py 102): INFO Summary:
+[2026-08-18 02:43:06 default] (logging.py 102): INFO 
++-------+-------+-------+
+|  aAcc |  mIoU |  mAcc |
++-------+-------+-------+
+| 48.53 | 29.88 | 54.14 |
++-------+-------+-------+
+[2026-08-18 02:43:06 default] (main.py 519): INFO TALK2DINO_RWR_RESULT {"aAcc": 48.52999746799469, "affinity_power": 3.0, "alpha": 0.98, "background_class": false, "cache_manifest_archived": false, "cache_manifest_attestation_blob_sha256": "a0c020bb7e1ed9684137f5d98836934c25ecd2fc20d45552d36e934c13f5e85b", "cache_manifest_attestation_commit": "fd5d61583671fb4e7bd44eb14e9a112f822039df", "cache_manifest_attestation_path": "ablationAll/e10_adaptive_diffusion/results/global_sweep_ext_converged.json", "cache_manifest_evidence": "committed_attestation", "cache_manifest_sha256": "c4216a8d8b9b8787aba0b3f8c4e99b75ced8d76f2d372ee8725e787800150b10", "cache_source_commit": "06964ad355dd595061831ab47b7599dfddcba429", "checkpoint_path": "weights/vitb_mlp_infonce_paired_soft_routing_tau010.pth", "checkpoint_sha256": "9632117c18613674eeddcb35f86193d37da203a9cbd837cf500c4121b5fa9942", "class_count": 171, "config_path": "src/open_vocabulary_segmentation/configs/stuff/dinotext_stuff_vitb_mlp_infonce_paired_soft_routing_tau010_rwr.yml", "config_sha256": "b07059beb3e48ff553b01020b1dd4dc9eb85512d6641ec78f278451373eddfa7", "crop": [448, 448], "cuda_version": "13.2", "elapsed_seconds": 13965.58069342305, "format_version": "talk2dino-canonical-rwr-result-v2", "gain_over_e3_miou": 1.3998301607666015, "gpu_model": "NVIDIA H100 80GB HBM3", "graph_mode": "directed_topk", "historical_cache_used_by_current_run": false, "identity_name": "e3-canonical-directed-rwr", "image_count": 5000, "mAcc": 54.14000153541565, "mIoU": 29.8799991607666, "metrics_precision": "full", "pamr": false, "rwr_enabled": true, "solver": "cgls", "solver_atol": 1e-07, "solver_max_iterations": 5000, "solver_rtol": 1e-05, "solver_summary": {"converged_window_count": 11075, "maximum_iterations": 1323, "maximum_scaled_residual": 0.9999999616165344, "minimum_iterations": 334, "nonzero_restart_windows": 11075, "total_fallback_rows": 0, "total_iterations": 6166801, "total_residual_replacements": 6091492, "total_restarts": 6091492, "window_count": 11075}, "source_e10_commit": "fd5d61583671fb4e7bd44eb14e9a112f822039df", "source_git_branch": "e11-cover-dr-1", "source_git_commit": "ad63303a9c85ded05783b6973b3239692376b820", "source_git_dirty": true, "stride": [224, 224], "top_k": 12, "torch_version": "2.12.0"}
+[2026-08-18 02:43:06 default] (main.py 397): INFO [coco_stuff] mIoU of 5000 test images: 29.88%
+[2026-08-18 02:43:06 default] (main.py 202): INFO {'val/coco_stuff_miou': np.float32(29.88), 'metrics': [{'aAcc': np.float32(0.48529997), 'mIoU': np.float32(0.2988), 'mAcc': np.float32(0.5414), 'IoU.person': np.float32(0.612), 'IoU.bicycle': np.float32(0.4745), 'IoU.car': np.float32(0.4961), 'IoU.motorcycle': np.float32(0.66059995), 'IoU.airplane': np.float32(0.48580003), 'IoU.bus': np.float32(0.6889), 'IoU.train': np.float32(0.6896), 'IoU.truck': np.float32(0.4433), 'IoU.boat': np.float32(0.5112), 'IoU.traffic light': np.float32(0.173), 'IoU.fire hydrant': np.float32(0.5984), 'IoU.stop sign': np.float32(0.2693), 'IoU.parking meter': np.float32(0.2779), 'IoU.bench': np.float32(0.4266), 'IoU.bird': np.float32(0.5524), 'IoU.cat': np.float32(0.77019995), 'IoU.dog': np.float32(0.7118), 'IoU.horse': np.float32(0.6304), 'IoU.sheep': np.float32(0.7459), 'IoU.cow': np.float32(0.7538), 'IoU.elephant': np.float32(0.8014), 'IoU.bear': np.float32(0.7999), 'IoU.zebra': np.float32(0.7696), 'IoU.giraffe': np.float32(0.6745), 'IoU.backpack': np.float32(0.1421), 'IoU.umbrella': np.float32(0.6688), 'IoU.handbag': np.float32(0.1262), 'IoU.tie': np.float32(0.0276), 'IoU.suitcase': np.float32(0.5513), 'IoU.frisbee': np.float32(0.2313), 'IoU.skis': np.float32(0.1069), 'IoU.snowboard': np.float32(0.0556), 'IoU.sports ball': np.float32(0.10569999), 'IoU.kite': np.float32(0.22549999), 'IoU.baseball bat': np.float32(0.101), 'IoU.baseball glove': np.float32(0.1097), 'IoU.skateboard': np.float32(0.1201), 'IoU.surfboard': np.float32(0.5105), 'IoU.tennis racket': np.float32(0.33470002), 'IoU.bottle': np.float32(0.38259998), 'IoU.wine glass': np.float32(0.3147), 'IoU.cup': np.float32(0.33240002), 'IoU.fork': np.float32(0.2237), 'IoU.knife': np.float32(0.1376), 'IoU.spoon': np.float32(0.1489), 'IoU.bowl': np.float32(0.233), 'IoU.banana': np.float32(0.5609), 'IoU.apple': np.float32(0.5112), 'IoU.sandwich': np.float32(0.4378), 'IoU.orange': np.float32(0.5862), 'IoU.broccoli': np.float32(0.4701), 'IoU.carrot': np.float32(0.47529998), 'IoU.hot dog': np.float32(0.4269), 'IoU.pizza': np.float32(0.5597), 'IoU.donut': np.float32(0.5392), 'IoU.cake': np.float32(0.50740004), 'IoU.chair': np.float32(0.39080003), 'IoU.couch': np.float32(0.5305), 'IoU.potted plant': np.float32(0.22389999), 'IoU.bed': np.float32(0.3809), 'IoU.dining table': np.float32(0.16059999), 'IoU.toilet': np.float32(0.64769995), 'IoU.tv': np.float32(0.42099997), 'IoU.laptop': np.float32(0.6042), 'IoU.mouse': np.float32(0.5369), 'IoU.remote': np.float32(0.42099997), 'IoU.keyboard': np.float32(0.55259997), 'IoU.cell phone': np.float32(0.4962), 'IoU.microwave': np.float32(0.5425), 'IoU.oven': np.float32(0.41970003), 'IoU.toaster': np.float32(0.2192), 'IoU.sink': np.float32(0.32939997), 'IoU.refrigerator': np.float32(0.65739995), 'IoU.book': np.float32(0.33110002), 'IoU.clock': np.float32(0.5442), 'IoU.vase': np.float32(0.39450002), 'IoU.scissors': np.float32(0.65940005), 'IoU.teddy bear': np.float32(0.6751), 'IoU.hair drier': np.float32(0.1185), 'IoU.toothbrush': np.float32(0.0575), 'IoU.banner': np.float32(0.191), 'IoU.blanket': np.float32(0.122), 'IoU.branch': np.float32(0.1463), 'IoU.bridge': np.float32(0.2989), 'IoU.building-other': np.float32(0.372), 'IoU.bush': np.float32(0.1693), 'IoU.cabinet': np.float32(0.2607), 'IoU.cage': np.float32(0.0551), 'IoU.cardboard': np.float32(0.3012), 'IoU.carpet': np.float32(0.3146), 'IoU.ceiling-other': np.float32(0.2898), 'IoU.ceiling-tile': np.float32(0.00029999999), 'IoU.cloth': np.float32(0.006), 'IoU.clothes': np.float32(0.066), 'IoU.clouds': np.float32(0.27040002), 'IoU.counter': np.float32(0.1269), 'IoU.cupboard': np.float32(0.0309), 'IoU.curtain': np.float32(0.4385), 'IoU.desk-stuff': np.float32(0.2124), 'IoU.dirt': np.float32(0.272), 'IoU.door-stuff': np.float32(0.26950002), 'IoU.fence': np.float32(0.2637), 'IoU.floor-marble': np.float32(0.0544), 'IoU.floor-other': np.float32(0.1169), 'IoU.floor-stone': np.float32(0.014400001), 'IoU.floor-tile': np.float32(0.2498), 'IoU.floor-wood': np.float32(0.25030002), 'IoU.flower': np.float32(0.35919997), 'IoU.fog': np.float32(0.0629), 'IoU.food-other': np.float32(0.0587), 'IoU.fruit': np.float32(0.2816), 'IoU.furniture-other': np.float32(0.0427), 'IoU.grass': np.float32(0.2911), 'IoU.gravel': np.float32(0.12020001), 'IoU.ground-other': np.float32(0.02), 'IoU.hill': np.float32(0.068), 'IoU.house': np.float32(0.0926), 'IoU.leaves': np.float32(0.0554), 'IoU.light': np.float32(0.123100005), 'IoU.mat': np.float32(0.0029), 'IoU.metal': np.float32(0.0211), 'IoU.mirror-stuff': np.float32(0.22459999), 'IoU.moss': np.float32(0.0), 'IoU.mountain': np.float32(0.3422), 'IoU.mud': np.float32(0.048699997), 'IoU.napkin': np.float32(0.088199995), 'IoU.net': np.float32(0.2062), 'IoU.paper': np.float32(0.1067), 'IoU.pavement': np.float32(0.4059), 'IoU.pillow': np.float32(0.0348), 'IoU.plant-other': np.float32(0.08), 'IoU.plastic': np.float32(0.0431), 'IoU.platform': np.float32(0.0311), 'IoU.playingfield': np.float32(0.4518), 'IoU.railing': np.float32(0.055), 'IoU.railroad': np.float32(0.2133), 'IoU.river': np.float32(0.283), 'IoU.road': np.float32(0.48119998), 'IoU.rock': np.float32(0.3808), 'IoU.roof': np.float32(0.1874), 'IoU.rug': np.float32(0.286), 'IoU.salad': np.float32(0.0456), 'IoU.sand': np.float32(0.5465), 'IoU.sea': np.float32(0.5923), 'IoU.shelf': np.float32(0.134), 'IoU.sky-other': np.float32(0.3798), 'IoU.skyscraper': np.float32(0.2094), 'IoU.snow': np.float32(0.6834), 'IoU.solid-other': np.float32(0.0), 'IoU.stairs': np.float32(0.2297), 'IoU.stone': np.float32(0.0641), 'IoU.straw': np.float32(0.0007), 'IoU.structural-other': np.float32(0.0008), 'IoU.table': np.float32(0.0947), 'IoU.tent': np.float32(0.0452), 'IoU.textile-other': np.float32(0.0311), 'IoU.towel': np.float32(0.2543), 'IoU.tree': np.float32(0.3185), 'IoU.vegetable': np.float32(0.2832), 'IoU.wall-brick': np.float32(0.26569998), 'IoU.wall-concrete': np.float32(0.0378), 'IoU.wall-other': np.float32(0.0537), 'IoU.wall-panel': np.float32(0.0052), 'IoU.wall-stone': np.float32(0.24159999), 'IoU.wall-tile': np.float32(0.3742), 'IoU.wall-wood': np.float32(0.1371), 'IoU.water-other': np.float32(0.12100001), 'IoU.waterdrops': np.float32(0.0094), 'IoU.window-blind': np.float32(0.119899996), 'IoU.window-other': np.float32(0.33720002), 'IoU.wood': np.float32(0.1659), 'Acc.person': np.float32(0.7), 'Acc.bicycle': np.float32(0.8732), 'Acc.car': np.float32(0.7349), 'Acc.motorcycle': np.float32(0.91650003), 'Acc.airplane': np.float32(0.9757), 'Acc.bus': np.float32(0.9096), 'Acc.train': np.float32(0.7542), 'Acc.truck': np.float32(0.5726), 'Acc.boat': np.float32(0.77879995), 'Acc.traffic light': np.float32(0.943), 'Acc.fire hydrant': np.float32(0.9612), 'Acc.stop sign': np.float32(0.9516), 'Acc.parking meter': np.float32(0.8951), 'Acc.bench': np.float32(0.667), 'Acc.bird': np.float32(0.91870004), 'Acc.cat': np.float32(0.9605), 'Acc.dog': np.float32(0.90129995), 'Acc.horse': np.float32(0.9443), 'Acc.sheep': np.float32(0.96029997), 'Acc.cow': np.float32(0.9457), 'Acc.elephant': np.float32(0.9657), 'Acc.bear': np.float32(0.95879996), 'Acc.zebra': np.float32(0.96349996), 'Acc.giraffe': np.float32(0.9361), 'Acc.backpack': np.float32(0.72410005), 'Acc.umbrella': np.float32(0.91050005), 'Acc.handbag': np.float32(0.18090001), 'Acc.tie': np.float32(0.7306), 'Acc.suitcase': np.float32(0.72339994), 'Acc.frisbee': np.float32(0.84809995), 'Acc.skis': np.float32(0.7062), 'Acc.snowboard': np.float32(0.6915), 'Acc.sports ball': np.float32(0.65419996), 'Acc.kite': np.float32(0.7538), 'Acc.baseball bat': np.float32(0.8993), 'Acc.baseball glove': np.float32(0.922), 'Acc.skateboard': np.float32(0.9299), 'Acc.surfboard': np.float32(0.8138), 'Acc.tennis racket': np.float32(0.9364), 'Acc.bottle': np.float32(0.62560004), 'Acc.wine glass': np.float32(0.8669), 'Acc.cup': np.float32(0.5185), 'Acc.fork': np.float32(0.8607), 'Acc.knife': np.float32(0.35639998), 'Acc.spoon': np.float32(0.43240002), 'Acc.bowl': np.float32(0.2898), 'Acc.banana': np.float32(0.9353), 'Acc.apple': np.float32(0.7072), 'Acc.sandwich': np.float32(0.7321), 'Acc.orange': np.float32(0.72220004), 'Acc.broccoli': np.float32(0.8171), 'Acc.carrot': np.float32(0.7445), 'Acc.hot dog': np.float32(0.6157), 'Acc.pizza': np.float32(0.75879997), 'Acc.donut': np.float32(0.9442), 'Acc.cake': np.float32(0.7376), 'Acc.chair': np.float32(0.5146), 'Acc.couch': np.float32(0.8149), 'Acc.potted plant': np.float32(0.324), 'Acc.bed': np.float32(0.42900002), 'Acc.dining table': np.float32(0.1893), 'Acc.toilet': np.float32(0.9317), 'Acc.tv': np.float32(0.6403), 'Acc.laptop': np.float32(0.8697), 'Acc.mouse': np.float32(0.6891), 'Acc.remote': np.float32(0.6689), 'Acc.keyboard': np.float32(0.7691), 'Acc.cell phone': np.float32(0.8258), 'Acc.microwave': np.float32(0.72120005), 'Acc.oven': np.float32(0.7568), 'Acc.toaster': np.float32(0.84319997), 'Acc.sink': np.float32(0.89089996), 'Acc.refrigerator': np.float32(0.8832), 'Acc.book': np.float32(0.5533), 'Acc.clock': np.float32(0.90300006), 'Acc.vase': np.float32(0.547), 'Acc.scissors': np.float32(0.8686), 'Acc.teddy bear': np.float32(0.8903), 'Acc.hair drier': np.float32(0.9836), 'Acc.toothbrush': np.float32(0.8375), 'Acc.banner': np.float32(0.5646), 'Acc.blanket': np.float32(0.4327), 'Acc.branch': np.float32(0.3757), 'Acc.bridge': np.float32(0.6352), 'Acc.building-other': np.float32(0.53180003), 'Acc.bush': np.float32(0.2402), 'Acc.cabinet': np.float32(0.2999), 'Acc.cage': np.float32(0.0699), 'Acc.cardboard': np.float32(0.3684), 'Acc.carpet': np.float32(0.41900003), 'Acc.ceiling-other': np.float32(0.6344), 'Acc.ceiling-tile': np.float32(0.0011999999), 'Acc.cloth': np.float32(0.008), 'Acc.clothes': np.float32(0.1092), 'Acc.clouds': np.float32(0.42439997), 'Acc.counter': np.float32(0.4124), 'Acc.cupboard': np.float32(0.4955), 'Acc.curtain': np.float32(0.73160005), 'Acc.desk-stuff': np.float32(0.4736), 'Acc.dirt': np.float32(0.3788), 'Acc.door-stuff': np.float32(0.65099996), 'Acc.fence': np.float32(0.65059996), 'Acc.floor-marble': np.float32(0.072), 'Acc.floor-other': np.float32(0.30719998), 'Acc.floor-stone': np.float32(0.0199), 'Acc.floor-tile': np.float32(0.3773), 'Acc.floor-wood': np.float32(0.35950002), 'Acc.flower': np.float32(0.5982), 'Acc.fog': np.float32(0.074), 'Acc.food-other': np.float32(0.2888), 'Acc.fruit': np.float32(0.5641), 'Acc.furniture-other': np.float32(0.0552), 'Acc.grass': np.float32(0.36020002), 'Acc.gravel': np.float32(0.1437), 'Acc.ground-other': np.float32(0.1464), 'Acc.hill': np.float32(0.2615), 'Acc.house': np.float32(0.2994), 'Acc.leaves': np.float32(0.0586), 'Acc.light': np.float32(0.2731), 'Acc.mat': np.float32(0.0068), 'Acc.metal': np.float32(0.0216), 'Acc.mirror-stuff': np.float32(0.43080002), 'Acc.moss': np.float32(0.0), 'Acc.mountain': np.float32(0.7476), 'Acc.mud': np.float32(0.27899998), 'Acc.napkin': np.float32(0.4698), 'Acc.net': np.float32(0.38880002), 'Acc.paper': np.float32(0.1241), 'Acc.pavement': np.float32(0.62770003), 'Acc.pillow': np.float32(0.20639999), 'Acc.plant-other': np.float32(0.1022), 'Acc.plastic': np.float32(0.0467), 'Acc.platform': np.float32(0.056399997), 'Acc.playingfield': np.float32(0.79150003), 'Acc.railing': np.float32(0.2494), 'Acc.railroad': np.float32(0.9349), 'Acc.river': np.float32(0.5801), 'Acc.road': np.float32(0.6672), 'Acc.rock': np.float32(0.52849996), 'Acc.roof': np.float32(0.2825), 'Acc.rug': np.float32(0.4354), 'Acc.salad': np.float32(0.65589994), 'Acc.sand': np.float32(0.6286), 'Acc.sea': np.float32(0.85410005), 'Acc.shelf': np.float32(0.20799999), 'Acc.sky-other': np.float32(0.4557), 'Acc.skyscraper': np.float32(0.686), 'Acc.snow': np.float32(0.8411), 'Acc.solid-other': np.float32(0.0), 'Acc.stairs': np.float32(0.6433), 'Acc.stone': np.float32(0.0678), 'Acc.straw': np.float32(0.0007), 'Acc.structural-other': np.float32(0.0011999999), 'Acc.table': np.float32(0.1288), 'Acc.tent': np.float32(0.1522), 'Acc.textile-other': np.float32(0.0332), 'Acc.towel': np.float32(0.4618), 'Acc.tree': np.float32(0.3389), 'Acc.vegetable': np.float32(0.3722), 'Acc.wall-brick': np.float32(0.33150002), 'Acc.wall-concrete': np.float32(0.039100002), 'Acc.wall-other': np.float32(0.0769), 'Acc.wall-panel': np.float32(0.0061000003), 'Acc.wall-stone': np.float32(0.3939), 'Acc.wall-tile': np.float32(0.5014), 'Acc.wall-wood': np.float32(0.15359999), 'Acc.water-other': np.float32(0.2008), 'Acc.waterdrops': np.float32(0.1464), 'Acc.window-blind': np.float32(0.726), 'Acc.window-other': np.float32(0.5572), 'Acc.wood': np.float32(0.24620001)}], 'val/avg_miou': np.float32(29.88)}
+[2026-08-18 02:43:06 default] (main.py 206): INFO  >> 29.88, 29.88
+[2026-08-18 02:43:06 default] (main.py 207): INFO Experiment dir: /project/6114407/haree/Talk2DINO/ablationAll/e11_cover_dr/canonical_rwr_full
+[2026-08-18 02:43:06 default] (main.py 130): INFO Saved results at segmentation_results/vitb_mlp_infonce_paired_soft_routing_tau010.json
+[2026-08-18 02:43:06 default] (main.py 616): INFO Experiment dir: /project/6114407/haree/Talk2DINO/ablationAll/e11_cover_dr/canonical_rwr_full

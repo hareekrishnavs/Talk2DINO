@@ -427,62 +427,114 @@ class DINOText(nn.Module):
             return_patch_snapshot=True,
         )
 
+    @torch.no_grad()
+    def generate_patch_snapshot(self, image, text_emb):
+        """Return immutable pre-mask patch state and perform no mask transform."""
+        state = self._extract_patch_state(image, text_emb, require_snapshot=True)
+        return state["snapshot"]
+
+    @torch.no_grad()
+    def masks_from_patch_scores(self, patch_scores, grid_hw, output_hw):
+        """Apply the same E3 sigmoid and interpolation used by ``generate_masks``."""
+        if not torch.is_tensor(patch_scores) or patch_scores.ndim != 3:
+            raise ValueError("patch_scores must have shape [B,N,C]")
+        if (
+            not isinstance(grid_hw, tuple)
+            or len(grid_hw) != 2
+            or any(type(value) is not int or value <= 0 for value in grid_hw)
+            or grid_hw[0] * grid_hw[1] != patch_scores.shape[1]
+        ):
+            raise ValueError("patch score count does not match grid_hw")
+        batch, _, classes = patch_scores.shape
+        simmap = patch_scores.reshape(batch, *grid_hw, classes).permute(0, 3, 1, 2)
+        mask = self.masker.mask_from_similarity(
+            simmap, deterministic=True, hard=False
+        )
+        return F.interpolate(
+            mask, tuple(output_hw), mode="bilinear", align_corners=True
+        )
+
+    def _extract_patch_state(self, image, text_emb, require_snapshot):
+        """Compute the immutable raw patch boundary, stopping before sigmoid."""
+        original_hw = tuple(image.shape[2:])
+        batch_size = image.shape[0]
+        rgb_image = image[:, [2, 1, 0], :, :]
+        ori_image = rgb_image.clone()
+        img_preprocessed = self.image_transforms(rgb_image).to(
+            next(self.parameters()).device
+        )
+        if 'dinov2' in self.model_name:
+            raw_image_feat = self.model.forward_features(img_preprocessed)['x_norm_patchtokens']
+        elif 'dinov3' in self.model_name:
+            raw_image_feat = self.model.forward_features(img_preprocessed)[:, 5:, :]
+        elif 'mae' in self.model_name or 'clip' in self.model_name or 'dino' in self.model_name:
+            raw_image_feat = self.model.forward_features(img_preprocessed)[:, 1:, :]
+        elif 'sam' in self.model_name:
+            self.model.forward_features(img_preprocessed)
+            raw_image_feat = feats['vit_out'].reshape(
+                feats['vit_out'].shape[0], feats['vit_out'].shape[1]**2,
+                feats['vit_out'].shape[-1]
+            )
+        else:
+            raise ValueError(f"unsupported model_name {self.model_name!r}")
+
+        batch_size, num_tokens, embed_dim = raw_image_feat.shape
+        image_feat = raw_image_feat
+        if type(self.proj) == VisualProjectionLayer:
+            image_feat = self.proj.project_dino(image_feat.float())
+        if type(self.proj) == DoubleMLP:
+            image_feat = self.proj.project_visual(image_feat.float())
+        b, num_patches, channels = image_feat.shape
+        grid_h = grid_w = int(sqrt(num_patches))
+        if grid_h * grid_w != num_patches:
+            raise ValueError(
+                f"E3 patch boundary requires a square patch grid, got {num_patches} tokens"
+            )
+        image_feat = image_feat.reshape(
+            b, grid_h, grid_w, channels
+        ).permute(0, 3, 1, 2)
+        _self_attn, self_attn_maps = self.process_self_attention(
+            self.feats['self_attn'], batch_size,
+            num_tokens + self.num_global_tokens, self.num_attn_heads,
+            embed_dim, self.scale, self.num_global_tokens,
+            ret_self_attn_maps=True,
+        )
+        simmap = self.masker.raw_similarity(image_feat, text_emb)
+        state = {
+            "simmap": simmap,
+            "image_feat": image_feat,
+            "self_attn_maps": self_attn_maps,
+            "ori_image": ori_image,
+            "original_hw": original_hw,
+        }
+        if require_snapshot:
+            state["snapshot"] = _build_e3_patch_snapshot(
+                simmap, raw_image_feat, (grid_h, grid_w)
+            )
+        return state
+
     def _generate_masks(
             self, image, text_emb, apply_pamr, lambda_bg,
             return_patch_snapshot,
     ):
 
-        H, W = image.shape[2:]  # original image shape
-
-        # padded image size
-        pH, pW = image.shape[2:]
-        batch_size = image.shape[0]
-
-        image = image[:, [2, 1, 0], :, :]  # BGR to RGB
-        ori_image = image.clone()
-        
-        img_preprocessed = self.image_transforms(image).to(next(self.parameters()).device)
-        if 'dinov2' in self.model_name:
-            image_feat = self.model.forward_features(img_preprocessed)['x_norm_patchtokens']
-        elif 'dinov3' in self.model_name:
-            image_feat = self.model.forward_features(img_preprocessed)[:, 5:, :]
-        elif 'mae' in self.model_name or 'clip' in self.model_name or 'dino' in self.model_name:
-            image_feat = self.model.forward_features(img_preprocessed)[:, 1:, :]
-        elif 'sam' in self.model_name:
-            self.model.forward_features(img_preprocessed)
-            image_feat = feats['vit_out'].reshape(feats['vit_out'].shape[0], feats['vit_out'].shape[1]**2, feats['vit_out'].shape[-1]) # BS x N_PATCHES x EMBED_DIM
-
-        if return_patch_snapshot:
-            dino_patch_features = image_feat
-        batch_size, num_tokens, embed_dim = image_feat.shape
-        if type(self.proj) == VisualProjectionLayer:
-            image_feat = self.proj.project_dino(image_feat.float())
-        if type(self.proj) == DoubleMLP:
-            image_feat = self.proj.project_visual(image_feat.float())
-        b, np, c = image_feat.shape
-        np_h = np_w = int(sqrt(np))
-        if return_patch_snapshot and np_h * np_w != np:
-            raise ValueError(
-                "E3 snapshot requires a square patch grid, but received "
-                f"{np} patch tokens"
-            )
-        image_feat = image_feat.reshape(b, np_h, np_w, c).permute(0, 3, 1, 2)
-        
-        self_attn, self_attn_maps = self.process_self_attention(self.feats['self_attn'], batch_size, num_tokens + self.num_global_tokens, self.num_attn_heads, embed_dim, self.scale, self.num_global_tokens, ret_self_attn_maps=True)
-        mask, simmap = self.masker.forward_seg(image_feat, text_emb, hard=False)  # [B, N, H', W']
-
-        if return_patch_snapshot:
-            snapshot = _build_e3_patch_snapshot(
-                simmap,
-                dino_patch_features,
-                (simmap.shape[-2], simmap.shape[-1]),
-            )
+        state = self._extract_patch_state(
+            image, text_emb, require_snapshot=return_patch_snapshot
+        )
+        simmap = state["simmap"]
+        image_feat = state["image_feat"]
+        self_attn_maps = state["self_attn_maps"]
+        ori_image = state["ori_image"]
+        H, W = state["original_hw"]
+        mask = self.masker.mask_from_similarity(
+            simmap, deterministic=True, hard=False
+        )
 
         if self.with_bg_clean:
             mask = self.similarity_assignment_weighted(mask, image_feat, self_attn_maps, text_emb, lambda_bg)
 
         # resize
-        mask = F.interpolate(mask, (pH, pW), mode='bilinear', align_corners=True)  # [B, N, H, W]
+        mask = F.interpolate(mask, (H, W), mode='bilinear', align_corners=True)  # [B, N, H, W]
 
         if apply_pamr:
             for c in range(0, mask.shape[1], 30):
@@ -491,7 +543,7 @@ class DINOText(nn.Module):
         assert mask.shape[2] == H and mask.shape[3] == W, f"shape mismatch: ({H}, {W}) / {mask.shape}"
 
         if return_patch_snapshot:
-            return mask, simmap, snapshot
+            return mask, simmap, state["snapshot"]
         return mask, simmap
     
     def similarity_assignment_weighted(self, mask, image_feat, self_attn_maps, text_emb, lambda_bg=0.2):

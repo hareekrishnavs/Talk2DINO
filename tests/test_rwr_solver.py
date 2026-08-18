@@ -28,6 +28,7 @@ def _load_package():
 
 
 cover_dr = _load_package()
+rwr_module = sys.modules[f"{cover_dr.__name__}.rwr"]
 DirectedTopKGraph = cover_dr.DirectedTopKGraph
 RWRInputError = cover_dr.RWRInputError
 RWRNonConvergenceError = cover_dr.RWRNonConvergenceError
@@ -118,6 +119,35 @@ def _dense_solution(graph, scores, alpha):
     system = torch.eye(graph.num_nodes, dtype=dtype, device=scores.device)
     system = system - alpha * adjacency
     return torch.linalg.solve(system, (1 - alpha) * scores)
+
+
+def _historical_cgls(graph, scores, alpha, *, tolerance=1e-5, max_iter=5000):
+    """Test-only recurrence copied from fd5d615 implicit_solve.py."""
+    operator = SparseRWROperator(graph, alpha)
+    right_hand_side = (1 - alpha) * scores
+    epsilon = torch.finfo(scores.dtype).tiny
+    solution = right_hand_side.clone()
+    residual = right_hand_side - operator.matmul(solution)
+    normal = operator.transpose_matmul(residual)
+    direction = normal.clone()
+    gamma = (normal * normal).sum(dim=0)
+    rhs_norm = right_hand_side.norm(dim=0).clamp_min(epsilon)
+    converged = False
+    iterations = 0
+    for iterations in range(1, max_iter + 1):
+        forward = operator.matmul(direction)
+        denominator = (forward * forward).sum(dim=0).clamp_min(epsilon)
+        step = gamma / denominator
+        solution = solution + step[None, :] * direction
+        residual = residual - step[None, :] * forward
+        if torch.all(residual.norm(dim=0) / rhs_norm < tolerance):
+            converged = True
+            break
+        next_normal = operator.transpose_matmul(residual)
+        next_gamma = (next_normal * next_normal).sum(dim=0)
+        direction = next_normal + direction * (next_gamma / gamma.clamp_min(epsilon))[None, :]
+        gamma = next_gamma
+    return solution, iterations, converged
 
 
 def _scores(dtype=torch.float64, device="cpu"):
@@ -550,6 +580,8 @@ def test_cgls_one_time_in_loop_breakdown_restarts_and_converges(monkeypatch):
     )
     assert result.converged
     assert result.total_restart_count >= 1
+    assert result.work_count > result.iterations
+    assert result.work_count <= result.iterations + result.total_restart_count
     assert dict(result.restart_reason_counts)[
         "updated_normal_residual_vanished"
     ] >= 1
@@ -613,6 +645,39 @@ def test_one_time_nonfinite_iterative_arithmetic_restarts_cleanly(monkeypatch):
     assert dict(result.restart_reason_counts)[
         "non_finite_search_direction_operator_output"
     ] == result.scores.shape[1]
+
+
+def test_max_iter_counts_completed_updates_not_restart_work(monkeypatch):
+    original = SparseRWROperator._matmul_prepared
+    calls = 0
+
+    def one_time_nonfinite_forward(self, value):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            return torch.full_like(value, torch.inf)
+        return original(self, value)
+
+    monkeypatch.setattr(
+        SparseRWROperator,
+        "_matmul_prepared",
+        one_time_nonfinite_forward,
+    )
+    with pytest.raises(RWRNonConvergenceError) as raised:
+        solve_rwr_cgls(
+            _asymmetric_graph(),
+            _scores(torch.float64),
+            alpha=0.8,
+            rtol=0,
+            atol=0,
+            max_iter=1,
+        )
+
+    error = raised.value
+    assert error.iteration == 1
+    assert error.work_count == 2
+    assert error.total_restart_count == _scores().shape[1]
+    assert "completed_iteration_limit=1" in error.detail
 
 
 def test_repeated_recoverable_breakdown_raises_complete_diagnostic(monkeypatch):
@@ -768,6 +833,7 @@ def test_repeated_solves_are_deterministic():
     assert first.absolute_residual_inf == second.absolute_residual_inf
     assert first.maximum_scaled_residual == second.maximum_scaled_residual
     assert first.fixed_point_delta_inf == second.fixed_point_delta_inf
+    assert first.work_count == second.work_count
 
 
 def test_larger_safety_limit_does_not_change_converged_solution():
@@ -840,7 +906,7 @@ def test_solver_does_not_materialize_dense_operators(monkeypatch):
 
 
 @pytest.mark.parametrize("input_dtype", [torch.float32, torch.float16])
-def test_restarted_cgls_converges_on_pinned_difficult_fixture(input_dtype):
+def test_reliable_cgls_converges_on_pinned_difficult_fixture(input_dtype):
     graph, scores = _difficult_directed_fixture(input_dtype)
     promoted_scores = scores.to(torch.float32)
     expected = _dense_solution(graph, promoted_scores.to(torch.float64), 0.98)
@@ -850,16 +916,18 @@ def test_restarted_cgls_converges_on_pinned_difficult_fixture(input_dtype):
     assert result.scores.dtype == torch.float32
     assert result.method == "cgls"
     assert result.maximum_scaled_residual <= 1
-    assert result.total_restart_count > 0
-    assert result.max_restarts_per_rhs > 0
+    # The repaired recurrence preserves conjugacy and reaches this compact
+    # fixture before a reliable replacement is needed.
+    assert result.total_restart_count == 0
+    assert result.max_restarts_per_rhs == 0
     assert result.total_residual_replacement_count == result.total_restart_count
-    assert result.restarts_per_rhs[0] > 0
+    assert result.restarts_per_rhs[0] == 0
     assert result.restarts_per_rhs[1] == 0
     assert result.iterations > result.max_restarts_per_rhs
-    assert result.iterations + result.total_restart_count <= 5000
-    reason_counts = dict(result.restart_reason_counts)
-    assert reason_counts["periodic_residual_replacement"] > 0
-    assert sum(reason_counts.values()) == result.total_restart_count
+    assert result.iterations <= 5000
+    assert result.work_count >= result.iterations
+    assert result.work_count <= result.iterations + result.total_restart_count
+    assert result.restart_reason_counts == ()
     torch.testing.assert_close(
         result.scores.to(torch.float64), expected, rtol=3e-5, atol=3e-5
     )
@@ -906,6 +974,27 @@ def test_pinned_fixture_exposes_old_unrestarted_fp32_recurrence():
     assert bool(torch.any(~torch.isfinite(residual_norm) | (residual_norm > threshold)))
 
 
+def test_repaired_recurrence_and_historical_cgls_pass_true_residual():
+    graph, scores = _difficult_directed_fixture(torch.float32)
+    repaired = solve_rwr_cgls(graph, scores, alpha=0.98)
+    historical, historical_iterations, historical_converged = _historical_cgls(
+        graph, scores, 0.98
+    )
+    expected = _dense_solution(graph, scores.to(torch.float64), 0.98)
+
+    assert historical_converged
+    assert historical_iterations <= 5000
+    for value in (repaired.scores, historical):
+        residual = 0.02 * scores - SparseRWROperator(graph, 0.98).matmul(value)
+        residual_norm = torch.linalg.vector_norm(residual, dim=0)
+        rhs_norm = torch.linalg.vector_norm(0.02 * scores, dim=0)
+        threshold = 1e-7 * math.sqrt(graph.num_nodes) + 1e-5 * rhs_norm
+        assert torch.all(residual_norm <= threshold)
+        torch.testing.assert_close(
+            value.to(torch.float64), expected, rtol=3e-5, atol=3e-5
+        )
+
+
 def test_difficult_fixture_fp64_and_fixed_point_remain_accurate():
     graph, scores = _difficult_directed_fixture(torch.float64)
     expected = _dense_solution(graph, scores, 0.98)
@@ -924,18 +1013,19 @@ def test_difficult_fixture_fp64_and_fixed_point_remain_accurate():
     torch.testing.assert_close(fixed.scores, expected, rtol=2e-7, atol=2e-6)
 
 
-def test_difficult_restarts_are_per_rhs_and_preserve_zero_rhs():
+def test_difficult_per_rhs_convergence_preserves_zero_rhs():
     graph, scores = _difficult_directed_fixture(torch.float32)
     scores[:, -1] = 0
     first = solve_rwr_cgls(graph, scores, alpha=0.98)
     second = solve_rwr_cgls(graph, scores, alpha=0.98)
 
-    assert first.restarts_per_rhs[0] > 0
+    assert first.restarts_per_rhs[0] == 0
     assert first.restarts_per_rhs[1] == 0
     assert first.restarts_per_rhs[-1] == 0
     assert torch.count_nonzero(first.scores[:, -1]) == 0
     assert torch.equal(first.scores, second.scores)
     assert first.iterations == second.iterations
+    assert first.work_count == second.work_count
     assert first.restarts_per_rhs == second.restarts_per_rhs
     assert first.residual_replacements_per_rhs == (
         second.residual_replacements_per_rhs
@@ -985,10 +1075,15 @@ def test_cuda_nontrivial_canonical_directed_restart_smoke():
     )
 
     result = solve_rwr_cgls(graph, scores, alpha=0.98)
+    replay = solve_rwr_cgls(graph, scores, alpha=0.98)
 
     assert result.scores.shape == (num_nodes, classes)
     assert result.scores.device.type == "cuda"
     assert result.maximum_scaled_residual <= 1
+    assert result.certificate_dtype == "float64_quantized_fp32_system"
+    assert result.fp64_certificate_checks >= 2
+    assert torch.equal(result.scores, replay.scores)
+    assert result.fp64_certificate_checks == replay.fp64_certificate_checks
     assert not torch.equal(graph.to_dense(), graph.to_dense().T)
 
 
@@ -1029,6 +1124,237 @@ def test_diagnostics_are_finite_and_nonnegative():
         assert value >= 0
 
 
+def test_sparse_fp64_certificate_detects_fp32_rounding_boundary():
+    graph = _asymmetric_graph()
+    solution = torch.tensor(
+        [-2.3779537677764893, 12.662543296813965,
+         5.293134689331055, -4.801339626312256],
+        dtype=torch.float32,
+    )[:, None]
+    rhs = torch.tensor(
+        [-9.213384628295898, 5.232193470001221,
+         -7.72400426864624, 1.721980094909668],
+        dtype=torch.float32,
+    )[:, None]
+    working = rhs - SparseRWROperator(graph, 0.98).matmul(solution)
+    working_norm = torch.linalg.vector_norm(working, dim=0)
+    certificate = rwr_module._sparse_fp64_residual_certificate(
+        graph,
+        0.98,
+        solution,
+        rhs,
+        rtol=0,
+        atol=8.70288799,
+    )
+
+    assert float(working_norm.item() / (2 * 8.70288799)) <= 1
+    assert certificate.scaled_residual.item() > 1
+    assert certificate.residual.dtype == torch.float64
+    assert certificate.residual.device == solution.device
+
+
+def test_sparse_fp64_certificate_matches_independent_dense_quantized_system():
+    graph = _asymmetric_graph()
+    scores = _scores(torch.float32)
+    result = solve_rwr_cgls(graph, scores, alpha=0.98)
+    rhs = (1 - 0.98) * scores
+    certificate = rwr_module._sparse_fp64_residual_certificate(
+        graph,
+        0.98,
+        result.scores,
+        rhs,
+        columns=torch.tensor([2, 0], dtype=torch.int64),
+        rtol=1e-5,
+        atol=1e-7,
+    )
+    adjacency64 = _independent_dense(graph, torch.float64)
+    system64 = torch.eye(graph.num_nodes, dtype=torch.float64) - 0.98 * adjacency64
+    expected = rhs[:, [2, 0]].to(torch.float64) - system64 @ result.scores[
+        :, [2, 0]
+    ].to(torch.float64)
+    expected_norm = torch.linalg.vector_norm(expected, dim=0)
+    expected_threshold = 1e-7 * math.sqrt(graph.num_nodes) + 1e-5 * torch.linalg.vector_norm(
+        rhs[:, [2, 0]].to(torch.float64), dim=0
+    )
+
+    torch.testing.assert_close(certificate.residual, expected, rtol=0, atol=1e-15)
+    torch.testing.assert_close(
+        certificate.scaled_residual,
+        expected_norm / expected_threshold,
+        rtol=1e-8,
+        atol=1e-12,
+    )
+
+
+def test_fp64_rejected_candidate_restarts_only_rejected_rhs(monkeypatch):
+    original = rwr_module._sparse_fp64_residual_certificate
+    candidate_calls = []
+    injected = False
+
+    def reject_one_candidate(*args, **kwargs):
+        nonlocal injected
+        certificate = original(*args, **kwargs)
+        columns = certificate.columns.tolist()
+        candidate_calls.append(columns)
+        if kwargs.get("columns") is not None and not injected and columns:
+            injected = True
+            scaled = certificate.scaled_residual.clone()
+            scaled[0] = 1.01
+            residual = certificate.residual.clone()
+            residual[:, 0] *= 1.02
+            return rwr_module._FP64ResidualCertificate(
+                certificate.columns,
+                residual,
+                certificate.residual_norm,
+                certificate.threshold,
+                scaled,
+            )
+        return certificate
+
+    monkeypatch.setattr(
+        rwr_module, "_sparse_fp64_residual_certificate", reject_one_candidate
+    )
+    result = solve_rwr_cgls(
+        _asymmetric_graph(), _scores(torch.float32), alpha=0.8
+    )
+
+    assert injected
+    assert result.converged
+    assert result.fp64_certificate_rejections == 1
+    assert result.fp64_certificate_restart_count == 1
+    assert result.restarts_per_rhs[0] == 1
+    assert result.restarts_per_rhs[1:] == (0, 0)
+    assert dict(result.restart_reason_counts)["fp64_certificate_rejection"] == 1
+    assert result.fp64_certificate_work == result.fp64_certificate_checks
+    assert result.fp64_certificate_checks == len(candidate_calls)
+    assert candidate_calls[-1] == [0, 1, 2]
+    for certified_column in (1, 2):
+        assert sum(certified_column in call for call in candidate_calls[:-1]) == 1
+
+
+def test_certificate_retries_are_bounded_by_updates_not_breakdown_streak(monkeypatch):
+    original = rwr_module._sparse_fp64_residual_certificate
+    rejections_remaining = 4
+
+    def reject_column_zero_four_times(*args, **kwargs):
+        nonlocal rejections_remaining
+        certificate = original(*args, **kwargs)
+        if (
+            kwargs.get("columns") is not None
+            and 0 in certificate.columns.tolist()
+            and rejections_remaining
+        ):
+            local_index = certificate.columns.tolist().index(0)
+            scaled = certificate.scaled_residual.clone()
+            scaled[local_index] = 1.01
+            residual = certificate.residual.clone()
+            residual[:, local_index] *= 1.02
+            rejections_remaining -= 1
+            return rwr_module._FP64ResidualCertificate(
+                certificate.columns,
+                residual,
+                certificate.residual_norm,
+                certificate.threshold,
+                scaled,
+            )
+        return certificate
+
+    monkeypatch.setattr(
+        rwr_module,
+        "_sparse_fp64_residual_certificate",
+        reject_column_zero_four_times,
+    )
+    result = solve_rwr_cgls(
+        _asymmetric_graph(), _scores(torch.float32), alpha=0.8, max_iter=5000
+    )
+
+    assert rejections_remaining == 0
+    assert result.converged
+    assert result.fp64_certificate_rejections == 4
+    assert result.fp64_certificate_restart_count == 4
+    assert result.restarts_per_rhs[0] == 4
+    assert result.iterations <= 5000
+
+
+def test_final_certificate_and_promoted_dtype_telemetry():
+    for input_dtype in (torch.float32, torch.float16):
+        scores = _scores(torch.float32).to(input_dtype)
+        result = solve_rwr_cgls(_asymmetric_graph(), scores, alpha=0.8)
+        assert result.scores.dtype == torch.float32
+        assert result.scores.device == scores.device
+        assert result.certificate_dtype == "float64_quantized_fp32_system"
+        assert result.fp64_certificate_checks >= 2
+        assert result.fp64_certificate_work == result.fp64_certificate_checks
+        assert result.fp64_certified_rhs == scores.shape[1]
+        assert result.certified_maximum_scaled_residual <= 1
+        assert result.maximum_scaled_residual == (
+            result.certified_maximum_scaled_residual
+        )
+
+
+def test_native_fp64_uses_native_rhs_and_no_quantized_certificate(monkeypatch):
+    monkeypatch.setattr(
+        rwr_module,
+        "_sparse_fp64_residual_certificate",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("quantized FP32 certificate used by native FP64 solve")
+        ),
+    )
+    graph = _asymmetric_graph()
+    scores = _scores(torch.float64)
+    result = solve_rwr_cgls(graph, scores, alpha=0.8)
+    expected = _dense_solution(graph, scores, 0.8)
+    torch.testing.assert_close(result.scores, expected, rtol=2e-10, atol=2e-11)
+    assert result.certificate_dtype == "float64_native_solver"
+    assert result.fp64_certificate_checks == 0
+    assert result.fp64_certificate_work == 0
+
+
+def test_certificate_exhaustion_has_complete_fp32_and_fp64_diagnostics(monkeypatch):
+    original = rwr_module._sparse_fp64_residual_certificate
+
+    def reject_every_candidate(*args, **kwargs):
+        certificate = original(*args, **kwargs)
+        return rwr_module._FP64ResidualCertificate(
+            certificate.columns,
+            certificate.residual,
+            certificate.residual_norm,
+            certificate.threshold,
+            torch.full_like(certificate.scaled_residual, 2.0),
+        )
+
+    monkeypatch.setattr(
+        rwr_module, "_sparse_fp64_residual_certificate", reject_every_candidate
+    )
+    with pytest.raises(RWRNonConvergenceError) as raised:
+        solve_rwr_cgls(
+            _asymmetric_graph(),
+            _scores(torch.float32),
+            alpha=0.8,
+            max_iter=2,
+        )
+    error = raised.value
+    assert error.iteration == 2
+    assert error.work_count >= error.iteration
+    assert error.fp64_certificate_checks >= 1
+    assert error.fp64_certificate_rejections >= 1
+    assert error.certificate_dtype == "float64_quantized_fp32_system"
+    assert error.working_primal_residual is not None
+    assert error.certified_primal_residual is not None
+    assert error.certified_max_scaled_primal_residual == 2.0
+    assert error.rtol == 1e-5
+    assert error.atol == 1e-7
+
+
+def test_certificate_path_contains_no_dense_solve_or_cpu_transfer():
+    source = inspect.getsource(rwr_module._sparse_fp64_residual_certificate)
+    assert "to_dense" not in source
+    assert "linalg.solve" not in source
+    assert ".cpu(" not in source
+    assert "_transpose_matmul" not in source
+    assert inspect.signature(solve_rwr_cgls).parameters["max_iter"].default == 5000
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 def test_cuda_device_is_preserved_and_cpu_agrees():
     cpu_graph = _asymmetric_graph()
@@ -1036,5 +1362,12 @@ def test_cuda_device_is_preserved_and_cpu_agrees():
     scores = _scores(torch.float64)
     cpu = solve_rwr_cgls(cpu_graph, scores, alpha=0.8)
     gpu = solve_rwr_cgls(gpu_graph, scores.cuda(), alpha=0.8)
+    gpu_replay = solve_rwr_cgls(gpu_graph, scores.cuda(), alpha=0.8)
     assert gpu.scores.device.type == "cuda"
     torch.testing.assert_close(gpu.scores.cpu(), cpu.scores, rtol=2e-10, atol=2e-11)
+    assert torch.equal(gpu.scores, gpu_replay.scores)
+    assert gpu.iterations == gpu_replay.iterations
+    assert gpu.fp64_certificate_checks == gpu_replay.fp64_certificate_checks
+    assert gpu.certified_maximum_scaled_residual == (
+        gpu_replay.certified_maximum_scaled_residual
+    )

@@ -1,0 +1,169 @@
+format_version = "talk2dino-rwr-reproduction-identity-v3"
+identity_name = "e3-canonical-directed-rwr"
+e3_identity_path = "evaluation_identities/e3_paired_soft_routing.toml"
+source_e10_commit = "fd5d61583671fb4e7bd44eb14e9a112f822039df"
+cache_source_commit = "06964ad355dd595061831ab47b7599dfddcba429"
+cache_manifest_sha256 = "c4216a8d8b9b8787aba0b3f8c4e99b75ced8d76f2d372ee8725e787800150b10"
+cache_manifest_evidence = "committed_attestation"
+cache_manifest_attestation_commit = "fd5d61583671fb4e7bd44eb14e9a112f822039df"
+cache_manifest_attestation_path = "ablationAll/e10_adaptive_diffusion/results/global_sweep_ext_converged.json"
+cache_manifest_attestation_blob_sha256 = "a0c020bb7e1ed9684137f5d98836934c25ecd2fc20d45552d36e934c13f5e85b"
+cache_manifest_archived = false
+historical_cache_used_by_current_run = false
+canonical_config_path = "src/open_vocabulary_segmentation/configs/stuff/dinotext_stuff_vitb_mlp_infonce_paired_soft_routing_tau010_rwr.yml"
+canonical_config_sha256 = "b07059beb3e48ff553b01020b1dd4dc9eb85512d6641ec78f278451373eddfa7"
+
+# The historical cache manifest was not archived in Git. Its SHA256 is
+# preserved in a committed E10 evidence artifact. The present reproduction
+# does not reuse that cache; it reconstructs the directed graph and RWR output
+# directly from E3 scores and DINO features.
+
+[dataset]
+name = "COCO-Stuff 164k validation"
+images = 5000
+classes = 171
+background_class = false
+
+[evaluation]
+mode = "slide"
+crop = [448, 448]
+stride = [224, 224]
+resize_dimension = 448
+template = "sub_imagenet_template"
+pamr = false
+uniform_stitching = true
+
+[rwr]
+enabled = true
+graph_mode = "directed_topk"
+alpha = 0.98
+top_k = 12
+affinity_power = 3.0
+self_excluded = true
+zero_row_self_loop = true
+score_stage = "pre_sigmoid_pre_upsample_pre_stitch"
+
+[solver]
+method = "cgls"
+rtol = 0.00001
+atol = 0.0000001
+max_iterations = 5000
+silent_fallback = false
+
+[checkpoint]
+projection_class = "vitb_mlp_infonce_paired_soft_routing_tau010"
+projection_name = "vitb_mlp_infonce_paired_soft_routing_tau010"
+projection_model = "ProjectionLayer"
+path = "weights/vitb_mlp_infonce_paired_soft_routing_tau010.pth"
+sha256 = "9632117c18613674eeddcb35f86193d37da203a9cbd837cf500c4121b5fa9942"
+loading_required = true
+
+[historical]
+metrics_record = "alpha_0.98_converged_cgls"
+baseline_metrics_record = "alpha_0.00_T_10"
+iteration_stats_record = "cgls_iteration_stats"
+metrics_commit = "fd5d61583671fb4e7bd44eb14e9a112f822039df"
+metrics_path = "ablationAll/e10_adaptive_diffusion/results/canonical_cg_metrics.json"
+metrics_blob = "173994f89a7109ed1aaa2b0f773de71ed0f09513"
+metrics_sha256 = "08700eecf817e844e0e6e575c1194ba8f889b692a6fdc9b860f3d9b28499b8bb"
+cache_evidence_commit = "fd5d61583671fb4e7bd44eb14e9a112f822039df"
+cache_evidence_path = "ablationAll/e10_adaptive_diffusion/results/global_sweep_ext_converged.json"
+cache_evidence_blob = "8135f2868366447d475ded0d461ac949d6ec2b5b"
+cache_evidence_sha256 = "a0c020bb7e1ed9684137f5d98836934c25ecd2fc20d45552d36e934c13f5e85b"
+graph_commit = "06964ad355dd595061831ab47b7599dfddcba429"
+graph_path = "src/e3_affinity_oracle.py"
+graph_blob = "bc40d4a5e12879d891156412dc5ddb81265a4a99"
+graph_sha256 = "06b9ec77dd1d857c20bda315be5e3e07c7c3564616f5c534cc4a889b04b0a14d"
+solver_commit = "fd5d61583671fb4e7bd44eb14e9a112f822039df"
+solver_path = "src/learned_affinity/implicit_solve.py"
+solver_blob = "c53504cdcfdb97f60c042712b07a352d4e1cd057"
+solver_sha256 = "ab195f07bacad42dada86ff25b2b7fa7171fa097b1097fc6163fee76c89e9b4e"
+config_commit = "06964ad355dd595061831ab47b7599dfddcba429"
+config_path = "src/open_vocabulary_segmentation/configs/stuff/dinotext_stuff_vitb_mlp_infonce_paired_soft_routing_tau010.yml"
+config_blob = "eeea5c015ab9d96cb748a54e2f31d4773452b585"
+config_sha256 = "fe68a46c6976881baf7999b1822a675ca7db4aff5a3d1768856805d8564e043a"
+eval_base_commit = "06964ad355dd595061831ab47b7599dfddcba429"
+eval_base_path = "src/open_vocabulary_segmentation/configs/stuff/eval_stuff.yml"
+eval_base_blob = "16ae4ebb3a079afa6175e09e96315b875072346f"
+eval_base_sha256 = "6ebcb825976e287f6c06dd01980f256319fc010580e4245cc22ce563db0804fb"
+
+[expected_metrics]
+e3_mIoU = 28.480169
+rwr_aAcc = 48.52867057377273
+rwr_mIoU = 29.877244374599126
+rwr_mAcc = 54.13703466982515
+gain_mIoU = 1.397075374599126
+
+[acceptance]
+structured_absolute_mIoU = 0.005
+minimum_metric_decimal_places = 6
+rounded_mIoU = 29.88
+
+[resolved_configuration]
+encoding_version = "talk2dino-typed-configuration-v1"
+full_sha256 = "19ec208fb6dab1ad7936e936bfbb3f23a727295531ae3048fb90a7aa4be7c347"
+without_rwr_sha256 = "340045da0500b54f00b23e667c0b55102148e3c3d43a8fe9b3db4aca61f94106"
+evaluation_sha256 = "76647a9b0fdf09524dd5ef93134d378bd065be90dc8e5a4bf7cc4c8a06bcca84"
+
+[[configuration_sources]]
+order = 0
+role = "model_inheritance"
+path = "src/open_vocabulary_segmentation/configs/stuff/eval.yml"
+sha256 = "5c61a8570651d6802aa1ab8fe0cfbde8ad7c3ecb06e157f429a5a80142bbdaba"
+git_blob = "6deaa5fb63dd5c1568716a6062f6db07db5467d7"
+
+[[configuration_sources]]
+order = 1
+role = "model_inheritance"
+path = "src/open_vocabulary_segmentation/configs/stuff/default.yml"
+sha256 = "19b7ac74da3a86b4a55fc3f5ab330b49af1ec3d2c40fe5eb90fb74af426026f0"
+git_blob = "5bc5d77a35fef3160c76fafb49c491414a647c26"
+
+[[configuration_sources]]
+order = 2
+role = "e3_leaf"
+path = "src/open_vocabulary_segmentation/configs/stuff/dinotext_stuff_vitb_mlp_infonce_paired_soft_routing_tau010.yml"
+sha256 = "8c8025c148fdd6f49484c9a46ee61ac13dd378e1594cc236c6ea399649ed0130"
+git_blob = "3453ca4e4cc8b7278b6e2af01a166bcde11a5661"
+
+[[configuration_sources]]
+order = 3
+role = "rwr_leaf"
+path = "src/open_vocabulary_segmentation/configs/stuff/dinotext_stuff_vitb_mlp_infonce_paired_soft_routing_tau010_rwr.yml"
+sha256 = "b07059beb3e48ff553b01020b1dd4dc9eb85512d6641ec78f278451373eddfa7"
+git_blob = "14b33267fccf436424cdf82e178172ea5eb7cf05"
+
+[[configuration_sources]]
+order = 4
+role = "model_constructor_defaults"
+path = "src/open_vocabulary_segmentation/models/dinotext/dinotext.py"
+sha256 = "94d920e7f9153e97c8c4948013beffd7533902c7d307fe15607a6b03508873ed"
+git_blob = "4e53c1d001532c00fa886643280f787c1c0d1214"
+
+[[configuration_sources]]
+order = 5
+role = "evaluation_override"
+path = "src/open_vocabulary_segmentation/configs/stuff/eval_stuff.yml"
+sha256 = "6ebcb825976e287f6c06dd01980f256319fc010580e4245cc22ce563db0804fb"
+git_blob = "16ae4ebb3a079afa6175e09e96315b875072346f"
+
+[[configuration_sources]]
+order = 6
+role = "dataset_inheritance"
+path = "src/open_vocabulary_segmentation/segmentation/configs/_base_/custom_import.py"
+sha256 = "969c43961c7e5b968771168a05f5bdbfed5308a5f56581fb9a04df991436b95b"
+git_blob = "49d2250caa231368c19630284d843e6e696c3282"
+
+[[configuration_sources]]
+order = 7
+role = "dataset_definition"
+path = "src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/stuff.py"
+sha256 = "651710d2bff280a7eea1d06f43daa9e25bb0ae2525633568d06f57a528a42864"
+git_blob = "1dfef6277cb0a63d09eeba71713f29c736918d6a"
+
+[[configuration_sources]]
+order = 8
+role = "projection_definition"
+path = "configs/vitb_mlp_infonce_paired_soft_routing_tau010.yaml"
+sha256 = "4998c9d583af22e2804f213db130f0d3ff499dc83e66a76f8c30e0d3c0170293"
+git_blob = "2040a3407a3a92928b6ae9a1f14c79a70b69892f"

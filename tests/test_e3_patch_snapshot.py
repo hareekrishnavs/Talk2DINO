@@ -89,11 +89,19 @@ class _FakeBackbone(nn.Module):
 
 class _FakeMasker(nn.Module):
     @torch.no_grad()
-    def forward_seg(self, image_feat, text_emb, deterministic=True, hard=False):
-        del deterministic, hard
+    def raw_similarity(self, image_feat, text_emb):
         normalized = F.normalize(image_feat, dim=1, eps=1e-6)
-        simmap = torch.einsum("bchw,nc->bnhw", normalized, text_emb)
-        return torch.sigmoid(simmap), simmap
+        return torch.einsum("bchw,nc->bnhw", normalized, text_emb)
+
+    @torch.no_grad()
+    def mask_from_similarity(self, simmap, deterministic=True, hard=False):
+        del deterministic, hard
+        return torch.sigmoid(simmap)
+
+    @torch.no_grad()
+    def forward_seg(self, image_feat, text_emb, deterministic=True, hard=False):
+        simmap = self.raw_similarity(image_feat, text_emb)
+        return self.mask_from_similarity(simmap, deterministic, hard), simmap
 
 
 def _fake_attention(
@@ -203,6 +211,38 @@ def test_opt_in_uses_one_forward_and_is_bitwise_identical_to_default():
     assert torch.equal(masks, default_masks)
     assert torch.equal(simmap, default_simmap)
     assert isinstance(snapshot, E3PatchSnapshot)
+
+
+def test_snapshot_only_path_stops_before_sigmoid_interpolation_and_mask(monkeypatch):
+    tokens, image, text = _inputs()
+    model = _make_model(tokens)
+    monkeypatch.setattr(
+        model.masker,
+        "mask_from_similarity",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("snapshot-only path constructed a mask")
+        ),
+    )
+    monkeypatch.setattr(
+        dinotext_module.F,
+        "interpolate",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("snapshot-only path interpolated")
+        ),
+    )
+    snapshot = model.generate_patch_snapshot(image, text)
+    assert isinstance(snapshot, E3PatchSnapshot)
+    assert snapshot.grid_hw == (2, 2)
+    assert model.model.forward_count == 1
+
+
+def test_shared_downstream_matches_existing_e3_transform_exactly():
+    tokens, image, text = _inputs()
+    model = _make_model(tokens)
+    masks, simmap = model.generate_masks(image, text)
+    scores = simmap.permute(0, 2, 3, 1).reshape(2, 4, 2)
+    shared = model.masks_from_patch_scores(scores, (2, 2), (4, 4))
+    assert torch.equal(shared, masks)
 
 
 def test_snapshot_layout_values_and_processing_stage_are_exact():

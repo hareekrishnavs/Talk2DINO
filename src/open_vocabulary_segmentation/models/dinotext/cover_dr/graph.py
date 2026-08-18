@@ -55,6 +55,33 @@ class DirectedTopKGraph:
                     value.detach().clone().contiguous(),
                 )
         self.validate()
+        # Prepare a canonical incoming-edge order once.  CUDA ``index_add_``
+        # with repeated destinations is nondeterministic; sorted segmented
+        # reduction computes the same sparse A.T product deterministically
+        # without materializing an [N,N] matrix.
+        destinations = self.neighbor_indices.reshape(-1)
+        sources = torch.arange(
+            self.num_nodes, device=destinations.device, dtype=torch.int64
+        )[:, None].expand(-1, self.k).reshape(-1)
+        order = torch.argsort(destinations, stable=True)
+        object.__setattr__(
+            self,
+            "_incoming_sources",
+            sources[order].detach().clone().contiguous(),
+        )
+        object.__setattr__(
+            self,
+            "_incoming_weights",
+            self.transition_weights.reshape(-1)[order].detach().clone().contiguous(),
+        )
+        object.__setattr__(
+            self,
+            "_incoming_counts",
+            torch.bincount(destinations[order], minlength=self.num_nodes)
+            .detach()
+            .clone()
+            .contiguous(),
+        )
 
     def validate(self) -> None:
         """Validate sparse storage without constructing a dense adjacency."""
@@ -246,18 +273,20 @@ class DirectedTopKGraph:
         if not rhs.is_floating_point():
             raise TypeError("graph transpose matmul RHS must be floating point")
 
-        destinations = self.neighbor_indices.reshape(-1)
-        weights = self.transition_weights.to(dtype=rhs.dtype)
+        sources = self._incoming_sources
+        weights = self._incoming_weights.to(dtype=rhs.dtype)
         if rhs.ndim == 1:
-            contributions = (weights * rhs[:, None]).reshape(-1)
-            return torch.zeros_like(rhs).index_add_(
-                0, destinations, contributions
+            contributions = weights * rhs[sources]
+            return torch.segment_reduce(
+                contributions,
+                "sum",
+                lengths=self._incoming_counts,
             )
-        contributions = (weights[:, :, None] * rhs[:, None, :]).reshape(
-            -1, rhs.shape[1]
-        )
-        return torch.zeros_like(rhs).index_add_(
-            0, destinations, contributions
+        contributions = weights[:, None] * rhs[sources]
+        return torch.segment_reduce(
+            contributions,
+            "sum",
+            lengths=self._incoming_counts,
         )
 
     def to_dense(self) -> torch.Tensor:

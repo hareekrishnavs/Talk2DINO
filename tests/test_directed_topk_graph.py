@@ -293,6 +293,50 @@ def test_sparse_matrix_matmul_matches_independent_dense_reference():
     torch.testing.assert_close(graph.matmul(rhs), dense @ rhs)
 
 
+@pytest.mark.parametrize("rhs_shape", [(5,), (5, 7)])
+def test_deterministic_transpose_matmul_matches_independent_dense(rhs_shape):
+    features = _non_tied_features()
+    graph = build_directed_topk_graph(features, k=3)
+    rhs = torch.randn(rhs_shape, dtype=torch.float64)
+    _indices, _edges, _weights, _fallback, dense = _reference(features, 3, 3)
+
+    first = graph.transpose_matmul(rhs)
+    second = graph.transpose_matmul(rhs)
+
+    torch.testing.assert_close(first, dense.to(torch.float64).T @ rhs)
+    assert torch.equal(first, second)
+
+
+def test_transpose_matmul_supports_nodes_with_zero_in_degree():
+    graph = DirectedTopKGraph(
+        neighbor_indices=torch.tensor([[1], [0], [0]]),
+        transition_weights=torch.ones(3, 1),
+        edge_affinities=torch.ones(3, 1),
+        self_loop_fallback=torch.zeros(3, dtype=torch.bool),
+        num_nodes=3,
+        k=1,
+        affinity_power=3.0,
+    )
+    rhs = torch.tensor([2.0, 3.0, 5.0])
+    assert torch.equal(graph.transpose_matmul(rhs), torch.tensor([8.0, 2.0, 0.0]))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_cuda_transpose_is_byte_deterministic_under_deterministic_mode():
+    graph = build_directed_topk_graph(_non_tied_features(device="cuda"), k=3)
+    generator = torch.Generator(device="cuda").manual_seed(812)
+    rhs = torch.randn(5, 17, device="cuda", generator=generator)
+    previous = torch.are_deterministic_algorithms_enabled()
+    try:
+        torch.use_deterministic_algorithms(True)
+        first = graph.transpose_matmul(rhs)
+        second = graph.transpose_matmul(rhs)
+    finally:
+        torch.use_deterministic_algorithms(previous)
+    assert torch.equal(first, second)
+    torch.testing.assert_close(first, graph.to_dense().T @ rhs)
+
+
 def test_matmul_validates_rhs():
     graph = build_directed_topk_graph(_non_tied_features(), k=2)
     with pytest.raises(ValueError, match="node mismatch"):
@@ -351,6 +395,15 @@ def test_canonical_storage_is_sparse_and_does_not_retain_dense_tensor():
         value.numel() * value.element_size() for value in graph._tensor_fields()
     )
     assert persistent_bytes == 197632
+    incoming = (
+        graph._incoming_sources,
+        graph._incoming_weights,
+        graph._incoming_counts,
+    )
+    assert all(tuple(value.shape) != (1024, 1024) for value in incoming)
+    incoming_bytes = sum(value.numel() * value.element_size() for value in incoming)
+    assert incoming_bytes == 155648
+    assert persistent_bytes + incoming_bytes == 353280
 
 
 @dataclass(frozen=True)

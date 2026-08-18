@@ -19,6 +19,15 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from src.typed_configuration import (
+    TYPED_CONFIGURATION_ENCODING,
+    TypedConfigurationError,
+    clone_configuration,
+    deep_merge_configuration,
+    raw_file_identity,
+    typed_configuration_sha256,
+)
+
 
 IDENTITY_RELATIVE_PATH = Path(
     "evaluation_identities/e3_paired_soft_routing.toml"
@@ -62,6 +71,56 @@ DATASET_CLASS_OVERRIDE_KEYS = frozenset(
         "custom_classes",
     }
 )
+CONFIGURATION_SOURCE_KEYS = frozenset(
+    {"order", "role", "path", "sha256", "git_blob"}
+)
+RESOLVED_CONFIGURATION_KEYS = frozenset(
+    {
+        "encoding_version",
+        "full_sha256",
+        "dataset_sha256",
+        "dataset_pipeline_sha256",
+        "evaluation_sha256",
+        "model_projection_sha256",
+    }
+)
+E3_IDENTITY_SECTION_KEYS = {
+    "dataset": frozenset(
+        {
+            "name", "task", "dataset_type", "class_metadata_distribution",
+            "class_metadata_path", "images", "classes", "background_class",
+            "config_path", "configured_root", "image_dir", "annotation_dir",
+        }
+    ),
+    "model": frozenset(
+        {
+            "type", "name", "constructor_path", "constructor_class",
+            "resize_dimension", "clip_model_name", "backbone_checkpoint_name",
+            "clip_checkpoint_name", "flags",
+        }
+    ),
+    "projection": frozenset(
+        {
+            "class", "name", "model", "alignment_strategy",
+            "routing_temperature", "checkpoint_loading_required", "config_path",
+            "checkpoint_path",
+        }
+    ),
+    "evaluation": frozenset(
+        {
+            "config_path", "base_config_path", "mode", "crop", "stride",
+            "template", "pamr", "diffusion", "rwr",
+        }
+    ),
+    "expected_metrics": frozenset(METRIC_NAMES),
+    "tolerances": frozenset(
+        {
+            "structured_absolute", "rounded_log_minimum_decimal_places",
+            "two_decimal_log_reproducibility_allowance",
+        }
+    ),
+    "resolved_configuration": RESOLVED_CONFIGURATION_KEYS,
+}
 _NUMBER_TOKEN = (
     r"[-+]?(?:nan|inf(?:inity)?|"
     r"(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)"
@@ -81,6 +140,64 @@ class ParsedMetrics:
 
 def repository_root() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+def _require_exact_string(value: Any, label: str, *, nonempty: bool = True) -> str:
+    if type(value) is not str or (nonempty and not value):
+        raise E3IdentityError(f"{label} must be an exact non-empty string")
+    return value
+
+
+def _require_exact_bool(value: Any, label: str) -> bool:
+    if type(value) is not bool:
+        raise E3IdentityError(f"{label} must be an exact boolean")
+    return value
+
+
+def _require_exact_int(value: Any, label: str, *, minimum: int | None = None) -> int:
+    if type(value) is not int:
+        raise E3IdentityError(f"{label} must be an exact integer")
+    if minimum is not None and value < minimum:
+        raise E3IdentityError(f"{label} must be at least {minimum}")
+    return value
+
+
+def _require_exact_float(value: Any, label: str) -> float:
+    if type(value) is not float:
+        raise E3IdentityError(f"{label} must be an exact float")
+    if not math.isfinite(value):
+        raise E3IdentityError(f"{label} must be finite")
+    return value
+
+
+def _require_exact_integer_pair(value: Any, label: str) -> tuple[int, int]:
+    if type(value) is not list or len(value) != 2:
+        raise E3IdentityError(f"{label} must be an exact two-element list")
+    if any(type(item) is not int for item in value):
+        raise E3IdentityError(f"{label} elements must be exact integers")
+    return value[0], value[1]
+
+
+def _require_sha256(value: Any, label: str) -> str:
+    token = _require_exact_string(value, label)
+    if re.fullmatch(r"[0-9a-f]{64}", token) is None:
+        raise E3IdentityError(f"{label} must be a lowercase SHA256")
+    return token
+
+
+def _require_git_blob(value: Any, label: str) -> str:
+    token = _require_exact_string(value, label)
+    if re.fullmatch(r"[0-9a-f]{40}", token) is None:
+        raise E3IdentityError(f"{label} must be a full Git blob identity")
+    return token
+
+
+def _require_relative_path(value: Any, label: str) -> str:
+    token = _require_exact_string(value, label)
+    path = Path(token)
+    if path.is_absolute() or ".." in path.parts or "\\" in token:
+        raise E3IdentityError(f"{label} must be a safe repository-relative path")
+    return token
 
 
 def load_identity(
@@ -108,43 +225,93 @@ def load_identity(
         "evaluation",
         "expected_metrics",
         "tolerances",
+        "resolved_configuration",
+        "configuration_sources",
     }
     if set(identity) != expected_sections:
         raise E3IdentityError(
             "E3 identity specification has an unexpected top-level schema"
         )
-    if identity["format_version"] != "talk2dino-e3-evaluation-identity-v1":
+    _require_exact_string(identity["format_version"], "E3 format_version")
+    if identity["format_version"] != "talk2dino-e3-evaluation-identity-v2":
         raise E3IdentityError("unsupported E3 identity specification version")
-    if set(identity["expected_metrics"]) != set(METRIC_NAMES):
-        raise E3IdentityError("E3 identity metric schema is incomplete")
+    _require_exact_string(identity["identity_name"], "E3 identity name")
+    _require_exact_string(identity["base_commit"], "E3 base commit")
+    if re.fullmatch(r"[0-9a-f]{7,40}", identity["base_commit"]) is None:
+        raise E3IdentityError("E3 base commit must be a Git commit prefix")
+    _require_exact_string(
+        identity["expected_branch_ancestry"], "E3 expected branch ancestry"
+    )
+    _require_exact_int(identity["seed"], "E3 seed", minimum=0)
+    for section, keys in E3_IDENTITY_SECTION_KEYS.items():
+        value = identity.get(section)
+        if not isinstance(value, Mapping) or set(value) != keys:
+            raise E3IdentityError(f"E3 identity {section} has an unexpected schema")
     model_flags = identity.get("model", {}).get("flags")
     if not isinstance(model_flags, Mapping) or set(model_flags) != set(MODEL_FLAG_NAMES):
         raise E3IdentityError("E3 identity model flag schema is incomplete")
     if any(type(model_flags[name]) is not bool for name in MODEL_FLAG_NAMES):
         raise E3IdentityError("E3 identity model flags must be booleans")
-    dataset_identity = identity.get("dataset", {})
-    classes = dataset_identity.get("classes")
-    if isinstance(classes, bool) or not isinstance(classes, int) or classes <= 0:
-        raise E3IdentityError("E3 identity dataset class count must be a positive integer")
-    if type(dataset_identity.get("background_class")) is not bool:
-        raise E3IdentityError("E3 identity background_class must be boolean")
+    dataset_identity = identity["dataset"]
+    for name in (
+        "name", "task", "dataset_type", "class_metadata_distribution",
+        "class_metadata_path", "config_path", "configured_root", "image_dir",
+        "annotation_dir",
+    ):
+        _require_exact_string(dataset_identity[name], f"E3 dataset {name}")
+    _require_exact_int(dataset_identity["images"], "E3 image count", minimum=1)
+    _require_exact_int(dataset_identity["classes"], "E3 class count", minimum=1)
+    _require_exact_bool(
+        dataset_identity["background_class"], "E3 background_class"
+    )
+    model_identity = identity["model"]
+    for name in (
+        "type", "name", "constructor_path", "constructor_class",
+        "clip_model_name", "backbone_checkpoint_name", "clip_checkpoint_name",
+    ):
+        _require_exact_string(model_identity[name], f"E3 model {name}")
+    _require_exact_int(
+        model_identity["resize_dimension"], "E3 model resize_dimension", minimum=1
+    )
+    projection_identity = identity["projection"]
+    for name in (
+        "class", "name", "model", "alignment_strategy", "config_path",
+        "checkpoint_path",
+    ):
+        _require_exact_string(projection_identity[name], f"E3 projection {name}")
+    _require_exact_float(
+        projection_identity["routing_temperature"], "E3 routing temperature"
+    )
+    _require_exact_bool(
+        projection_identity["checkpoint_loading_required"],
+        "E3 checkpoint_loading_required",
+    )
     projection_identity = identity.get("projection", {})
     if projection_identity.get("checkpoint_loading_required") is not True:
         raise E3IdentityError(
             "E3 identity must require projection checkpoint loading"
         )
+    evaluation = identity["evaluation"]
+    for name in ("config_path", "base_config_path", "mode", "template"):
+        _require_exact_string(evaluation[name], f"E3 evaluation {name}")
+    _require_exact_integer_pair(evaluation["crop"], "E3 crop")
+    _require_exact_integer_pair(evaluation["stride"], "E3 stride")
+    for name in ("pamr", "diffusion", "rwr"):
+        _require_exact_bool(evaluation[name], f"E3 evaluation {name}")
     for name in METRIC_NAMES:
-        _finite_number(identity["expected_metrics"][name], f"expected {name}")
-    tolerance = _finite_number(
+        _require_exact_float(identity["expected_metrics"][name], f"expected {name}")
+    tolerance = _require_exact_float(
         identity["tolerances"]["structured_absolute"],
         "structured metric tolerance",
     )
     if tolerance <= 0:
         raise E3IdentityError("structured metric tolerance must be positive")
-    decimals = identity["tolerances"]["rounded_log_minimum_decimal_places"]
-    if isinstance(decimals, bool) or not isinstance(decimals, int) or decimals < 1:
-        raise E3IdentityError("rounded-log decimal precision must be a positive integer")
-    allowance = _finite_number(
+    _require_exact_int(
+        identity["tolerances"]["rounded_log_minimum_decimal_places"],
+        "rounded-log decimal precision",
+        minimum=1,
+    )
+    allowance = _require_exact_float(
         identity["tolerances"]["two_decimal_log_reproducibility_allowance"],
         "two-decimal log reproducibility allowance",
     )
@@ -152,6 +319,28 @@ def load_identity(
         raise E3IdentityError(
             "two-decimal log reproducibility allowance must be non-negative"
         )
+    resolved = identity["resolved_configuration"]
+    _require_exact_string(resolved["encoding_version"], "typed encoding version")
+    if resolved["encoding_version"] != TYPED_CONFIGURATION_ENCODING:
+        raise E3IdentityError("unsupported typed configuration encoding")
+    for name in RESOLVED_CONFIGURATION_KEYS - {"encoding_version"}:
+        _require_sha256(resolved[name], f"E3 resolved_configuration.{name}")
+    sources = identity["configuration_sources"]
+    if type(sources) is not list or not sources:
+        raise E3IdentityError("E3 configuration_sources must be a non-empty array")
+    for index, source_record in enumerate(sources):
+        if not isinstance(source_record, Mapping) or set(source_record) != CONFIGURATION_SOURCE_KEYS:
+            raise E3IdentityError(
+                f"E3 configuration_sources[{index}] has an unexpected schema"
+            )
+        if _require_exact_int(
+            source_record["order"], f"E3 configuration source {index} order", minimum=0
+        ) != index:
+            raise E3IdentityError("E3 configuration source order is not contiguous")
+        _require_exact_string(source_record["role"], f"E3 source {index} role")
+        _require_relative_path(source_record["path"], f"E3 source {index} path")
+        _require_sha256(source_record["sha256"], f"E3 source {index} SHA256")
+        _require_git_blob(source_record["git_blob"], f"E3 source {index} Git blob")
     return identity
 
 
@@ -165,17 +354,10 @@ def _finite_number(value: Any, label: str) -> float:
 
 
 def _deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
-    merged = dict(base)
-    for key, value in override.items():
-        if (
-            key in merged
-            and isinstance(merged[key], Mapping)
-            and isinstance(value, Mapping)
-        ):
-            merged[key] = _deep_merge(merged[key], value)
-        else:
-            merged[key] = value
-    return merged
+    try:
+        return deep_merge_configuration(base, override)
+    except TypedConfigurationError as error:
+        raise E3IdentityError(f"invalid configuration merge: {error}") from error
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -305,6 +487,237 @@ def _load_constructor_defaults(
                 f"in {source_path}"
             ) from error
     return resolved
+
+
+def _yaml_inheritance_chain(
+    path: Path, stack: tuple[Path, ...] = ()
+) -> list[Path]:
+    path = path.resolve()
+    if path in stack:
+        raise E3IdentityError(f"cyclic YAML base configuration: {path}")
+    value = _load_yaml(path)
+    bases = value.get("_base_")
+    if bases is None:
+        base_names: list[str] = []
+    elif type(bases) is str:
+        base_names = [bases]
+    elif type(bases) is list and all(type(item) is str for item in bases):
+        base_names = list(bases)
+    else:
+        raise E3IdentityError(f"invalid _base_ declaration in {path}")
+    result: list[Path] = []
+    for base_name in base_names:
+        result.extend(
+            _yaml_inheritance_chain(path.parent / base_name, (*stack, path))
+        )
+    result.append(path)
+    return result
+
+
+def _filtered_python_config(path: Path) -> dict[str, Any]:
+    try:
+        value = runpy.run_path(str(path))
+    except (OSError, RuntimeError, SyntaxError) as error:
+        raise E3IdentityError(f"cannot read Python configuration {path}: {error}") from error
+    filtered = {
+        key: item for key, item in value.items()
+        if type(key) is str and not key.startswith("__")
+    }
+    try:
+        return clone_configuration(filtered)
+    except TypedConfigurationError as error:
+        raise E3IdentityError(f"invalid Python configuration {path}: {error}") from error
+
+
+def _load_python_config_with_bases(
+    path: Path, stack: tuple[Path, ...] = ()
+) -> tuple[dict[str, Any], list[Path]]:
+    path = path.resolve()
+    if path in stack:
+        raise E3IdentityError(f"cyclic Python base configuration: {path}")
+    value = _filtered_python_config(path)
+    bases = value.pop("_base_", None)
+    if bases is None:
+        base_names: list[str] = []
+    elif type(bases) is str:
+        base_names = [bases]
+    elif type(bases) is list and all(type(item) is str for item in bases):
+        base_names = list(bases)
+    else:
+        raise E3IdentityError(f"invalid Python _base_ declaration in {path}")
+    merged: dict[str, Any] = {}
+    chain: list[Path] = []
+    for base_name in base_names:
+        base_value, base_chain = _load_python_config_with_bases(
+            path.parent / base_name, (*stack, path)
+        )
+        merged = _deep_merge(merged, base_value)
+        chain.extend(base_chain)
+    return _deep_merge(merged, value), [*chain, path]
+
+
+def _relative_source_path(root: Path, path: Path) -> str:
+    try:
+        return path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError as error:
+        raise E3IdentityError(
+            f"configuration source escapes repository root: {path}"
+        ) from error
+
+
+def _source_records(
+    root: Path, sources: Sequence[tuple[str, Path]]
+) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for order, (role, path) in enumerate(sources):
+        try:
+            content_identity = raw_file_identity(path)
+        except OSError as error:
+            raise E3IdentityError(f"cannot hash configuration source {path}: {error}") from error
+        records.append(
+            {
+                "order": order,
+                "role": role,
+                "path": _relative_source_path(root, path),
+                **content_identity,
+            }
+        )
+    return records
+
+
+def resolve_complete_e3_configuration(
+    *,
+    repo_root: Path,
+    identity: Mapping[str, Any],
+    eval_config: Path | None = None,
+    eval_base_config: Path | None = None,
+) -> dict[str, Any]:
+    """Resolve and type-bind every E3 configuration source used by evaluation."""
+    root = Path(repo_root)
+    evaluation = identity["evaluation"]
+    eval_path = (
+        Path(eval_config) if eval_config is not None
+        else root / evaluation["config_path"]
+    )
+    base_path = (
+        Path(eval_base_config) if eval_base_config is not None
+        else root / evaluation["base_config_path"]
+    )
+    effective = _deep_merge(
+        _load_yaml_with_bases(eval_path), _load_yaml_with_bases(base_path)
+    )
+    model = _mapping(effective.get("model"), "effective model configuration")
+    defaults = _load_constructor_defaults(
+        root, identity["model"], MODEL_FLAG_NAMES
+    )
+    effective_model = clone_configuration(model)
+    for name in MODEL_FLAG_NAMES:
+        if name not in effective_model:
+            effective_model[name] = defaults[name]
+    effective["model"] = effective_model
+
+    dataset_path = root / identity["dataset"]["config_path"]
+    dataset_config, dataset_chain = _load_python_config_with_bases(dataset_path)
+    projection_path = root / identity["projection"]["config_path"]
+    projection_config = _load_yaml_with_bases(projection_path)
+    complete = {
+        "runtime": effective,
+        "dataset": dataset_config,
+        "projection": projection_config,
+    }
+    pipeline = dataset_config.get("test_pipeline")
+    if type(pipeline) is not list:
+        raise E3IdentityError("resolved dataset test_pipeline must be a list")
+    model_projection = {
+        "model": effective_model,
+        "projection": projection_config,
+    }
+
+    model_chain = _yaml_inheritance_chain(eval_path)
+    base_chain = _yaml_inheritance_chain(base_path)
+    projection_chain = _yaml_inheritance_chain(projection_path)
+    source_specs: list[tuple[str, Path]] = []
+    for source in model_chain[:-1]:
+        source_specs.append(("model_inheritance", source))
+    source_specs.append(("e3_leaf", model_chain[-1]))
+    source_specs.append(("model_constructor_defaults", root / identity["model"]["constructor_path"]))
+    for source in base_chain[:-1]:
+        source_specs.append(("evaluation_inheritance", source))
+    source_specs.append(("evaluation_override", base_chain[-1]))
+    for source in dataset_chain[:-1]:
+        source_specs.append(("dataset_inheritance", source))
+    source_specs.append(("dataset_definition", dataset_chain[-1]))
+    for source in projection_chain[:-1]:
+        source_specs.append(("projection_inheritance", source))
+    source_specs.append(("projection_definition", projection_chain[-1]))
+
+    return {
+        "complete": complete,
+        "effective": effective,
+        "dataset": dataset_config,
+        "dataset_pipeline": pipeline,
+        "evaluation": effective["evaluate"],
+        "model_projection": model_projection,
+        "sources": _source_records(root, source_specs),
+    }
+
+
+def _validate_configuration_sources(
+    expected: Any, observed: Sequence[Mapping[str, Any]], *, label: str
+) -> None:
+    if type(expected) is not list or len(expected) != len(observed):
+        raise E3IdentityError(
+            f"{label} source chain length mismatch: expected "
+            f"{len(expected) if type(expected) is list else 'invalid'}, "
+            f"observed {len(observed)}"
+        )
+    for index, (expected_source, observed_source) in enumerate(zip(expected, observed)):
+        if expected_source != observed_source:
+            for field in ("order", "role", "path", "sha256", "git_blob"):
+                if expected_source.get(field) != observed_source.get(field):
+                    raise E3IdentityError(
+                        f"{label} source mismatch at [{index}].{field}: "
+                        f"expected {expected_source.get(field)!r}, "
+                        f"observed {observed_source.get(field)!r}"
+                    )
+            raise E3IdentityError(f"{label} source mismatch at index {index}")
+
+
+def validate_complete_e3_configuration(
+    identity: Mapping[str, Any], resolved: Mapping[str, Any]
+) -> dict[str, str]:
+    expected = identity["resolved_configuration"]
+    observed = {
+        "full_sha256": typed_configuration_sha256(resolved["complete"]),
+        "dataset_sha256": typed_configuration_sha256(resolved["dataset"]),
+        "dataset_pipeline_sha256": typed_configuration_sha256(
+            resolved["dataset_pipeline"]
+        ),
+        "evaluation_sha256": typed_configuration_sha256(resolved["evaluation"]),
+        "model_projection_sha256": typed_configuration_sha256(
+            resolved["model_projection"]
+        ),
+    }
+    structural_paths = {
+        "dataset_pipeline_sha256": "$.dataset.test_pipeline",
+        "dataset_sha256": "$.dataset",
+        "evaluation_sha256": "$.runtime.evaluate",
+        "model_projection_sha256": "$.runtime.model+$.projection",
+        "full_sha256": "$",
+    }
+    _validate_configuration_sources(
+        identity["configuration_sources"], resolved["sources"], label="E3 configuration"
+    )
+    for name in (
+        "dataset_pipeline_sha256", "dataset_sha256", "evaluation_sha256",
+        "model_projection_sha256", "full_sha256",
+    ):
+        if observed[name] != expected[name]:
+            raise E3IdentityError(
+                f"complete E3 configuration mismatch at {structural_paths[name]}: "
+                f"expected {expected[name]}, observed {observed[name]}"
+            )
+    return observed
 
 
 def _reject_dataset_class_overrides(
@@ -478,10 +891,13 @@ def validate_static_configuration(
     if check_git:
         _check_git_ancestry(root, identity)
 
-    effective = _deep_merge(
-        _load_yaml_with_bases(eval_path),
-        _load_yaml_with_bases(base_path),
+    complete_configuration = resolve_complete_e3_configuration(
+        repo_root=root,
+        identity=identity,
+        eval_config=eval_path,
+        eval_base_config=base_path,
     )
+    effective = complete_configuration["effective"]
     _reject_forbidden_modes(effective)
     model = _mapping(effective.get("model"), "effective model configuration")
     evaluate = _mapping(
@@ -553,12 +969,7 @@ def validate_static_configuration(
         "COCO-Stuff dataset configuration path",
     )
     dataset_config_path = root / str(configured_dataset_path)
-    try:
-        dataset_config = runpy.run_path(str(dataset_config_path))
-    except (OSError, RuntimeError, SyntaxError) as error:
-        raise E3IdentityError(
-            f"cannot read dataset configuration {dataset_config_path}: {error}"
-        ) from error
+    dataset_config = complete_configuration["dataset"]
     _reject_forbidden_modes(dataset_config, "dataset configuration")
     _require_equal(
         dataset_config.get("dataset_type"),
@@ -604,7 +1015,8 @@ def validate_static_configuration(
 
     projection_path = root / expected_projection["config_path"]
     projection_config = _mapping(
-        _load_yaml(projection_path).get("model"), "projection configuration"
+        complete_configuration["model_projection"]["projection"].get("model"),
+        "projection configuration",
     )
     _reject_forbidden_modes(projection_config, "projection configuration")
     _require_equal(
@@ -661,6 +1073,10 @@ def validate_static_configuration(
                     f"missing {label} checkpoint: {required}"
                 )
 
+    complete_hashes = validate_complete_e3_configuration(
+        identity, complete_configuration
+    )
+
     return {
         "identity_name": identity["identity_name"],
         "evaluation_config": str(eval_path),
@@ -677,6 +1093,9 @@ def validate_static_configuration(
         "checkpoint_checked": check_checkpoint,
         "dataset_checked": dataset_root is not None,
         "external_weights_checked": weight_dir is not None,
+        "typed_configuration_encoding": TYPED_CONFIGURATION_ENCODING,
+        "resolved_configuration_hashes": complete_hashes,
+        "configuration_sources": complete_configuration["sources"],
     }
 
 
@@ -951,6 +1370,8 @@ __all__ = [
     "parse_log_metrics",
     "parse_structured_metrics",
     "repository_root",
+    "resolve_complete_e3_configuration",
+    "validate_complete_e3_configuration",
     "validate_static_configuration",
     "verify_metrics",
     "verify_result",

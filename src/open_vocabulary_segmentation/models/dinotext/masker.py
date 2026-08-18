@@ -194,6 +194,22 @@ class DINOTextMasker(nn.Module):
         self.similarity_type = similarity_type
 
     @torch.no_grad()
+    def raw_similarity(self, image_feat, text_emb):
+        """Return pre-sigmoid patch scores without constructing a mask."""
+        if self.similarity_type != "cosine":
+            raise NotImplementedError(
+                "similarity type {} not implemented".format(self.similarity_type)
+            )
+        image_feat = us.normalize(image_feat, dim=1)
+        return torch.einsum("b c h w, n c -> b n h w", image_feat, text_emb)
+
+    @torch.no_grad()
+    def mask_from_similarity(self, simmap, deterministic=True, hard=False):
+        """Apply the existing E3 sigmoid/hard-mask transform once."""
+        hard_mask, soft_mask = self.sim2mask(simmap, deterministic=deterministic)
+        return hard_mask if hard else soft_mask
+
+    @torch.no_grad()
     def forward_seg(self, image_feat, text_emb, deterministic=True, hard=False):
         """Make mask by 1:N matching
 
@@ -210,20 +226,10 @@ class DINOTextMasker(nn.Module):
         Return:
             mask [B, N, H', W'] (H' and W' are downsampled H/W)
         """
-        b, c, h, w = image_feat.shape
-        n, c = text_emb.shape
-
-        if self.similarity_type == "cosine":
-            image_feat = us.normalize(image_feat, dim=1)  # BCHW
-            # text_emb = us.normalize(text_emb, dim=-1)  # NKC
-            simmap = torch.einsum("b c h w, n c -> b n h w", image_feat, text_emb)
-        else:
-            raise NotImplementedError("similarity type {} not implemented".format(self.similarity_type))
-
-        hard_mask, soft_mask = self.sim2mask(simmap, deterministic=deterministic)
-        mask = hard_mask if hard else soft_mask
-
-        return mask, simmap
+        simmap = self.raw_similarity(image_feat, text_emb)
+        return self.mask_from_similarity(
+            simmap, deterministic=deterministic, hard=hard
+        ), simmap
 
 
 @MODELS.register_module()

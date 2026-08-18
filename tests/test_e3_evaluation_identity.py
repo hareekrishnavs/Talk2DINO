@@ -58,6 +58,12 @@ def _copy_static_repository(tmp_path):
     model_destination = tmp_path / model_source.relative_to(ROOT)
     model_destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(model_source, model_destination)
+    custom_source = (
+        ROOT
+        / "src/open_vocabulary_segmentation/segmentation/configs/_base_/custom_import.py"
+    )
+    custom_destination = tmp_path / custom_source.relative_to(ROOT)
+    shutil.copy2(custom_source, custom_destination)
     return tmp_path
 
 
@@ -96,6 +102,14 @@ def _validate_copy(repo, **kwargs):
     )
 
 
+def _mutate_python_config(repo, callback):
+    path = repo / _identity()["dataset"]["config_path"]
+    text = path.read_text(encoding="utf-8")
+    changed = callback(text)
+    assert changed != text
+    path.write_text(changed, encoding="utf-8")
+
+
 def test_identity_specification_loads_successfully():
     identity = _identity()
     assert identity["identity_name"]
@@ -105,10 +119,129 @@ def test_identity_specification_loads_successfully():
     assert set(identity["expected_metrics"]) == {"aAcc", "mIoU", "mAcc"}
 
 
+@pytest.mark.parametrize(
+    ("old", "new", "match"),
+    [
+        ("images = 5000", "images = 5000.0", "image count.*integer"),
+        ("classes = 171", "classes = 171.0", "class count.*integer"),
+        ("background_class = false", "background_class = 0", "background_class.*boolean"),
+        ("pamr = false", "pamr = 0", "pamr.*boolean"),
+        ("crop = [448, 448]", "crop = [448.0, 448]", "crop elements.*integers"),
+        ("routing_temperature = 0.10", "routing_temperature = 1", "routing temperature.*float"),
+        ("seed = 42", "seed = true", "seed.*integer"),
+    ],
+)
+def test_e3_toml_exact_type_matrix(tmp_path, old, new, match):
+    source = IDENTITY_PATH.read_text()
+    assert old in source
+    mutated = tmp_path / "identity.toml"
+    mutated.write_text(source.replace(old, new, 1))
+    with pytest.raises(E3IdentityError, match=match):
+        load_identity(mutated, repo_root=ROOT)
+
+
 def test_canonical_repository_configuration_passes_static_validation():
     result = validate_static_configuration(repo_root=ROOT)
     assert result["identity_name"] == _identity()["identity_name"]
     assert result["checkpoint_checked"] is False
+
+
+def test_shared_effective_base_unknown_key_is_rejected(tmp_path):
+    repo = _copy_static_repository(tmp_path)
+    path = repo / "src/open_vocabulary_segmentation/configs/stuff/default.yml"
+    path.write_text(path.read_text() + "\nunknown_shared_key: true\n")
+    with pytest.raises(E3IdentityError, match=r"source mismatch.*sha256"):
+        _validate_copy(repo)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda text: text.replace("scale=(2048, 448)", "scale=(2048, 447)", 1),
+        lambda text: text.replace("flip=False", "flip=True", 1),
+        lambda text: text.replace(
+            'dict(type="ImageToTensor", keys=["img"]),',
+            'dict(type="Normalize", mean=[0, 0, 0], std=[1, 1, 1]),\n'
+            '            dict(type="ImageToTensor", keys=["img"]),',
+            1,
+        ),
+        lambda text: text.replace('            dict(type="ImageToTensor", keys=["img"]),\n', "", 1),
+        lambda text: text.replace(
+            '            dict(type="ImageToTensor", keys=["img"]),\n'
+            '            dict(type="Collect", keys=["img"]),',
+            '            dict(type="Collect", keys=["img"]),\n'
+            '            dict(type="ImageToTensor", keys=["img"]),',
+            1,
+        ),
+    ],
+)
+def test_dataset_pipeline_mutations_are_rejected(tmp_path, mutation):
+    repo = _copy_static_repository(tmp_path)
+    _mutate_python_config(repo, mutation)
+    with pytest.raises(E3IdentityError):
+        _validate_copy(repo)
+
+
+def test_evaluation_base_and_projection_source_mutations_are_rejected(tmp_path):
+    repo = _copy_static_repository(tmp_path)
+    eval_base = repo / "src/open_vocabulary_segmentation/configs/stuff/eval_stuff.yml"
+    eval_base.write_text(eval_base.read_text() + "\nunknown_eval_key: null\n")
+    with pytest.raises(E3IdentityError):
+        _validate_copy(repo)
+
+    repo = _copy_static_repository(tmp_path / "projection")
+    projection = repo / _identity()["projection"]["config_path"]
+    projection.write_text(projection.read_text() + "\nunknown_projection_key: null\n")
+    with pytest.raises(E3IdentityError):
+        _validate_copy(repo)
+
+
+@pytest.mark.parametrize(
+    "hash_name",
+    [
+        "full_sha256",
+        "dataset_sha256",
+        "dataset_pipeline_sha256",
+        "evaluation_sha256",
+        "model_projection_sha256",
+    ],
+)
+def test_each_resolved_hash_mismatch_is_rejected(tmp_path, hash_name):
+    source = IDENTITY_PATH.read_text()
+    current = _identity()["resolved_configuration"][hash_name]
+    mutated = tmp_path / f"{hash_name}.toml"
+    mutated.write_text(source.replace(current, "0" * 64, 1))
+    with pytest.raises(E3IdentityError, match="configuration mismatch"):
+        validate_static_configuration(
+            repo_root=ROOT,
+            identity_path=mutated,
+            check_git=False,
+        )
+
+
+def test_source_path_order_and_content_mutations_are_rejected(tmp_path):
+    source = IDENTITY_PATH.read_text()
+    path_mutation = tmp_path / "path.toml"
+    path_mutation.write_text(source.replace(
+        'path = "src/open_vocabulary_segmentation/configs/stuff/eval.yml"',
+        'path = "src/open_vocabulary_segmentation/configs/stuff/wrong.yml"',
+        1,
+    ))
+    with pytest.raises(E3IdentityError, match="source mismatch"):
+        validate_static_configuration(
+            repo_root=ROOT, identity_path=path_mutation, check_git=False
+        )
+
+    order_mutation = tmp_path / "order.toml"
+    order_mutation.write_text(source.replace("order = 0", "order = 1", 1))
+    with pytest.raises(E3IdentityError, match="order"):
+        load_identity(order_mutation, repo_root=ROOT)
+
+    repo = _copy_static_repository(tmp_path / "content")
+    leaf = repo / _identity()["evaluation"]["config_path"]
+    leaf.write_text(leaf.read_text() + "\nunknown_nested:\n  value: true\n")
+    with pytest.raises(E3IdentityError, match="source mismatch"):
+        _validate_copy(repo)
 
 
 def test_wrong_crop_size_fails(tmp_path):
@@ -155,15 +288,15 @@ def test_omitted_pre_trained_uses_production_default_and_passes(tmp_path):
     assert result["projection_checkpoint_loading"] is expected
 
 
-def test_explicit_canonical_pre_trained_passes(tmp_path):
+def test_semantically_redundant_source_edit_is_rejected_by_raw_identity(tmp_path):
     repo = _copy_static_repository(tmp_path)
     expected = _identity()["model"]["flags"]["pre_trained"]
     _mutate_eval_yaml(
         repo,
         lambda config: config["model"].update({"pre_trained": expected}),
     )
-    result = _validate_copy(repo)
-    assert result["projection_checkpoint_loading"] is expected
+    with pytest.raises(E3IdentityError, match="source mismatch"):
+        _validate_copy(repo)
 
 
 @pytest.mark.parametrize("disabled_value", [False, 0, None, "false", "off"])
@@ -333,7 +466,7 @@ def test_wrong_text_token_retention_flag_fails(tmp_path, flag):
         _validate_copy(repo)
 
 
-def test_omitted_token_flags_use_production_constructor_defaults(tmp_path):
+def test_omitted_token_flags_are_rejected_by_raw_source_identity(tmp_path):
     repo = _copy_static_repository(tmp_path)
     selected = ("use_avg_text_token", "keep_cls", "keep_end_seq")
 
@@ -342,10 +475,8 @@ def test_omitted_token_flags_use_production_constructor_defaults(tmp_path):
             config["model"].pop(name, None)
 
     _mutate_eval_yaml(repo, remove_flags)
-    result = _validate_copy(repo)
-    expected = _identity()["model"]["flags"]
-    for name in selected:
-        assert result["effective_model_flags"][name] is expected[name]
+    with pytest.raises(E3IdentityError, match="source mismatch"):
+        _validate_copy(repo)
 
 
 @pytest.mark.parametrize(

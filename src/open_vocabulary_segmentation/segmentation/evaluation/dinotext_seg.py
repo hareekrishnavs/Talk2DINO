@@ -4,6 +4,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from utils import get_logger
 
+from models.dinotext.cover_dr import (
+    RWRInferenceConfig,
+    RWRRuntimeSummary,
+    apply_rwr_to_e3_snapshot,
+)
+
 
 class DINOTextSegInference(nn.Module):
     def __init__(
@@ -16,6 +22,7 @@ class DINOTextSegInference(nn.Module):
             pamr=False,
             bg_thresh=0.5,
             bg_strategy="base",
+            rwr=None,
             # kp_w=0.3,
             **kwargs,
     ):
@@ -27,6 +34,8 @@ class DINOTextSegInference(nn.Module):
         self.pamr = pamr
         self.bg_thresh = bg_thresh
         self.bg_strategy = bg_strategy
+        self.rwr_config = RWRInferenceConfig.from_mapping(rwr)
+        self.rwr_runtime = RWRRuntimeSummary()
         # self.kp_w = kp_w
 
         self.model = model
@@ -37,6 +46,28 @@ class DINOTextSegInference(nn.Module):
             self.num_classes = len(text_embedding) + 1
         else:
             self.num_classes = len(text_embedding)
+
+        if self.rwr_config.enabled:
+            if self.pamr:
+                raise ValueError("canonical RWR evaluation does not support PAMR")
+            if self.with_bg:
+                raise ValueError(
+                    "canonical RWR evaluation requires no background class"
+                )
+            if self.num_classes != self.rwr_config.expected_class_count:
+                raise ValueError(
+                    "canonical RWR evaluation class-count mismatch: "
+                    f"expected {self.rwr_config.expected_class_count}, "
+                    f"observed {self.num_classes}"
+                )
+            if (
+                torch.distributed.is_available()
+                and torch.distributed.is_initialized()
+                and torch.distributed.get_world_size() != 1
+            ):
+                raise RuntimeError(
+                    "canonical RWR reproduction requires exactly one process/GPU"
+                )
 
         self.align_corners = False
         logger = get_logger()
@@ -54,12 +85,25 @@ class DINOTextSegInference(nn.Module):
         # masks [B, N, H, W]
         # simmap [B, N, H//4, W//4]
         # soft mask (logit-like) is required
-        masks, simmap = self.model.generate_masks(
-            img,
-            self.text_embedding,
-            apply_pamr=self.pamr,
-            # kp_w=self.kp_w,
-        )
+        if self.rwr_config.enabled:
+            snapshot = self.model.generate_patch_snapshot(
+                img,
+                self.text_embedding,
+            )
+            rwr_output = apply_rwr_to_e3_snapshot(snapshot, self.rwr_config)
+            self.rwr_runtime.add(rwr_output)
+            masks = self.model.masks_from_patch_scores(
+                rwr_output.patch_scores,
+                snapshot.grid_hw,
+                tuple(img.shape[-2:]),
+            )
+        else:
+            masks, simmap = self.model.generate_masks(
+                img,
+                self.text_embedding,
+                apply_pamr=self.pamr,
+                # kp_w=self.kp_w,
+            )
 
         B, N, H, W = masks.shape
 

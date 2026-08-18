@@ -1,0 +1,5 @@
+_base_: dinotext_stuff_vitb_mlp_infonce_paired_soft_routing_tau010.yml
+evaluate:
+  rwr:
+    enabled: true
+    identity_path: evaluation_identities/e3_canonical_directed_rwr.toml

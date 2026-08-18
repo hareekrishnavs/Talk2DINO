@@ -1,0 +1,153 @@
+/scratch/haree/venv/talk2dino-a100/lib/python3.11/site-packages/mmcv/__init__.py:20: UserWarning: On January 1, 2023, MMCV will release v2.0.0, in which it will remove components related to the training process and add a data transformation module. In addition, it will rename the package names mmcv to mmcv-lite and mmcv-full to mmcv. See https://github.com/open-mmlab/mmcv/blob/master/docs/en/compatibility.md for more details.
+  warnings.warn(
+Device: cuda
+RANK and WORLD_SIZE in environ: 0/1
+/scratch/haree/venv/talk2dino-a100/lib/python3.11/site-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+[rank0]:[W817 13:38:03.338811057 ProcessGroupNCCL.cpp:5324] Guessing device ID based on global rank. This can cause a hang if rank to GPU mapping is heterogeneous. You can specify device_id in init_process_group()
+[2026-08-17 13:38:04 default](main.py 595): INFO Full config saved to /project/6114407/haree/Talk2DINO/ablationAll/e11_cover_dr/canonical_gpu_19971724/output/config.json
+[2026-08-17 13:38:04 default](main.py 601): INFO Environment info:
+------------------------------------------------------------
+sys.platform: linux
+Python: 3.11.5 (main, Sep 18 2023, 12:23:42) [GCC 12.3.1 20230526]
+CUDA available: True
+GPU 0: NVIDIA H100 80GB HBM3
+CUDA_HOME: None
+GCC: gcc (Gentoo 12.3.1_p20230526 p2) 12.3.1 20230526
+PyTorch: 2.12.0
+PyTorch compiling details: PyTorch built with:
+  - GCC 12.3
+  - C++ Version: 202002
+  - Intel(R) MKL-DNN v3.11.2 (Git Hash 03c022d3ffdcee958cfacbe720048e725fdf644c)
+  - OpenMP 201511 (a.k.a. OpenMP 4.5)
+  - LAPACK is enabled (usually provided by MKL)
+  - NNPACK is enabled
+  - CPU capability usage: AVX512
+  - CUDA Runtime 13.2
+  - NVCC architecture flags: -gencode;arch=compute_80,code=sm_80;-gencode;arch=compute_90,code=sm_90;-gencode;arch=compute_100,code=sm_100;-gencode;arch=compute_100,code=compute_100
+  - CuDNN 92.1.1
+  - Build settings: BLAS_INFO=flexi, BUILD_TYPE=Release, COMMIT_SHA=0d62256a2b23365f8e1604297eb23a6545102aa8, CUDA_FLAGS= -DLIBCUDACXX_ENABLE_SIMPLIFIED_COMPLEX_OPERATIONS -Xfatbin -compress-all -DONNX_NAMESPACE=onnx_torch -gencode arch=compute_80,code=sm_80 -gencode arch=compute_90,code=sm_90 -gencode arch=compute_100,code=sm_100 -gencode arch=compute_100,code=compute_100 -Xcudafe --diag_suppress=cc_clobber_ignored,--diag_suppress=field_without_dll_interface,--diag_suppress=base_class_has_different_dll_interface,--diag_suppress=dll_interface_conflict_none_assumed,--diag_suppress=dll_interface_conflict_dllexport_assumed,--diag_suppress=bad_friend_decl --expt-relaxed-constexpr --expt-extended-lambda  -Wno-deprecated-gpu-targets --expt-extended-lambda -DCUB_WRAPPED_NAMESPACE=at_cuda_detail -DDISABLE_CUSPARSE_DEPRECATED -DCUDA_HAS_FP16=1 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -DC10_NODEPRECATED, CUDA_VERSION=13.2, CUDNN_VERSION=9.21.1, CXX_COMPILER=/cvmfs/soft.computecanada.ca/gentoo/2023/x86-64-v3/usr/x86_64-pc-linux-gnu/gcc-bin/12/c++, CXX_FLAGS= -fvisibility-inlines-hidden -DUSE_PTHREADPOOL -DNDEBUG -DUSE_KINETO -DLIBKINETO_NOROCTRACER -DLIBKINETO_NOXPUPTI=ON -DUSE_FBGEMM -DUSE_MSLK -DUSE_PYTORCH_QNNPACK -DUSE_XNNPACK -DSYMBOLICATE_MOBILE_DEBUG_HANDLE -O2 -fPIC -DC10_NODEPRECATED -Wall -Wextra -Werror=return-type -Werror=non-virtual-dtor -Werror=range-loop-construct -Werror=bool-operation -Wnarrowing -Wno-missing-field-initializers -Wno-unknown-pragmas -Wno-unused-parameter -Wno-strict-overflow -Wno-strict-aliasing -Wno-stringop-overflow -Wsuggest-override -Wno-psabi -Wno-error=old-style-cast -faligned-new -Wno-maybe-uninitialized -fno-math-errno -fno-trapping-math -Werror=format -Wno-stringop-overflow, LAPACK_INFO=flexi, PERF_WITH_AVX=1, PERF_WITH_AVX2=1, TORCH_VERSION=2.12.0, USE_CUDA=ON, USE_CUDNN=ON, USE_CUSPARSELT=ON, USE_GFLAGS=OFF, USE_GLOG=OFF, USE_GLOO=ON, USE_MKLDNN=ON, USE_MPI=ON, USE_NCCL=ON, USE_NNPACK=ON, USE_OPENMP=ON, USE_ROCM=OFF, USE_ROCM_KERNEL_ASSERT=OFF, USE_XCCL=OFF, USE_XPU=OFF, 
+
+TorchVision: 0.27.0
+OpenCV: 4.14.0
+MMCV: 1.7.2
+MMCV Compiler: n/a
+MMCV CUDA Compiler: n/a
+------------------------------------------------------------
+
+[2026-08-17 13:38:04 default](main.py 603): INFO Git hash: ad63303
+[2026-08-17 13:38:04 default](main.py 606): INFO evaluate:
+  pamr: false
+  bg_thresh: 0.4
+  kp_w: 0.3
+  pred_qual_path: null
+  gt_qual_path: null
+  eval_only: true
+  template: sub_imagenet_template
+  task:
+  - coco_stuff
+  t_voc20: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/t_pascal_voc12_20.py
+  t_context59: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/t_pascal_context59.py
+  voc: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/pascal_voc12.py
+  voc20: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/pascal_voc12_20.py
+  context: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/pascal_context.py
+  context59: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/pascal_context59.py
+  coco_stuff: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/stuff.py
+  coco_object: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/coco.py
+  cityscapes: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/cityscapes.py
+  ade20k: src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/ade20k.py
+  save_logits: null
+  eval_freq: 5000
+  rwr:
+    enabled: true
+    identity_path: evaluation_identities/e3_canonical_directed_rwr.toml
+_base_: dinotext_stuff_vitb_mlp_infonce_paired_soft_routing_tau010.yml
+data:
+  batch_size: 256
+  pin_memory: true
+  num_workers: 0
+  seed: ${train.seed}
+  dataset:
+    meta:
+      gcc3m:
+        type: img_txt_pair
+        path: ./data/gcc3m
+        prefix: gcc-train-{000000..00347}.tar
+        length: 2881393
+      gcc12m:
+        type: img_txt_pair
+        path: ./data/gcc12m
+        prefix: cc-{000000..001175}.tar
+        length: 11286526
+    train:
+    - gcc3m
+    - gcc12m
+  img_aug:
+    deit_aug: true
+    img_size: 224
+    img_scale:
+    - 0.08
+    - 1.0
+    interpolation: bilinear
+    color_jitter: 0.4
+    auto_augment: rand-m9-mstd0.5-inc1
+    re_prob: 0.25
+    re_mode: pixel
+    re_count: 1
+  text_aug: null
+train:
+  start_step: 0
+  total_steps: 50000
+  warmup_steps: 20000
+  ust_steps: 0
+  base_lr: 0.0016
+  weight_decay: 0.05
+  min_lr: 4.0e-05
+  clip_grad: 5.0
+  fp16: true
+  fp16_comm: true
+  seed: 42
+  lr_scheduler:
+    name: cosine
+  optimizer:
+    name: adamw
+    eps: 1.0e-08
+    betas:
+    - 0.9
+    - 0.999
+checkpoint:
+  resume: ''
+  save_topk: 0
+  save_all: false
+model_name: default
+output: /project/6114407/haree/Talk2DINO/ablationAll/e11_cover_dr/canonical_gpu_19971724/output
+tag: default
+print_freq: 20
+seed: 42
+wandb: false
+model:
+  clip_model_name: ViT-B/16
+  keep_cls: false
+  keep_end_seq: false
+  model_name: dinov2_vitb14_reg
+  proj_class: vitb_mlp_infonce_paired_soft_routing_tau010
+  proj_model: ProjectionLayer
+  proj_name: vitb_mlp_infonce_paired_soft_routing_tau010
+  resize_dim: 448
+  type: DINOText
+  use_avg_text_token: false
+  backbone_weights: /scratch/haree/weights/dinov2_vitb14_reg4_pretrain.pth
+  clip_model_path: /scratch/haree/weights/ViT-B-16.pt
+
+/scratch/haree/venv/talk2dino-a100/lib/python3.11/site-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+2026-08-17 13:38:04,679 - mmseg - INFO - Loaded 5000 images
+[2026-08-17 13:38:04 default](main.py 159): INFO Creating model:DINOText/default
+[2026-08-17 13:38:08 default](main.py 177): INFO number of params: 984577 (1.0M)
+[2026-08-17 13:38:08 default](main.py 181): INFO GROUP_RANK = 0 | LOCAL_RANK = 0 | RANK = 0 | MASTER_ADDR = g23 | MASTER_PORT = 35205 | ROLE_RANK = 0 | LOCAL_WORLD_SIZE = 1 | WORLD_SIZE = 1 | ROLE_WORLD_SIZE = 1 | TORCHELASTIC_RESTART_COUNT = 0 | TORCHELASTIC_MAX_RESTARTS = 0 | TORCHELASTIC_RUN_ID = 6dc91aa6-71a2-4546-a7b7-d86ea044e1c3
+[2026-08-17 13:38:08 default](main.py 188): INFO !!! Single-node setting :: skip fp16 compression hook
+/project/6114407/haree/Talk2DINO/src/open_vocabulary_segmentation/main.py:190: FutureWarning: `torch.cuda.amp.GradScaler(args...)` is deprecated. Please use `torch.amp.GradScaler('cuda', args...)` instead.
+  scaler = torch.cuda.amp.GradScaler(enabled=cfg.train.fp16)
+[2026-08-17 13:38:08 default](main.py 390): INFO ### Validation dataset: coco_stuff (Subset)
+[2026-08-17 13:38:10 default](dinotext_seg.py 74): INFO Building DINOTextSegInference with 171 classes, test_cfg=Config (path: None): {'mode': 'slide', 'stride': (224, 224), 'crop_size': (448, 448)}, with_bg=False, pamr=False, bg_thresh=0.4
+[                                                  ] 0/5000, elapsed: 0s, ETA:

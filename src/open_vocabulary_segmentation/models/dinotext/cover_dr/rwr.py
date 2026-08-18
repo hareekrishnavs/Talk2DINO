@@ -184,29 +184,40 @@ def _raise_solver_failure(
     residual_replacement_counts: torch.Tensor | None = None,
     restart_reason_counts: dict[str, int] | None = None,
     latest_restart_reason: str | None = None,
+    work_count: int | None = None,
+    certified_residual: torch.Tensor | None = None,
+    certified_scaled_residual: torch.Tensor | None = None,
+    certificate_dtype: str | None = None,
+    fp64_certificate_checks: int = 0,
+    fp64_certified_rhs: int = 0,
+    fp64_certificate_rejections: int = 0,
+    fp64_certificate_restart_count: int = 0,
+    fp64_certificate_work: int = 0,
 ) -> NoReturn:
     """Raise one complete diagnostic for an iterative solver failure.
 
     ``iteration=0`` means no update completed; otherwise ``iteration=t``
     means exactly ``t`` valid solver updates completed.
     """
-    primal_residual = None
+    working_primal_residual = None
     current_scores = None
-    absolute_residual_inf = math.inf
-    maximum_scaled_residual = math.inf
+    working_absolute_residual_inf = math.inf
+    working_maximum_scaled_residual = math.inf
     if solution is not None:
         current_scores = solution.detach().clone().contiguous()
     if operator is not None and solution is not None and right_hand_side is not None:
-        primal_residual = (
+        working_primal_residual = (
             right_hand_side - operator._matmul_prepared(solution)
         ).detach()
-        if bool(torch.isfinite(primal_residual).all()):
-            diagnostic_residual = primal_residual
+        if bool(torch.isfinite(working_primal_residual).all()):
+            diagnostic_residual = working_primal_residual
             diagnostic_rhs = right_hand_side
             if active_mask is not None and bool(torch.any(active_mask)):
                 diagnostic_residual = diagnostic_residual[:, active_mask]
                 diagnostic_rhs = diagnostic_rhs[:, active_mask]
-            absolute_residual_inf = float(diagnostic_residual.abs().max().item())
+            working_absolute_residual_inf = float(
+                diagnostic_residual.abs().max().item()
+            )
             _norm, _threshold, scaled = _scaled_residual_quantities(
                 diagnostic_residual,
                 diagnostic_rhs,
@@ -214,7 +225,40 @@ def _raise_solver_failure(
                 atol=atol,
             )
             if bool(torch.isfinite(scaled).all()):
-                maximum_scaled_residual = float(scaled.max().item())
+                working_maximum_scaled_residual = float(scaled.max().item())
+
+    certified_absolute_residual_inf = math.inf
+    certified_maximum_scaled_residual = math.inf
+    if certified_residual is not None:
+        diagnostic_certified_residual = certified_residual
+        diagnostic_certified_scaled = certified_scaled_residual
+        if active_mask is not None and bool(torch.any(active_mask)):
+            diagnostic_certified_residual = diagnostic_certified_residual[
+                :, active_mask
+            ]
+            if diagnostic_certified_scaled is not None:
+                diagnostic_certified_scaled = diagnostic_certified_scaled[active_mask]
+        if bool(torch.isfinite(diagnostic_certified_residual).all()):
+            certified_absolute_residual_inf = float(
+                diagnostic_certified_residual.abs().max().item()
+            )
+        if (
+            diagnostic_certified_scaled is not None
+            and bool(torch.isfinite(diagnostic_certified_scaled).all())
+        ):
+            certified_maximum_scaled_residual = float(
+                diagnostic_certified_scaled.max().item()
+            )
+    absolute_residual_inf = (
+        certified_absolute_residual_inf
+        if certified_residual is not None
+        else working_absolute_residual_inf
+    )
+    maximum_scaled_residual = (
+        certified_maximum_scaled_residual
+        if certified_residual is not None
+        else working_maximum_scaled_residual
+    )
 
     failing_rhs: tuple[int, ...] = ()
     if failing_mask is not None:
@@ -244,6 +288,10 @@ def _raise_solver_failure(
         f"iteration={iteration}",
         f"abs_primal_residual_inf={absolute_residual_inf:.17g}",
         f"max_scaled_primal_residual={maximum_scaled_residual:.17g}",
+        f"working_abs_primal_residual_inf={working_absolute_residual_inf:.17g}",
+        f"working_max_scaled_primal_residual={working_maximum_scaled_residual:.17g}",
+        f"certified_abs_primal_residual_inf={certified_absolute_residual_inf:.17g}",
+        f"certified_max_scaled_primal_residual={certified_maximum_scaled_residual:.17g}",
         f"rtol={rtol:.17g}",
         f"atol={atol:.17g}",
         f"reason={reason}",
@@ -260,6 +308,13 @@ def _raise_solver_failure(
         ("restart_counts", list(restarts_per_rhs) if restarts_per_rhs else None),
         ("restart_reasons", dict(ordered_restart_reasons) if ordered_restart_reasons else None),
         ("latest_restart_reason", latest_restart_reason),
+        ("work_count", work_count),
+        ("certificate_dtype", certificate_dtype),
+        ("fp64_certificate_checks", fp64_certificate_checks),
+        ("fp64_certified_rhs", fp64_certified_rhs),
+        ("fp64_certificate_rejections", fp64_certificate_rejections),
+        ("fp64_certificate_restart_count", fp64_certificate_restart_count),
+        ("fp64_certificate_work", fp64_certificate_work),
         ("detail", detail),
     ):
         if value is not None:
@@ -269,6 +324,10 @@ def _raise_solver_failure(
     error.iteration = iteration
     error.abs_primal_residual_inf = absolute_residual_inf
     error.max_scaled_primal_residual = maximum_scaled_residual
+    error.working_abs_primal_residual_inf = working_absolute_residual_inf
+    error.working_max_scaled_primal_residual = working_maximum_scaled_residual
+    error.certified_abs_primal_residual_inf = certified_absolute_residual_inf
+    error.certified_max_scaled_primal_residual = certified_maximum_scaled_residual
     error.rtol = rtol
     error.atol = atol
     error.reason = reason
@@ -285,9 +344,32 @@ def _raise_solver_failure(
     error.residual_replacements_per_rhs = residual_replacements_per_rhs
     error.restart_reason_counts = ordered_restart_reasons
     error.latest_restart_reason = latest_restart_reason
+    error.work_count = work_count
+    error.certificate_dtype = certificate_dtype
+    error.fp64_certificate_checks = fp64_certificate_checks
+    error.fp64_certified_rhs = fp64_certified_rhs
+    error.fp64_certificate_rejections = fp64_certificate_rejections
+    error.fp64_certificate_restart_count = fp64_certificate_restart_count
+    error.fp64_certificate_work = fp64_certificate_work
     error.current_scores = current_scores
     error.primal_residual = (
-        None if primal_residual is None else primal_residual.clone().contiguous()
+        None
+        if certified_residual is None and working_primal_residual is None
+        else (
+            certified_residual
+            if certified_residual is not None
+            else working_primal_residual
+        ).clone().contiguous()
+    )
+    error.working_primal_residual = (
+        None
+        if working_primal_residual is None
+        else working_primal_residual.clone().contiguous()
+    )
+    error.certified_primal_residual = (
+        None
+        if certified_residual is None
+        else certified_residual.clone().contiguous()
     )
     raise error
 
@@ -356,6 +438,94 @@ class SparseRWROperator:
 
 
 @dataclass(frozen=True)
+class _FP64ResidualCertificate:
+    """Device-local FP64 residuals for selected columns of the stored system."""
+
+    columns: torch.Tensor
+    residual: torch.Tensor
+    residual_norm: torch.Tensor
+    threshold: torch.Tensor
+    scaled_residual: torch.Tensor
+
+
+@torch.no_grad()
+def _sparse_fp64_residual_certificate(
+    graph: DirectedTopKGraph,
+    alpha: float,
+    solution: torch.Tensor,
+    right_hand_side: torch.Tensor,
+    *,
+    columns: torch.Tensor | None = None,
+    rtol: float,
+    atol: float,
+) -> _FP64ResidualCertificate:
+    """Certify selected columns of the exact quantized production system.
+
+    The graph indices are used unchanged. Stored graph weights, the already
+    constructed RHS, and the candidate FP32 iterate are cast to FP64 on their
+    current device. No dense graph, transpose application, CPU transfer, or
+    autograd graph is created.
+    """
+    if solution.ndim != 2 or right_hand_side.ndim != 2:
+        raise RWRInputError("certificate operands must have shape [N, R]")
+    if solution.shape != right_hand_side.shape:
+        raise RWRInputError("certificate solution and RHS shapes must match")
+    if solution.shape[0] != graph.num_nodes:
+        raise RWRInputError("certificate operands and graph node count must match")
+    if solution.device != graph.transition_weights.device:
+        raise RWRInputError("certificate operands and graph must share a device")
+    if right_hand_side.device != solution.device:
+        raise RWRInputError("certificate solution and RHS must share a device")
+    if columns is None:
+        selected_columns = torch.arange(
+            solution.shape[1], dtype=torch.long, device=solution.device
+        )
+    else:
+        if (
+            not isinstance(columns, torch.Tensor)
+            or columns.ndim != 1
+            or columns.dtype != torch.long
+            or columns.device != solution.device
+        ):
+            raise RWRInputError(
+                "certificate columns must be a device-local int64 vector"
+            )
+        if columns.numel() == 0:
+            raise RWRInputError("certificate columns must be nonempty")
+        if bool(torch.any(columns < 0)) or bool(
+            torch.any(columns >= solution.shape[1])
+        ):
+            raise RWRInputError("certificate column index is out of range")
+        if torch.unique(columns).numel() != columns.numel():
+            raise RWRInputError("certificate columns must be unique")
+        selected_columns = columns.detach().clone()
+
+    candidate64 = solution.index_select(1, selected_columns).to(torch.float64)
+    rhs64 = right_hand_side.index_select(1, selected_columns).to(torch.float64)
+    indices = graph.neighbor_indices
+    weights64 = graph.transition_weights.to(torch.float64)
+    gathered = candidate64[indices]
+    spread = (weights64.unsqueeze(-1) * gathered).sum(dim=1)
+    residual = rhs64 - (candidate64 - float(alpha) * spread)
+    _require_finite(residual, "FP64 residual certificate")
+    residual_norm, threshold, scaled = _scaled_residual_quantities(
+        residual,
+        rhs64,
+        rtol=rtol,
+        atol=atol,
+    )
+    _require_finite(residual_norm, "FP64 certificate residual norm")
+    _require_finite(threshold, "FP64 certificate threshold")
+    return _FP64ResidualCertificate(
+        columns=selected_columns,
+        residual=residual,
+        residual_norm=residual_norm,
+        threshold=threshold,
+        scaled_residual=scaled,
+    )
+
+
+@dataclass(frozen=True)
 class RWRSolveResult:
     """Owned scores and finite diagnostics from a successful RWR solve."""
 
@@ -367,12 +537,23 @@ class RWRSolveResult:
     absolute_residual_inf: float
     maximum_scaled_residual: float
     fixed_point_delta_inf: float
+    work_count: int = 0
     total_restart_count: int = 0
     max_restarts_per_rhs: int = 0
     total_residual_replacement_count: int = 0
     restarts_per_rhs: tuple[int, ...] = ()
     residual_replacements_per_rhs: tuple[int, ...] = ()
     restart_reason_counts: tuple[tuple[str, int], ...] = ()
+    working_absolute_residual_inf: float = 0.0
+    working_maximum_scaled_residual: float = 0.0
+    certified_absolute_residual_inf: float = 0.0
+    certified_maximum_scaled_residual: float = 0.0
+    certificate_dtype: str = ""
+    fp64_certificate_checks: int = 0
+    fp64_certified_rhs: int = 0
+    fp64_certificate_rejections: int = 0
+    fp64_certificate_restart_count: int = 0
+    fp64_certificate_work: int = 0
 
     def __post_init__(self) -> None:
         if not isinstance(self.scores, torch.Tensor):
@@ -397,10 +578,22 @@ class RWRSolveResult:
             or self.iterations < 0
         ):
             raise ValueError("iterations must be a non-negative integer")
+        if (
+            isinstance(self.work_count, bool)
+            or not isinstance(self.work_count, int)
+            or self.work_count < self.iterations
+        ):
+            raise ValueError(
+                "work_count must be an integer greater than or equal to iterations"
+            )
         for name in (
             "absolute_residual_inf",
             "maximum_scaled_residual",
             "fixed_point_delta_inf",
+            "working_absolute_residual_inf",
+            "working_maximum_scaled_residual",
+            "certified_absolute_residual_inf",
+            "certified_maximum_scaled_residual",
         ):
             value = float(getattr(self, name))
             if not math.isfinite(value) or value < 0:
@@ -409,6 +602,11 @@ class RWRSolveResult:
             "total_restart_count",
             "max_restarts_per_rhs",
             "total_residual_replacement_count",
+            "fp64_certificate_checks",
+            "fp64_certified_rhs",
+            "fp64_certificate_rejections",
+            "fp64_certificate_restart_count",
+            "fp64_certificate_work",
         ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -443,6 +641,15 @@ class RWRSolveResult:
             raise ValueError("restart_reason_counts has invalid entries")
         if tuple(sorted(self.restart_reason_counts)) != self.restart_reason_counts:
             raise ValueError("restart_reason_counts must be sorted")
+        if not isinstance(self.certificate_dtype, str) or not self.certificate_dtype:
+            raise ValueError("certificate_dtype must be a nonempty string")
+        if self.fp64_certificate_work != self.fp64_certificate_checks:
+            raise ValueError(
+                "fp64_certificate_work must match sparse certificate checks"
+            )
+        rhs_count = self.scores.shape[1] if self.scores.ndim == 2 else 1
+        if self.fp64_certified_rhs > rhs_count:
+            raise ValueError("fp64_certified_rhs exceeds the RHS count")
 
 
 @dataclass(frozen=True)
@@ -535,6 +742,12 @@ def _residual_state(
     residual_replacement_counts: torch.Tensor | None = None,
     restart_reason_counts: dict[str, int] | None = None,
     latest_restart_reason: str | None = None,
+    certificate_dtype: str | None = None,
+    fp64_certificate_checks: int = 0,
+    fp64_certified_rhs: int = 0,
+    fp64_certificate_rejections: int = 0,
+    fp64_certificate_restart_count: int = 0,
+    fp64_certificate_work: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     residual = operator._matmul_prepared(solution) - right_hand_side
     residual_norm, threshold, scaled = _scaled_residual_quantities(
@@ -568,6 +781,12 @@ def _residual_state(
             residual_replacement_counts=residual_replacement_counts,
             restart_reason_counts=restart_reason_counts,
             latest_restart_reason=latest_restart_reason,
+            certificate_dtype=certificate_dtype,
+            fp64_certificate_checks=fp64_certificate_checks,
+            fp64_certified_rhs=fp64_certified_rhs,
+            fp64_certificate_rejections=fp64_certificate_rejections,
+            fp64_certificate_restart_count=fp64_certificate_restart_count,
+            fp64_certificate_work=fp64_certificate_work,
         )
     failing = ~torch.isfinite(threshold)
     if active_mask is not None:
@@ -591,6 +810,12 @@ def _residual_state(
             residual_replacement_counts=residual_replacement_counts,
             restart_reason_counts=restart_reason_counts,
             latest_restart_reason=latest_restart_reason,
+            certificate_dtype=certificate_dtype,
+            fp64_certificate_checks=fp64_certificate_checks,
+            fp64_certified_rhs=fp64_certified_rhs,
+            fp64_certificate_rejections=fp64_certificate_rejections,
+            fp64_certificate_restart_count=fp64_certificate_restart_count,
+            fp64_certificate_work=fp64_certificate_work,
         )
     converged = residual_norm <= threshold
     return residual, converged, scaled
@@ -603,12 +828,23 @@ def _make_result(
     *,
     method: str,
     iterations: int,
+    work_count: int | None = None,
     fixed_point_delta_inf: float | None = None,
     restart_counts: torch.Tensor | None = None,
     residual_replacement_counts: torch.Tensor | None = None,
     restart_reason_counts: dict[str, int] | None = None,
     latest_restart_reason: str | None = None,
+    certified_residual: torch.Tensor | None = None,
+    certified_scaled_residual: torch.Tensor | None = None,
+    certificate_dtype: str | None = None,
+    fp64_certificate_checks: int = 0,
+    fp64_certified_rhs: int = 0,
+    fp64_certificate_rejections: int = 0,
+    fp64_certificate_restart_count: int = 0,
+    fp64_certificate_work: int = 0,
 ) -> RWRSolveResult:
+    if work_count is None:
+        work_count = iterations
     right_hand_side = (1 - problem.alpha) * problem.scores_matrix
     residual, converged, scaled = _residual_state(
         operator,
@@ -641,7 +877,42 @@ def _make_result(
             residual_replacement_counts=residual_replacement_counts,
             restart_reason_counts=restart_reason_counts,
             latest_restart_reason=latest_restart_reason,
+            work_count=work_count,
         )
+    if certified_residual is not None:
+        if certified_scaled_residual is None:
+            raise RWRInputError(
+                "certified_scaled_residual is required with certified_residual"
+            )
+        certified_converged = certified_scaled_residual <= 1
+        if not bool(torch.all(certified_converged)):
+            _raise_solver_failure(
+                RWRNonConvergenceError,
+                method=method,
+                iteration=iterations,
+                rtol=problem.rtol,
+                atol=problem.atol,
+                reason="final_fp64_certificate_failed",
+                operator=operator,
+                solution=solution,
+                right_hand_side=right_hand_side,
+                active_mask=~certified_converged,
+                failing_mask=~certified_converged,
+                stage="final_fp64_certificate",
+                restart_counts=restart_counts,
+                residual_replacement_counts=residual_replacement_counts,
+                restart_reason_counts=restart_reason_counts,
+                latest_restart_reason=latest_restart_reason,
+                work_count=work_count,
+                certified_residual=certified_residual,
+                certified_scaled_residual=certified_scaled_residual,
+                certificate_dtype=certificate_dtype,
+                fp64_certificate_checks=fp64_certificate_checks,
+                fp64_certified_rhs=fp64_certified_rhs,
+                fp64_certificate_rejections=fp64_certificate_rejections,
+                fp64_certificate_restart_count=fp64_certificate_restart_count,
+                fp64_certificate_work=fp64_certificate_work,
+            )
     if fixed_point_delta_inf is None:
         update = right_hand_side + problem.alpha * problem.graph.matmul(solution)
         fixed_point_delta = (update - solution).abs().max()
@@ -662,10 +933,22 @@ def _make_result(
                 residual_replacement_counts=residual_replacement_counts,
                 restart_reason_counts=restart_reason_counts,
                 latest_restart_reason=latest_restart_reason,
+                work_count=work_count,
             )
         fixed_point_delta_inf = float(fixed_point_delta.item())
-    absolute_residual_inf = float(residual.abs().max().item())
-    maximum_scaled_residual = float(scaled.max().item())
+    working_absolute_residual_inf = float(residual.abs().max().item())
+    working_maximum_scaled_residual = float(scaled.max().item())
+    if certified_residual is None:
+        certified_residual = residual
+        certified_scaled_residual = scaled
+    certified_absolute_residual_inf = float(certified_residual.abs().max().item())
+    certified_maximum_scaled_residual = float(
+        certified_scaled_residual.max().item()
+    )
+    absolute_residual_inf = certified_absolute_residual_inf
+    maximum_scaled_residual = certified_maximum_scaled_residual
+    if certificate_dtype is None:
+        certificate_dtype = str(certified_residual.dtype).removeprefix("torch.")
     output = solution[:, 0] if problem.was_vector else solution
     restarts_per_rhs = (
         ()
@@ -686,12 +969,23 @@ def _make_result(
         absolute_residual_inf=absolute_residual_inf,
         maximum_scaled_residual=maximum_scaled_residual,
         fixed_point_delta_inf=fixed_point_delta_inf,
+        work_count=work_count,
         total_restart_count=sum(restarts_per_rhs),
         max_restarts_per_rhs=max(restarts_per_rhs, default=0),
         total_residual_replacement_count=sum(residual_replacements_per_rhs),
         restarts_per_rhs=restarts_per_rhs,
         residual_replacements_per_rhs=residual_replacements_per_rhs,
         restart_reason_counts=tuple(sorted((restart_reason_counts or {}).items())),
+        working_absolute_residual_inf=working_absolute_residual_inf,
+        working_maximum_scaled_residual=working_maximum_scaled_residual,
+        certified_absolute_residual_inf=certified_absolute_residual_inf,
+        certified_maximum_scaled_residual=certified_maximum_scaled_residual,
+        certificate_dtype=certificate_dtype,
+        fp64_certificate_checks=fp64_certificate_checks,
+        fp64_certified_rhs=fp64_certified_rhs,
+        fp64_certificate_rejections=fp64_certificate_rejections,
+        fp64_certificate_restart_count=fp64_certificate_restart_count,
+        fp64_certificate_work=fp64_certificate_work,
     )
 
 
@@ -815,12 +1109,17 @@ def solve_rwr_cgls(
 ) -> RWRSolveResult:
     """Solve nonsymmetric RWR with reliable-update, restarted CGLS.
 
-    The true primal residual is recomputed after every finite solution update.
-    Each active RHS periodically rebuilds its Krylov state from ``B - K@P``
-    after 128 updates. A column is also restored to its best finite iterate and
-    restarted after severe stagnation or a recoverable recurrence breakdown.
-    Restarts are column-local, deterministic, and consume the existing
-    ``max_iter`` work budget; they never reset the completed-update count.
+    The recursive residual preserves the CGLS conjugacy recurrence between
+    reliable replacements.  The independently recomputed true primal
+    residual remains the sole convergence authority after every finite
+    solution update.  Each active RHS periodically rebuilds its Krylov state
+    from ``B - K@P`` after 128 updates. A column is also restored to its best
+    finite iterate and restarted after severe stagnation or a recoverable
+    recurrence breakdown. Restarts are column-local and deterministic.
+    ``max_iter`` counts completed CGLS updates, matching the historical
+    contract; ``work_count`` reports updates plus restart/recovery work.
+    Device-local sparse FP64 certificate work is reported independently and
+    never consumes a completed iteration or ``work_count`` unit.
     """
     problem = _prepare_problem(
         graph, unary_scores, "cgls", alpha, rtol, atol, max_iter
@@ -835,6 +1134,14 @@ def solve_rwr_cgls(
     residual_replacement_counts = torch.zeros_like(restart_counts)
     restart_reason_counts: dict[str, int] = {}
     latest_restart_reason: str | None = None
+    use_quantized_fp64_certificate = solution.dtype == torch.float32
+    fp64_certificate_checks = 0
+    fp64_certificate_rejections = 0
+    fp64_certificate_restart_count = 0
+    fp64_certificate_work = 0
+    certified_rhs = torch.zeros(
+        rhs_count, dtype=torch.bool, device=solution.device
+    )
 
     def telemetry() -> dict[str, object]:
         return {
@@ -842,15 +1149,129 @@ def solve_rwr_cgls(
             "residual_replacement_counts": residual_replacement_counts,
             "restart_reason_counts": restart_reason_counts,
             "latest_restart_reason": latest_restart_reason,
+            "certificate_dtype": (
+                "float64_quantized_fp32_system"
+                if use_quantized_fp64_certificate
+                else "float64_native_solver"
+            ),
+            "fp64_certificate_checks": fp64_certificate_checks,
+            "fp64_certified_rhs": int(certified_rhs.count_nonzero().item()),
+            "fp64_certificate_rejections": fp64_certificate_rejections,
+            "fp64_certificate_restart_count": fp64_certificate_restart_count,
+            "fp64_certificate_work": fp64_certificate_work,
         }
 
+    def certify_candidates(
+        candidate_mask: torch.Tensor,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        _FP64ResidualCertificate | None,
+    ]:
+        """Return passing/rejected global masks for working-gate candidates."""
+        nonlocal fp64_certificate_checks, fp64_certificate_rejections
+        nonlocal fp64_certificate_work
+        passed = torch.zeros_like(candidate_mask)
+        rejected = torch.zeros_like(candidate_mask)
+        if not bool(torch.any(candidate_mask)):
+            return passed, rejected, None
+        if not use_quantized_fp64_certificate:
+            passed[candidate_mask] = True
+            certified_rhs[candidate_mask] = True
+            return passed, rejected, None
+        columns = candidate_mask.nonzero().flatten()
+        certificate = _sparse_fp64_residual_certificate(
+            problem.graph,
+            problem.alpha,
+            solution,
+            right_hand_side,
+            columns=columns,
+            rtol=problem.rtol,
+            atol=problem.atol,
+        )
+        fp64_certificate_checks += 1
+        fp64_certificate_work += 1
+        local_passed = certificate.scaled_residual <= 1
+        passed[columns[local_passed]] = True
+        rejected[columns[~local_passed]] = True
+        certified_rhs[passed] = True
+        certified_rhs[rejected] = False
+        fp64_certificate_rejections += int(rejected.count_nonzero().item())
+        return passed, rejected, certificate
+
+    def replace_rejected_residual(
+        working_residual: torch.Tensor,
+        rejected: torch.Tensor,
+        certificate: _FP64ResidualCertificate | None,
+    ) -> None:
+        """Install B-KP from the FP64 certificate in the K@P-B recurrence."""
+        nonlocal latest_restart_reason, fp64_certificate_restart_count
+        if not bool(torch.any(rejected)):
+            return
+        if certificate is None:
+            raise AssertionError("certificate rejection lacks FP64 residual")
+        local_rejected = certificate.scaled_residual > 1
+        rejected_columns = certificate.columns[local_rejected]
+        working_residual[:, rejected_columns] = -certificate.residual[
+            :, local_rejected
+        ].to(working_residual.dtype)
+        restart_counts[rejected] += 1
+        residual_replacement_counts[rejected] += 1
+        rejection_count = int(rejected.count_nonzero().item())
+        restart_reason_counts["fp64_certificate_rejection"] = (
+            restart_reason_counts.get("fp64_certificate_rejection", 0)
+            + rejection_count
+        )
+        latest_restart_reason = "fp64_certificate_rejection"
+        fp64_certificate_restart_count += rejection_count
+        # Certificate rejection is not a numerical breakdown. It may recur
+        # while a valid FP32 iterate approaches the FP64 boundary, so it is
+        # bounded by the unchanged completed-update limit rather than the
+        # three-strike recovery counter used for arithmetic breakdowns.
+        solution_compensation[:, rejected] = 0
+        steps_since_restart[rejected] = 0
+        steps_since_progress[rejected] = 0
+
+    def final_fp64_certificate() -> _FP64ResidualCertificate | None:
+        """Defensively certify every FP32 RHS immediately before return."""
+        nonlocal fp64_certificate_checks, fp64_certificate_work
+        if not use_quantized_fp64_certificate:
+            return None
+        certificate = _sparse_fp64_residual_certificate(
+            problem.graph,
+            problem.alpha,
+            solution,
+            right_hand_side,
+            rtol=problem.rtol,
+            atol=problem.atol,
+        )
+        fp64_certificate_checks += 1
+        fp64_certificate_work += 1
+        return certificate
+
+    solution_compensation = torch.zeros_like(solution)
+    steps_since_restart = torch.zeros_like(restart_counts)
+    steps_since_progress = torch.zeros_like(restart_counts)
+    recovery_restart_streak = torch.zeros_like(restart_counts)
+    completed_iterations = 0
+    budget_used = 0
+
     if problem.alpha == 0:
+        certificate = final_fp64_certificate()
+        if certificate is not None:
+            certified_rhs[:] = certificate.scaled_residual <= 1
         return _make_result(
             problem,
             operator,
             solution,
             method="cgls",
             iterations=0,
+            certified_residual=(
+                None if certificate is None else certificate.residual
+            ),
+            certified_scaled_residual=(
+                None if certificate is None else certificate.scaled_residual
+            ),
             **telemetry(),
         )
 
@@ -864,14 +1285,30 @@ def solve_rwr_cgls(
         atol=problem.atol,
         **telemetry(),
     )
-    active = ~converged
+    initial_candidates = converged.clone()
+    passed, rejected, certificate = certify_candidates(initial_candidates)
+    active = ~passed
+    replace_rejected_residual(residual, rejected, certificate)
     if not bool(torch.any(active)):
+        certificate = final_fp64_certificate()
+        if certificate is not None and not bool(
+            torch.all(certificate.scaled_residual <= 1)
+        ):
+            raise AssertionError(
+                "candidate certificate changed before final certification"
+            )
         return _make_result(
             problem,
             operator,
             solution,
             method="cgls",
             iterations=0,
+            certified_residual=(
+                None if certificate is None else certificate.residual
+            ),
+            certified_scaled_residual=(
+                None if certificate is None else certificate.scaled_residual
+            ),
             **telemetry(),
         )
 
@@ -922,14 +1359,8 @@ def solve_rwr_cgls(
     # Neumaier/Kahan-style compensation prevents small FP32 CGLS increments
     # from being discarded when accumulated into a much larger current score.
     # It remains in the working dtype and stores no Krylov history.
-    solution_compensation = torch.zeros_like(solution)
     best_scaled = scaled.clone()
-    steps_since_restart = torch.zeros_like(restart_counts)
-    steps_since_progress = torch.zeros_like(restart_counts)
-    recovery_restart_streak = torch.zeros_like(restart_counts)
     working_epsilon = torch.finfo(solution.dtype).eps
-    completed_iterations = 0
-    budget_used = 0
 
     def raise_cgls_failure(
         exception_type: type[RWRSolverError],
@@ -957,6 +1388,7 @@ def solve_rwr_cgls(
             tensor=tensor,
             breakdown_value=breakdown_value,
             detail=detail,
+            work_count=budget_used,
             **telemetry(),
         )
 
@@ -1007,7 +1439,10 @@ def solve_rwr_cgls(
             atol=problem.atol,
             **telemetry(),
         )
-        active = active & ~converged_now
+        candidates = restart_mask & active & converged_now
+        passed, rejected, certificate = certify_candidates(candidates)
+        replace_rejected_residual(residual, rejected, certificate)
+        active = active & ~passed
         rebuild_mask = restart_mask & active
         if not bool(torch.any(rebuild_mask)):
             direction[:, restart_mask] = 0
@@ -1052,7 +1487,7 @@ def solve_rwr_cgls(
         if reason != "periodic_residual_replacement":
             steps_since_progress[restart_mask] = 0
 
-    while budget_used < problem.max_iter:
+    while completed_iterations < problem.max_iter:
         direction_finite = torch.isfinite(direction).all(dim=0)
         direction_alignment = _cgls_column_inner(normal_residual, direction)
         failing = active & (
@@ -1142,7 +1577,13 @@ def solve_rwr_cgls(
         completed_iterations += 1
 
         previous_active = active.clone()
-        residual, converged_now, scaled = _residual_state(
+        # Preserve the CGLS recurrence between reliable replacements. Feeding
+        # a freshly recomputed FP32 residual into the unrestarted direction
+        # recurrence destroys conjugacy and caused the canonical first crop to
+        # stagnate.  The separate true residual below remains authoritative
+        # for convergence, progress, rollback, and diagnostics.
+        residual = residual + forward_direction * step[None, :]
+        true_residual, converged_now, scaled = _residual_state(
             operator,
             solution,
             right_hand_side,
@@ -1165,17 +1606,51 @@ def solve_rwr_cgls(
         steps_since_progress[previous_active] += 1
         steps_since_progress[meaningful_progress] = 0
         recovery_restart_streak[meaningful_progress] = 0
-        active = active & ~converged_now
+        candidates = previous_active & converged_now
+        passed, rejected, candidate_certificate = certify_candidates(candidates)
+        replace_rejected_residual(residual, rejected, candidate_certificate)
+        certificate_restarted = rejected.clone()
+        active = active & ~passed
         solution_compensation[:, ~active] = 0
         if not bool(torch.any(active)):
-            return _make_result(
-                problem,
-                operator,
-                solution,
-                method="cgls",
-                iterations=completed_iterations,
-                **telemetry(),
-            )
+            final_certificate = final_fp64_certificate()
+            if final_certificate is not None:
+                final_passed = final_certificate.scaled_residual <= 1
+                if not bool(torch.all(final_passed)):
+                    final_rejected = ~final_passed
+                    fp64_certificate_rejections += int(
+                        final_rejected.count_nonzero().item()
+                    )
+                    certified_rhs[final_rejected] = False
+                    replace_rejected_residual(
+                        residual,
+                        final_rejected,
+                        final_certificate,
+                    )
+                    certificate_restarted |= final_rejected
+                    active = final_rejected
+                else:
+                    certified_rhs[:] = True
+            if not bool(torch.any(active)):
+                return _make_result(
+                    problem,
+                    operator,
+                    solution,
+                    method="cgls",
+                    iterations=completed_iterations,
+                    work_count=budget_used,
+                    certified_residual=(
+                        None
+                        if final_certificate is None
+                        else final_certificate.residual
+                    ),
+                    certified_scaled_residual=(
+                        None
+                        if final_certificate is None
+                        else final_certificate.scaled_residual
+                    ),
+                    **telemetry(),
+                )
 
         next_normal_residual = operator._transpose_matmul_prepared(-residual)
         next_normal_residual[:, ~active] = 0
@@ -1216,7 +1691,10 @@ def solve_rwr_cgls(
         coefficient = torch.zeros(
             gamma.shape, dtype=solution.dtype, device=solution.device
         )
-        coefficient[active] = (next_gamma[active] / gamma[active]).to(
+        continuing = active & ~certificate_restarted
+        coefficient[continuing] = (
+            next_gamma[continuing] / gamma[continuing]
+        ).to(
             solution.dtype
         )
         failing = active & ~torch.isfinite(coefficient)
@@ -1231,6 +1709,9 @@ def solve_rwr_cgls(
             budget_used += 1
             continue
         updated_direction = next_normal_residual + direction * coefficient[None, :]
+        updated_direction[:, certificate_restarted] = next_normal_residual[
+            :, certificate_restarted
+        ]
         failing = active & ~torch.isfinite(updated_direction).all(dim=0)
         if bool(torch.any(failing)):
             restart_from_true_residual(
@@ -1254,7 +1735,10 @@ def solve_rwr_cgls(
         periodic = active & (
             steps_since_restart >= _CGLS_PERIODIC_RESTART_STEPS
         ) & ~severe_stagnation
-        if bool(torch.any(severe_stagnation)) and budget_used < problem.max_iter:
+        if (
+            bool(torch.any(severe_stagnation))
+            and completed_iterations < problem.max_iter
+        ):
             restart_from_true_residual(
                 severe_stagnation,
                 reason="severe_true_residual_stagnation",
@@ -1263,7 +1747,7 @@ def solve_rwr_cgls(
                 tensor="scaled_true_primal_residual",
             )
             budget_used += 1
-        if bool(torch.any(periodic)) and budget_used < problem.max_iter:
+        if bool(torch.any(periodic)) and completed_iterations < problem.max_iter:
             restart_from_true_residual(
                 periodic,
                 reason="periodic_residual_replacement",
@@ -1273,6 +1757,16 @@ def solve_rwr_cgls(
             )
             budget_used += 1
 
+    final_certificate = final_fp64_certificate()
+    final_failing = active.clone()
+    if final_certificate is not None:
+        final_certificate_passed = final_certificate.scaled_residual <= 1
+        certified_rhs[final_certificate_passed] = True
+        certified_rhs[~final_certificate_passed] = False
+        fp64_certificate_rejections += int(
+            (~final_certificate_passed).count_nonzero().item()
+        )
+        final_failing |= ~final_certificate_passed
     _raise_solver_failure(
         RWRNonConvergenceError,
         method="cgls",
@@ -1283,10 +1777,19 @@ def solve_rwr_cgls(
         operator=operator,
         solution=solution,
         right_hand_side=right_hand_side,
-        active_mask=active,
-        failing_mask=active,
+        active_mask=final_failing,
+        failing_mask=final_failing,
         stage="convergence_check",
-        detail=f"work_budget_used={budget_used}",
+        detail=f"completed_iteration_limit={problem.max_iter}",
+        work_count=budget_used,
+        certified_residual=(
+            None if final_certificate is None else final_certificate.residual
+        ),
+        certified_scaled_residual=(
+            None
+            if final_certificate is None
+            else final_certificate.scaled_residual
+        ),
         **telemetry(),
     )
 
