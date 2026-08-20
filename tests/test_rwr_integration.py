@@ -633,3 +633,94 @@ def test_full_enabled_production_path_has_one_sigmoid_and_one_interpolation(monk
     inference.rwr_config = _config()
     inference.encode_decode(torch.randn(1, 3, 4, 4), None)
     assert calls == {"sigmoid": 1, "interpolate": 1}
+
+
+# ---------------------------------------------------------------------------
+# Evaluation-owned state reset lifecycle
+# ---------------------------------------------------------------------------
+
+
+def _plain_inference():
+    module = _load_segmentation_module()
+
+    class Model(nn.Module):
+        def generate_masks(self, image, text, apply_pamr=False):
+            del text, apply_pamr
+            return torch.full((1, 3, *image.shape[-2:]), 0.25), torch.empty(0)
+
+    return module.DINOTextSegInference(Model(), torch.randn(3, 4), ["a", "b", "c"], with_bg=False)
+
+
+def test_reset_evaluation_state_is_the_fresh_construction_default():
+    inference = _plain_inference()
+    assert inference.natural_evaluation_result is None
+    assert inference.primary_solver_summary_override is None
+    assert inference.parity_solver_summary_override is None
+    assert inference.rwr_runtime.window_count == 0
+
+
+def test_reset_evaluation_state_clears_a_completed_evaluations_state():
+    inference = _plain_inference()
+    inference.natural_evaluation_result = {"captured": True, "mIoU": 0.3}
+    inference.primary_solver_summary_override = {"window_count": 5}
+    inference.parity_solver_summary_override = {"window_count": 1}
+    inference.rwr_runtime.window_count = 5  # simulate accumulated telemetry
+
+    inference.reset_evaluation_state()
+
+    assert inference.natural_evaluation_result is None
+    assert inference.primary_solver_summary_override is None
+    assert inference.parity_solver_summary_override is None
+    assert inference.rwr_runtime.window_count == 0
+
+
+def test_reset_evaluation_state_does_not_touch_constructor_validated_config():
+    inference = _plain_inference()
+    original_rwr_config = inference.rwr_config
+    original_test_cfg = inference.test_cfg
+    original_classnames = inference.classnames
+    inference.reset_evaluation_state()
+    assert inference.rwr_config is original_rwr_config
+    assert inference.test_cfg is original_test_cfg
+    assert inference.classnames is original_classnames
+
+
+def test_successive_evaluations_on_the_same_instance_do_not_leak_state():
+    # Simulate two sequential dataset evaluations sharing one model
+    # instance -- the pattern reset_evaluation_state() exists to protect,
+    # even though the current main.py call site always builds a fresh
+    # instance per evaluation instead.
+    inference = _plain_inference()
+
+    inference.reset_evaluation_state()  # evaluation 1 begins
+    inference.natural_evaluation_result = {"captured": True, "mIoU": 0.10}
+    inference.primary_solver_summary_override = {"window_count": 3}
+    first_result = inference.natural_evaluation_result
+
+    inference.reset_evaluation_state()  # evaluation 2 begins
+    assert inference.natural_evaluation_result is None
+    assert inference.primary_solver_summary_override is None
+    inference.natural_evaluation_result = {"captured": True, "mIoU": 0.20}
+    second_result = inference.natural_evaluation_result
+
+    assert first_result != second_result
+    assert inference.natural_evaluation_result["mIoU"] == 0.20
+
+
+def test_inference_failure_leaves_no_stale_natural_result_after_reset():
+    inference = _plain_inference()
+    inference.reset_evaluation_state()
+    try:
+        raise RuntimeError("simulated inference failure before natural evaluation ran")
+    except RuntimeError:
+        pass
+    # natural_evaluation_result was never set on this (failed) evaluation --
+    # it must still read as None, never a stale prior value.
+    assert inference.natural_evaluation_result is None
+
+
+def test_two_separate_instances_never_share_evaluation_state():
+    a = _plain_inference()
+    b = _plain_inference()
+    a.natural_evaluation_result = {"captured": True, "mIoU": 0.5}
+    assert b.natural_evaluation_result is None

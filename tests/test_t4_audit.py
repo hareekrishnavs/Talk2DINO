@@ -1081,3 +1081,70 @@ def test_run_t4_audit_for_image_convenience_wrapper():
     )
     assert evaluation2 is not None
     assert signal2.funnel_counts == signal.funnel_counts
+
+
+def test_accumulator_state_dict_round_trip_reproduces_identical_summary():
+    accumulator = t4.T4AuditAccumulator()
+    for _ in range(3):
+        cache, context = _overlap_cache_and_context(**REVERSAL_FIXTURE)
+        signal = t4.build_t4_signal_for_image(cache, context, image_id="img")
+        accumulator.absorb_signal(signal)
+        gt = torch.zeros(*context.image_size.as_tuple(), dtype=torch.int64)
+        evaluation = t4.evaluate_t4_signal_against_gt(
+            signal, gt, ignore_label=255, image_size=context.image_size
+        )
+        accumulator.absorb_gt_evaluation(evaluation)
+        cache.close()
+
+    state = accumulator.state_dict()
+    import json
+    json.dumps(state)  # must be JSON-serializable (checkpoint payload)
+
+    restored = t4.T4AuditAccumulator.from_state_dict(state)
+    assert restored.summary() == accumulator.summary()
+
+
+def test_accumulator_resumes_and_continues_absorbing_after_restore():
+    # Simulate interruption after 2 of 3 images, checkpoint, resume, and
+    # absorb the remaining image -- the final summary must equal an
+    # uninterrupted 3-image run.
+    uninterrupted = t4.T4AuditAccumulator()
+    caches = []
+    signals = []
+    for _ in range(3):
+        cache, context = _overlap_cache_and_context(**REVERSAL_FIXTURE)
+        signal = t4.build_t4_signal_for_image(cache, context, image_id="img")
+        gt = torch.zeros(*context.image_size.as_tuple(), dtype=torch.int64)
+        evaluation = t4.evaluate_t4_signal_against_gt(signal, gt, ignore_label=255, image_size=context.image_size)
+        uninterrupted.absorb_signal(signal)
+        uninterrupted.absorb_gt_evaluation(evaluation)
+        caches.append(cache)
+        signals.append((signal, evaluation))
+
+    resumed = t4.T4AuditAccumulator()
+    for signal, evaluation in signals[:2]:
+        resumed.absorb_signal(signal)
+        resumed.absorb_gt_evaluation(evaluation)
+    checkpoint_state = resumed.state_dict()
+
+    reloaded = t4.T4AuditAccumulator.from_state_dict(checkpoint_state)
+    last_signal, last_evaluation = signals[2]
+    reloaded.absorb_signal(last_signal)
+    reloaded.absorb_gt_evaluation(last_evaluation)
+
+    assert reloaded.summary() == uninterrupted.summary()
+    for cache in caches:
+        cache.close()
+
+
+def test_accumulator_from_state_dict_rejects_missing_field():
+    with pytest.raises(t4.T4AuditError):
+        t4.T4AuditAccumulator.from_state_dict({"images": 0})
+
+
+def test_accumulator_from_state_dict_rejects_wrong_tie_counts_key_set():
+    accumulator = t4.T4AuditAccumulator()
+    state = accumulator.state_dict()
+    state["tie_counts"] = {"only_one_key": 0}
+    with pytest.raises(t4.T4AuditError):
+        t4.T4AuditAccumulator.from_state_dict(state)

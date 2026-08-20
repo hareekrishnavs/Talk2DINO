@@ -81,6 +81,16 @@ RESULT_KEYS = frozenset(
         "solver_summary",
     }
 )
+# v3: current structured-result version. Adds explicit metric-source
+# provenance (rejecting rounded/approximate metrics claiming full
+# precision) and an optional, separately-scoped parity-check solver
+# summary. v2 remains fully, unconditionally verifiable for historical
+# logs/artifacts -- see _verify_record_v2, byte-identical to the original
+# verify_record body.
+RESULT_FORMAT_VERSION_V3 = "talk2dino-canonical-rwr-result-v3"
+FULL_PRECISION_METRIC_SOURCE = "full_precision_area_statistics_from_mmseg_pre_eval"
+SUPPORTED_RESULT_FORMAT_VERSIONS = (RESULT_FORMAT_VERSION, RESULT_FORMAT_VERSION_V3)
+RESULT_KEYS_V3 = RESULT_KEYS | {"metric_source", "parity_solver_summary"}
 SUMMARY_KEYS = frozenset(
     {
         "window_count",
@@ -1102,6 +1112,32 @@ def _require_integer(value: Any, label: str) -> int:
 def verify_record(
     record: Mapping[str, Any], identity: Mapping[str, Any]
 ) -> str:
+    """Version-aware dispatcher. Historical (v2) structured results remain
+    fully, unconditionally verifiable via :func:`_verify_record_v2`
+    (byte-identical logic to the original, single-version verifier this
+    function used to be). Current (v3) results -- which require explicit
+    full-precision metric-source provenance -- are verified via
+    :func:`_verify_record_v3`. Any other format_version is rejected."""
+    if not hasattr(record, "get"):
+        raise RWRReproductionError("structured result must be a mapping")
+    format_version = record.get("format_version")
+    if format_version == RESULT_FORMAT_VERSION:
+        return _verify_record_v2(record, identity)
+    if format_version == RESULT_FORMAT_VERSION_V3:
+        return _verify_record_v3(record, identity)
+    raise RWRReproductionError(
+        f"unsupported structured result format_version {format_version!r}; "
+        f"supported versions: {SUPPORTED_RESULT_FORMAT_VERSIONS}"
+    )
+
+
+def _verify_record_v2(
+    record: Mapping[str, Any], identity: Mapping[str, Any]
+) -> str:
+    """Historical verifier, UNCHANGED from the original single-version
+    ``verify_record`` -- preserves the ability to re-verify any structured
+    result ever logged under format_version v2 (including the E10
+    provenance artifacts), forever."""
     if set(record) != RESULT_KEYS:
         raise RWRReproductionError("structured result has an unexpected schema")
     if record["format_version"] != RESULT_FORMAT_VERSION:
@@ -1241,6 +1277,174 @@ def verify_record(
     )
 
 
+def _verify_record_v3(
+    record: Mapping[str, Any], identity: Mapping[str, Any]
+) -> str:
+    """Current verifier. Identical acceptance logic to v2 (same tolerance,
+    same rounding contract, same canonical-config/identity fields, same
+    solver-summary shape), PLUS: an explicit, closed-vocabulary
+    ``metric_source`` that must name a genuine full-precision computation
+    (never a rounded/approximate one masquerading as full precision), and
+    an optional, separately-scoped ``parity_solver_summary`` that is
+    NEVER substituted for the primary ``solver_summary`` in any check."""
+    if set(record) != RESULT_KEYS_V3:
+        raise RWRReproductionError("structured result has an unexpected schema")
+    if record["format_version"] != RESULT_FORMAT_VERSION_V3:
+        raise RWRReproductionError("structured result format version mismatch")
+    if record["identity_name"] != identity["identity_name"]:
+        raise RWRReproductionError("structured result identity mismatch")
+    _require_exact_string(record["format_version"], "result format_version")
+    _require_exact_string(record["identity_name"], "result identity_name")
+    if _require_exact_string(record["metrics_precision"], "metrics_precision") != "full":
+        raise RWRReproductionError("structured result is not full precision")
+    known_metric_sources = {FULL_PRECISION_METRIC_SOURCE}
+    observed_metric_source = _require_exact_string(record["metric_source"], "metric_source")
+    if observed_metric_source not in known_metric_sources:
+        raise RWRReproductionError(
+            f"metric_source {observed_metric_source!r} does not name a recognized full-precision "
+            f"computation (known: {sorted(known_metric_sources)}) -- refusing to accept a "
+            "rounded/approximate metric object as full precision"
+        )
+    minimum_places = identity["acceptance"]["minimum_metric_decimal_places"]
+    values: dict[str, float] = {}
+    for name in ("aAcc", "mIoU", "mAcc"):
+        token = record[name]
+        if not isinstance(token, Decimal):
+            raise RWRReproductionError(f"{name} must be a decimal JSON number")
+        if max(0, -token.as_tuple().exponent) < minimum_places:
+            raise RWRReproductionError(
+                f"{name} is rounded-only; at least {minimum_places} decimals required"
+            )
+        values[name] = _require_json_float(token, name)
+    if all(0 <= value <= 1 for value in values.values()):
+        raise RWRReproductionError(
+            "fractional [0,1] metrics cannot masquerade as percentages"
+        )
+    if any(value < 0 or value > 100 for value in values.values()):
+        raise RWRReproductionError("metrics must use percentage units")
+    if _require_json_int(record["image_count"], "image_count", minimum=1) != identity["dataset"]["images"]:
+        raise RWRReproductionError("canonical image count mismatch")
+    if _require_json_int(record["class_count"], "class_count", minimum=1) != identity["dataset"]["classes"]:
+        raise RWRReproductionError("canonical class count mismatch")
+    expected_fields = {
+        "rwr_enabled": identity["rwr"]["enabled"],
+        "alpha": identity["rwr"]["alpha"],
+        "top_k": identity["rwr"]["top_k"],
+        "affinity_power": identity["rwr"]["affinity_power"],
+        "graph_mode": identity["rwr"]["graph_mode"],
+        "solver": identity["solver"]["method"],
+        "solver_rtol": identity["solver"]["rtol"],
+        "solver_atol": identity["solver"]["atol"],
+        "solver_max_iterations": identity["solver"]["max_iterations"],
+        "crop": identity["evaluation"]["crop"],
+        "stride": identity["evaluation"]["stride"],
+        "pamr": identity["evaluation"]["pamr"],
+        "background_class": identity["dataset"]["background_class"],
+        "config_path": identity["canonical_config_path"],
+        "config_sha256": identity["canonical_config_sha256"],
+        "checkpoint_path": identity["checkpoint"]["path"],
+        "checkpoint_sha256": identity["checkpoint"]["sha256"],
+        "source_e10_commit": identity["source_e10_commit"],
+        "cache_source_commit": identity["cache_source_commit"],
+        "cache_manifest_sha256": identity["cache_manifest_sha256"],
+        "cache_manifest_evidence": identity["cache_manifest_evidence"],
+        "cache_manifest_attestation_commit": identity[
+            "cache_manifest_attestation_commit"
+        ],
+        "cache_manifest_attestation_path": identity[
+            "cache_manifest_attestation_path"
+        ],
+        "cache_manifest_attestation_blob_sha256": identity[
+            "cache_manifest_attestation_blob_sha256"
+        ],
+        "cache_manifest_archived": identity["cache_manifest_archived"],
+        "historical_cache_used_by_current_run": identity[
+            "historical_cache_used_by_current_run"
+        ],
+    }
+    for name, expected in expected_fields.items():
+        observed = record[name]
+        if type(expected) is float:
+            if _require_json_float(observed, name) != expected:
+                raise RWRReproductionError(f"canonical {name} mismatch")
+        elif type(expected) is bool:
+            if _require_json_bool(observed, name) is not expected:
+                raise RWRReproductionError(f"canonical {name} mismatch")
+        elif type(expected) is int:
+            if _require_json_int(observed, name) != expected:
+                raise RWRReproductionError(f"canonical {name} mismatch")
+        elif type(expected) is list:
+            if _require_exact_integer_pair(observed, name) != tuple(expected):
+                raise RWRReproductionError(f"canonical {name} mismatch")
+        elif _require_exact_string(observed, name) != expected:
+            raise RWRReproductionError(f"canonical {name} mismatch")
+    _require_git_identity(record["source_git_commit"], "runtime Git commit")
+    _require_exact_string(record["source_git_branch"], "runtime Git branch")
+    _require_json_bool(record["source_git_dirty"], "runtime Git dirty flag")
+    for name in ("gpu_model", "torch_version"):
+        _require_exact_string(record[name], f"runtime {name}")
+    _require_exact_string(record["cuda_version"], "runtime CUDA version")
+    elapsed = _require_json_float(record["elapsed_seconds"], "elapsed_seconds")
+    if elapsed < 0:
+        raise RWRReproductionError("elapsed_seconds must be non-negative")
+
+    def _verify_summary(summary: Any, label: str) -> None:
+        if not isinstance(summary, Mapping) or set(summary) != SUMMARY_KEYS:
+            raise RWRReproductionError(f"{label} schema mismatch")
+        for name in SUMMARY_KEYS - {"maximum_scaled_residual"}:
+            _require_integer(summary[name], f"{label}.{name}")
+        maximum_scaled = _require_json_float(summary["maximum_scaled_residual"], f"{label} maximum scaled residual")
+        if maximum_scaled < 0 or maximum_scaled > 1:
+            raise RWRReproductionError(f"{label} residual contract was not satisfied")
+
+    summary = record["solver_summary"]
+    _verify_summary(summary, "solver_summary")
+    if summary["window_count"] <= 0:
+        raise RWRReproductionError("no RWR crop windows were evaluated")
+    if summary["converged_window_count"] != summary["window_count"]:
+        raise RWRReproductionError("not every RWR crop solve converged")
+    if summary["nonzero_restart_windows"] > summary["window_count"]:
+        raise RWRReproductionError("restart window count is inconsistent")
+
+    parity_summary = record["parity_solver_summary"]
+    if parity_summary is not None:
+        _verify_summary(parity_summary, "parity_solver_summary")
+        if parity_summary["nonzero_restart_windows"] > parity_summary["window_count"]:
+            raise RWRReproductionError("parity restart window count is inconsistent")
+        # The parity summary must never silently satisfy the primary
+        # window-count reconciliation on its own; it is a distinct phase.
+        if parity_summary is summary:
+            raise RWRReproductionError("parity_solver_summary must not alias solver_summary")
+
+    expected_miou = float(identity["expected_metrics"]["rwr_mIoU"])
+    delta = abs(values["mIoU"] - expected_miou)
+    tolerance = float(identity["acceptance"]["structured_absolute_mIoU"])
+    if delta > tolerance:
+        raise RWRReproductionError(
+            f"canonical mIoU mismatch: expected {expected_miou}, observed "
+            f"{values['mIoU']}, delta {delta}, tolerance {tolerance}"
+        )
+    if round(values["mIoU"], 2) != float(identity["acceptance"]["rounded_mIoU"]):
+        raise RWRReproductionError(
+            "canonical mIoU does not round to the identity acceptance value"
+        )
+    for metric_name, identity_name in (("aAcc", "rwr_aAcc"), ("mAcc", "rwr_mAcc")):
+        expected_metric = float(identity["expected_metrics"][identity_name])
+        if abs(values[metric_name] - expected_metric) > tolerance:
+            raise RWRReproductionError(f"canonical {metric_name} mismatch")
+    expected_base = float(identity["expected_metrics"]["e3_mIoU"])
+    observed_gain = _require_json_float(record["gain_over_e3_miou"], "mIoU gain")
+    if abs(observed_gain - (values["mIoU"] - expected_base)) > 1e-9:
+        raise RWRReproductionError("reported mIoU gain is inconsistent")
+    return (
+        "RWR REPRODUCTION PASS (v3, full-precision) "
+        f"images={record['image_count']} classes={record['class_count']} "
+        f"aAcc={values['aAcc']:.12f} mIoU={values['mIoU']:.12f} "
+        f"mAcc={values['mAcc']:.12f} delta={delta:.12g} "
+        f"gain={observed_gain:.12f} metric_source={observed_metric_source}"
+    )
+
+
 def verify_result(
     path: Path,
     *,
@@ -1255,11 +1459,15 @@ def verify_result(
 
 
 __all__ = [
+    "FULL_PRECISION_METRIC_SOURCE",
     "IDENTITY_RELATIVE_PATH",
     "RESULT_FORMAT_VERSION",
+    "RESULT_FORMAT_VERSION_V3",
+    "RESULT_KEYS_V3",
     "RESULT_PREFIX",
     "SUPPORTED_CANONICAL_GRAPH_MODE",
     "SUPPORTED_CANONICAL_SOLVER_METHOD",
+    "SUPPORTED_RESULT_FORMAT_VERSIONS",
     "RWRReproductionError",
     "load_identity",
     "parse_structured_result",

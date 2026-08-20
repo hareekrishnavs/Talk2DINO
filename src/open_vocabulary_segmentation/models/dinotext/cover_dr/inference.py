@@ -378,11 +378,51 @@ def patch_scores_to_masks(
     return F.interpolate(masks, output_hw, mode="bilinear", align_corners=True)
 
 
+RESULT_FORMAT_VERSION_V3 = "talk2dino-canonical-rwr-result-v3"
+FULL_PRECISION_METRIC_SOURCE = "full_precision_area_statistics_from_mmseg_pre_eval"
+
+
+def compute_full_precision_metrics(pre_eval_results: list) -> dict[str, float]:
+    """Independently reduces mmseg's own per-image ``dataset.pre_eval()``
+    tuples -- ``(area_intersect, area_union, area_pred, area_label)``, the
+    SAME tuples ``dataset.evaluate()`` itself receives via
+    ``pre_eval_to_metrics`` -- into full float64-precision aAcc/mIoU/mAcc
+    FRACTIONS in ``[0, 1]`` (never percentages, never rounded), matching
+    :func:`build_rwr_structured_record`'s ``metrics`` contract exactly.
+
+    Never calls ``intersect_and_union`` again (no re-solve, no re-forward,
+    no re-inference) -- it only reduces sufficient statistics the natural
+    evaluation loop already produced. mmseg's own ``total_area_to_metrics``
+    accumulates in float32 and additionally rounds to 2 decimal places
+    before the final percentage conversion; this function avoids both by
+    accumulating in float64 throughout and never rounding.
+    """
+    if not pre_eval_results:
+        raise ValueError("pre_eval_results must be non-empty")
+    intersects = torch.stack([torch.as_tensor(t[0]).to(torch.float64) for t in pre_eval_results]).sum(dim=0)
+    unions = torch.stack([torch.as_tensor(t[1]).to(torch.float64) for t in pre_eval_results]).sum(dim=0)
+    labels = torch.stack([torch.as_tensor(t[3]).to(torch.float64) for t in pre_eval_results]).sum(dim=0)
+    label_total = labels.sum()
+    if float(label_total.item()) <= 0.0:
+        raise ValueError("total GT area is zero; cannot compute metrics")
+    all_acc = float((intersects.sum() / label_total).item())
+    iou = intersects / unions
+    acc = intersects / labels
+    miou = float(torch.nanmean(iou).item())
+    macc = float(torch.nanmean(acc).item())
+    for name, value in (("aAcc", all_acc), ("mIoU", miou), ("mAcc", macc)):
+        if not (math.isfinite(value) and 0.0 <= value <= 1.0):
+            raise ValueError(f"computed {name}={value} fell outside the valid [0,1] fraction range")
+    return {"aAcc": all_acc, "mIoU": miou, "mAcc": macc}
+
+
 def build_rwr_structured_record(
     *,
     config: RWRInferenceConfig,
     canonical_identity: Any,
     metrics: Any,
+    metric_source: str = FULL_PRECISION_METRIC_SOURCE,
+    parity_solver_summary: dict[str, int | float] | None = None,
     image_count: int,
     class_count: int,
     crop: tuple[int, int],
@@ -462,26 +502,37 @@ def build_rwr_structured_record(
     exact_string(torch_version, "torch_version")
     exact_string(cuda_version, "cuda_version")
     exact_float(elapsed_seconds, "elapsed_seconds", non_negative=True)
-    if type(solver_summary) is not dict:
-        raise ValueError("solver_summary must be an exact dictionary")
     integer_summary = {
         "window_count", "converged_window_count", "total_iterations",
         "minimum_iterations", "maximum_iterations", "total_restarts",
         "nonzero_restart_windows", "total_residual_replacements",
         "total_fallback_rows",
     }
-    expected_summary = integer_summary | {"maximum_scaled_residual"}
-    if set(solver_summary) != expected_summary:
-        raise ValueError("solver_summary has an unexpected schema")
-    for name in sorted(integer_summary):
-        exact_int(solver_summary[name], f"solver_summary.{name}")
-    exact_float(
-        solver_summary["maximum_scaled_residual"],
-        "solver_summary.maximum_scaled_residual",
-        non_negative=True,
-    )
+    expected_summary_keys = integer_summary | {"maximum_scaled_residual"}
+
+    def validate_summary(summary: Any, label: str) -> None:
+        if type(summary) is not dict:
+            raise ValueError(f"{label} must be an exact dictionary")
+        if set(summary) != expected_summary_keys:
+            raise ValueError(f"{label} has an unexpected schema")
+        for name in sorted(integer_summary):
+            exact_int(summary[name], f"{label}.{name}")
+        exact_float(summary["maximum_scaled_residual"], f"{label}.maximum_scaled_residual", non_negative=True)
+
+    validate_summary(solver_summary, "solver_summary")
+    if parity_solver_summary is not None:
+        validate_summary(parity_solver_summary, "parity_solver_summary")
+
+    known_metric_sources = {FULL_PRECISION_METRIC_SOURCE}
+    if exact_string(metric_source, "metric_source") not in known_metric_sources:
+        raise ValueError(
+            f"metric_source {metric_source!r} is not a recognized full-precision source "
+            f"(known: {sorted(known_metric_sources)}); rounded/approximate metrics must never "
+            "be labeled as this structured record's metrics"
+        )
+
     record = {
-        "format_version": "talk2dino-canonical-rwr-result-v2",
+        "format_version": RESULT_FORMAT_VERSION_V3,
         "identity_name": expected["identity_name"],
         "image_count": image_count,
         "class_count": class_count,
@@ -489,6 +540,7 @@ def build_rwr_structured_record(
         "mIoU": observed_miou,
         "mAcc": percentage("mAcc"),
         "metrics_precision": "full",
+        "metric_source": metric_source,
         "gain_over_e3_miou": observed_miou - expected["expected_metrics"]["e3_mIoU"],
         "rwr_enabled": config.enabled,
         "alpha": config.alpha,
@@ -532,11 +584,17 @@ def build_rwr_structured_record(
         "cuda_version": cuda_version,
         "elapsed_seconds": elapsed_seconds,
         "solver_summary": {name: solver_summary[name] for name in sorted(solver_summary)},
+        "parity_solver_summary": (
+            None if parity_solver_summary is None
+            else {name: parity_solver_summary[name] for name in sorted(parity_solver_summary)}
+        ),
     }
     return record
 
 
 __all__ = [
+    "FULL_PRECISION_METRIC_SOURCE",
+    "RESULT_FORMAT_VERSION_V3",
     "RWRInferenceConfig",
     "RWRInferenceConfigError",
     "RWRInferenceOutput",
@@ -544,5 +602,6 @@ __all__ = [
     "RWRWindowDiagnostics",
     "apply_rwr_to_e3_snapshot",
     "build_rwr_structured_record",
+    "compute_full_precision_metrics",
     "patch_scores_to_masks",
 ]

@@ -109,6 +109,7 @@ rule" or repair mechanism is out of scope by design.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from dataclasses import dataclass, field
 from fractions import Fraction
@@ -1259,6 +1260,80 @@ class T4AuditAccumulator:
             gt_t4_prime=self._gt_t4_prime if self._gt_evaluated else None,
             delta_trust_actionable=delta_trust,
         )
+
+    def state_dict(self) -> dict:
+        """Exact checkpoint state. Every field here is either a running
+        integer total or an int->int histogram -- addition over images is
+        commutative/associative, so this accumulator needs no per-image
+        record to resume exactly; restoring these totals and continuing to
+        absorb the remaining images (in any order relative to each other,
+        though the harness always uses dataset order) reproduces the same
+        final summary as an uninterrupted run, byte-for-byte."""
+        return {
+            "images": self._images,
+            "windows": self._windows,
+            "unique_anchors": self._unique_anchors,
+            "funnel": dataclasses.asdict(self._funnel),
+            "coverage_histogram": dict(self._coverage_histogram),
+            "tie_counts": dict(self._tie_counts),
+            "class_counts_y": dict(self._class_counts_y),
+            "class_counts_d": dict(self._class_counts_d),
+            "class_counts_u": dict(self._class_counts_u),
+            "class_counts_g": dict(self._class_counts_g),
+            "g_equals_d_count": self._g_equals_d_count,
+            "g_third_label_count": self._g_third_label_count,
+            "unary_rank_histogram_y": dict(self._unary_rank_histogram_y),
+            "unary_rank_histogram_d": dict(self._unary_rank_histogram_d),
+            "shared_unary_support_histogram": dict(self._shared_unary_support_histogram),
+            "gt_evaluated": self._gt_evaluated,
+            "gt_t2": dataclasses.asdict(self._gt_t2),
+            "gt_t3": dataclasses.asdict(self._gt_t3),
+            "gt_actionable": dataclasses.asdict(self._gt_actionable),
+            "gt_t4": dataclasses.asdict(self._gt_t4),
+            "gt_t4_prime": dataclasses.asdict(self._gt_t4_prime),
+        }
+
+    @classmethod
+    def from_state_dict(cls, state: Mapping) -> "T4AuditAccumulator":
+        try:
+            acc = cls()
+            acc._images = _require_checkpoint_nonneg_int(state["images"], "images")
+            acc._windows = _require_checkpoint_nonneg_int(state["windows"], "windows")
+            acc._unique_anchors = _require_checkpoint_nonneg_int(state["unique_anchors"], "unique_anchors")
+            acc._funnel = T4FunnelCounts(**{k: int(v) for k, v in state["funnel"].items()})
+            acc._coverage_histogram = {int(k): int(v) for k, v in state["coverage_histogram"].items()}
+            acc._tie_counts = {k: int(v) for k, v in state["tie_counts"].items()}
+            if set(acc._tie_counts) != {"other_window", "source_post_rwr", "source_unary", "stitched"}:
+                raise T4AuditError("checkpoint tie_counts has an unexpected key set")
+            acc._class_counts_y = {int(k): int(v) for k, v in state["class_counts_y"].items()}
+            acc._class_counts_d = {int(k): int(v) for k, v in state["class_counts_d"].items()}
+            acc._class_counts_u = {int(k): int(v) for k, v in state["class_counts_u"].items()}
+            acc._class_counts_g = {int(k): int(v) for k, v in state["class_counts_g"].items()}
+            acc._g_equals_d_count = _require_checkpoint_nonneg_int(state["g_equals_d_count"], "g_equals_d_count")
+            acc._g_third_label_count = _require_checkpoint_nonneg_int(state["g_third_label_count"], "g_third_label_count")
+            acc._unary_rank_histogram_y = {int(k): int(v) for k, v in state["unary_rank_histogram_y"].items()}
+            acc._unary_rank_histogram_d = {int(k): int(v) for k, v in state["unary_rank_histogram_d"].items()}
+            acc._shared_unary_support_histogram = {
+                int(k): int(v) for k, v in state["shared_unary_support_histogram"].items()
+            }
+            gt_evaluated = state["gt_evaluated"]
+            if not isinstance(gt_evaluated, bool):
+                raise T4AuditError("checkpoint gt_evaluated must be a bool")
+            acc._gt_evaluated = gt_evaluated
+            acc._gt_t2 = T4StageAccuracy(**{k: int(v) for k, v in state["gt_t2"].items()})
+            acc._gt_t3 = T4StageAccuracy(**{k: int(v) for k, v in state["gt_t3"].items()})
+            acc._gt_actionable = T4StageAccuracy(**{k: int(v) for k, v in state["gt_actionable"].items()})
+            acc._gt_t4 = T4StageAccuracy(**{k: int(v) for k, v in state["gt_t4"].items()})
+            acc._gt_t4_prime = T4StageAccuracy(**{k: int(v) for k, v in state["gt_t4_prime"].items()})
+        except KeyError as error:
+            raise T4AuditError(f"T4 accumulator checkpoint state is missing required field {error}") from error
+        return acc
+
+
+def _require_checkpoint_nonneg_int(value, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise T4AuditError(f"checkpoint field {name!r} must be a non-negative exact integer")
+    return value
 
 
 # ---------------------------------------------------------------------------

@@ -425,6 +425,14 @@ def validate_seg(config, seg_config, data_loader, model):
         config,
         seg_config,
     )
+    # Explicit lifecycle reset: build_dinotext_seg_inference always
+    # constructs a fresh instance today, so this is a no-op in the current
+    # call pattern -- but it is the guarantee that a caller which instead
+    # reuses a seg_model across multiple evaluations (multiple datasets,
+    # or repeated evaluation on the same model instance) can never observe
+    # a prior run's natural_evaluation_result / *_solver_summary_override
+    # leaking into this one.
+    seg_model.reset_evaluation_state()
 
     if device == "cuda" and dist.get_world_size() > 1:
         mmddp_model = MMDistributedDataParallel(
@@ -447,6 +455,24 @@ def validate_seg(config, seg_config, data_loader, model):
 
     if device == "cpu" or dist.get_rank() == 0:
         metric = [data_loader.dataset.dataset.evaluate(results, metric="mIoU", logger=logger)]
+        # Explicit, owned data flow (never a monkeypatch): the exact
+        # returned mmseg summary is stashed on the model instance itself,
+        # right after the one real call to dataset.evaluate() -- readable
+        # by any caller (e.g. a diagnostic harness) after evaluate()
+        # returns, with no wrapper to install/restore/leak. If this
+        # assignment is never reached (inference or the evaluate() call
+        # itself raised), the attribute simply stays at its __init__
+        # default of None -- no global state, nothing to clean up.
+        # aAcc/mIoU/mAcc come back as numpy scalar types (mmseg accumulates
+        # in numpy/float32); cast to plain Python float explicitly so this
+        # is never silently stringified by a downstream json.dumps(...,
+        # default=str) fallback -- numeric metrics must stay numeric.
+        seg_model.natural_evaluation_result = {
+            "captured": True,
+            "precision": "rounded_2dp_via_mmseg_dataset_evaluate_summary",
+            "source": "dataset.dataset.evaluate() natural path (mmseg CustomDataset.evaluate summary dict)",
+            "aAcc": float(metric[0]["aAcc"]), "mIoU": float(metric[0]["mIoU"]), "mAcc": float(metric[0]["mAcc"]),
+        }
     else:
         metric = [None]
 
@@ -455,7 +481,11 @@ def validate_seg(config, seg_config, data_loader, model):
     miou_result = metric[0]["mIoU"] * 100
 
     if seg_model.rwr_config.enabled and (device == "cpu" or dist.get_rank() == 0):
-        from models.dinotext.cover_dr import build_rwr_structured_record
+        from models.dinotext.cover_dr import (
+            FULL_PRECISION_METRIC_SOURCE,
+            build_rwr_structured_record,
+            compute_full_precision_metrics,
+        )
         from src.rwr_reproduction_identity import load_identity as load_rwr_identity
 
         repository = Path(__file__).resolve().parents[2]
@@ -482,17 +512,32 @@ def validate_seg(config, seg_config, data_loader, model):
             if device == "cuda"
             else "CPU"
         )
-        trusted_metrics = {}
+        # Full-precision metrics computed directly from the SAME per-image
+        # (area_intersect, area_union, area_pred, area_label) tuples
+        # dataset.evaluate() itself receives (`results`, from
+        # dataset.pre_eval() inside multi_gpu_test) -- float64 throughout,
+        # never mmseg's own float32-accumulated, 2-decimal-rounded summary.
+        # No additional model forward, no additional RWR solve: this is a
+        # pure reduction over sufficient statistics the natural evaluation
+        # loop already produced. Independent of, and never dependent on,
+        # any external diagnostic/trust-pilot script.
+        trusted_metrics = compute_full_precision_metrics(results)
         for metric_name in ("aAcc", "mIoU", "mAcc"):
-            metric_value = metric[0][metric_name]
-            if type(metric_value) is float:
-                trusted_metrics[metric_name] = metric_value
-            elif isinstance(metric_value, np.floating):
-                trusted_metrics[metric_name] = float(metric_value)
-            else:
-                raise TypeError(
-                    f"trusted MMSeg metric {metric_name} has unsupported type "
-                    f"{type(metric_value).__name__}"
+            if type(trusted_metrics[metric_name]) is not float:
+                raise TypeError(f"full-precision metric {metric_name} has unsupported type")
+        # Required reconciliation: mmseg's own rounded-to-2dp natural
+        # summary must agree with the full-precision reduction after
+        # rounding -- otherwise the two computations disagree about which
+        # predictions/GT were used, which must fail loudly rather than
+        # silently emit two inconsistent canonical numbers.
+        for metric_name in ("aAcc", "mIoU", "mAcc"):
+            full_precision_percent = round(trusted_metrics[metric_name] * 100.0, 2)
+            natural_percent = round(float(metric[0][metric_name]) * 100.0, 2)
+            if full_precision_percent != natural_percent:
+                raise RuntimeError(
+                    f"full-precision {metric_name}={full_precision_percent} disagrees with mmseg's "
+                    f"natural rounded summary {natural_percent} at 2 decimal places -- refusing to "
+                    "emit an inconsistent canonical structured result"
                 )
         if type(torch.version.cuda) is not str or not torch.version.cuda:
             raise RuntimeError("canonical RWR evaluation requires a CUDA build")
@@ -500,6 +545,8 @@ def validate_seg(config, seg_config, data_loader, model):
             config=seg_model.rwr_config,
             canonical_identity=load_rwr_identity(repo_root=repository),
             metrics=trusted_metrics,
+            metric_source=FULL_PRECISION_METRIC_SOURCE,
+            parity_solver_summary=seg_model.parity_solver_summary_override,
             image_count=len(data_loader.dataset),
             class_count=seg_model.num_classes,
             crop=tuple(seg_model.test_cfg.crop_size),
@@ -514,7 +561,7 @@ def validate_seg(config, seg_config, data_loader, model):
             torch_version=str(torch.__version__),
             cuda_version=torch.version.cuda,
             elapsed_seconds=time.monotonic() - evaluation_started,
-            solver_summary=seg_model.rwr_runtime.as_dict(),
+            solver_summary=seg_model.primary_solver_summary_override or seg_model.rwr_runtime.as_dict(),
         )
         logger.info(
             "TALK2DINO_RWR_RESULT "

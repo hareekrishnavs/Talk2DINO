@@ -8,15 +8,20 @@ from pathlib import Path
 import pytest
 
 from src.rwr_reproduction_identity import (
+    FULL_PRECISION_METRIC_SOURCE,
+    RESULT_FORMAT_VERSION_V3,
+    RESULT_KEYS_V3,
     RESULT_PREFIX,
     RESULT_FORMAT_VERSION,
     RWRReproductionError,
     SUPPORTED_CANONICAL_GRAPH_MODE,
     SUPPORTED_CANONICAL_SOLVER_METHOD,
+    SUPPORTED_RESULT_FORMAT_VERSIONS,
     load_identity,
     validate_historical_provenance,
     validate_resolved_config_pair,
     validate_static_configuration,
+    verify_record,
     verify_result,
 )
 from src.e3_evaluation_identity import (
@@ -96,6 +101,18 @@ def build_valid_record(identity):
 
 def _record():
     return build_valid_record(load_identity(repo_root=ROOT))
+
+
+def build_valid_record_v3(identity, *, parity_solver_summary=None):
+    record = build_valid_record(identity)
+    record["format_version"] = RESULT_FORMAT_VERSION_V3
+    record["metric_source"] = FULL_PRECISION_METRIC_SOURCE
+    record["parity_solver_summary"] = parity_solver_summary
+    return record
+
+
+def _record_v3(**kwargs):
+    return build_valid_record_v3(load_identity(repo_root=ROOT), **kwargs)
 
 
 def build_valid_resolved_config(identity):
@@ -803,3 +820,171 @@ def test_canonical_scientific_literals_do_not_reappear_in_rwr_python():
     ]
     combined = "\n".join(path.read_text() for path in sources)
     assert all(literal not in combined for literal in forbidden)
+
+
+# ---------------------------------------------------------------------------
+# v3 structured-result format (talk2dino-canonical-rwr-result-v3)
+# ---------------------------------------------------------------------------
+
+
+def test_v3_record_with_no_parity_solver_summary_passes(tmp_path):
+    path = tmp_path / "v3.json"
+    _write_json(path, _record_v3())
+    assert verify_result(path, source_kind="json").startswith("RWR REPRODUCTION PASS")
+
+
+def test_v3_record_with_a_valid_parity_solver_summary_passes(tmp_path):
+    parity = dict(_record()["solver_summary"])  # same shape, different (still valid) values
+    parity["window_count"] = 42
+    parity["converged_window_count"] = 42
+    path = tmp_path / "v3.json"
+    _write_json(path, _record_v3(parity_solver_summary=parity))
+    assert verify_result(path, source_kind="json").startswith("RWR REPRODUCTION PASS")
+
+
+def test_v3_record_reports_format_version_v3_in_its_pass_message(tmp_path):
+    path = tmp_path / "v3.json"
+    identity = load_identity(repo_root=ROOT)
+    _write_json(path, build_valid_record_v3(identity))
+    message = verify_result(path, source_kind="json")
+    assert message.startswith("RWR REPRODUCTION PASS")
+
+
+def test_v2_record_still_uses_the_v2_verifier_and_passes(tmp_path):
+    # Historical provenance: a v2-format_version record must still verify
+    # successfully under the current code, dispatched to _verify_record_v2.
+    path = tmp_path / "v2.json"
+    _write_json(path, _record())
+    assert verify_result(path, source_kind="json").startswith("RWR REPRODUCTION PASS")
+
+
+def test_v2_and_v3_records_of_the_same_underlying_run_both_pass_independently(tmp_path):
+    v2_path, v3_path = tmp_path / "v2.json", tmp_path / "v3.json"
+    _write_json(v2_path, _record())
+    _write_json(v3_path, _record_v3())
+    assert verify_result(v2_path, source_kind="json").startswith("RWR REPRODUCTION PASS")
+    assert verify_result(v3_path, source_kind="json").startswith("RWR REPRODUCTION PASS")
+
+
+def test_unknown_format_version_is_rejected(tmp_path):
+    path = tmp_path / "unknown.json"
+    record = _record()
+    record["format_version"] = "talk2dino-canonical-rwr-result-v99"
+    _write_json(path, record)
+    with pytest.raises(RWRReproductionError, match="unsupported structured result format_version"):
+        verify_result(path, source_kind="json")
+
+
+def test_supported_format_versions_are_exactly_v2_and_v3():
+    assert set(SUPPORTED_RESULT_FORMAT_VERSIONS) == {RESULT_FORMAT_VERSION, RESULT_FORMAT_VERSION_V3}
+
+
+def test_v3_record_rejects_unknown_metric_source(tmp_path):
+    path = tmp_path / "bad_source.json"
+    record = _record_v3()
+    record["metric_source"] = "some_rounded_approximate_source"
+    _write_json(path, record)
+    with pytest.raises(RWRReproductionError, match="metric_source"):
+        verify_result(path, source_kind="json")
+
+
+def test_v3_record_rejects_a_v2_metric_source_string_too(tmp_path):
+    path = tmp_path / "wrong_source.json"
+    record = _record_v3()
+    record["metric_source"] = "rounded_2dp_via_mmseg_dataset_evaluate_summary"
+    _write_json(path, record)
+    with pytest.raises(RWRReproductionError, match="metric_source"):
+        verify_result(path, source_kind="json")
+
+
+def test_v3_record_rejects_missing_metric_source_key(tmp_path):
+    path = tmp_path / "missing_source.json"
+    record = _record_v3()
+    del record["metric_source"]
+    _write_json(path, record)
+    with pytest.raises(RWRReproductionError, match="unexpected schema"):
+        verify_result(path, source_kind="json")
+
+
+def test_v3_record_rejects_an_unknown_extra_field(tmp_path):
+    path = tmp_path / "extra_field.json"
+    record = _record_v3()
+    record["not_a_real_field"] = 1
+    _write_json(path, record)
+    with pytest.raises(RWRReproductionError, match="unexpected schema"):
+        verify_result(path, source_kind="json")
+
+
+def test_v3_record_rejects_rounded_metrics_claiming_full_precision(tmp_path):
+    # Two decimal places is far short of the identity's own
+    # minimum_metric_decimal_places requirement -- a value that LOOKS like
+    # mmseg's rounded-to-2dp natural summary must never pass as full
+    # precision just because metric_source claims it is.
+    path = tmp_path / "rounded.json"
+    record = _record_v3()
+    record["mIoU"] = 29.88
+    _write_json(path, record)
+    with pytest.raises(RWRReproductionError, match="rounded-only"):
+        verify_result(path, source_kind="json")
+
+
+@pytest.mark.parametrize("field", ["window_count", "converged_window_count", "total_iterations"])
+def test_v3_record_rejects_wrong_type_in_parity_solver_summary(tmp_path, field):
+    parity = dict(_record()["solver_summary"])
+    parity[field] = float(parity[field])  # wrong exact type: float where an exact int is required
+    path = tmp_path / "bad_parity_type.json"
+    _write_json(path, _record_v3(parity_solver_summary=parity))
+    with pytest.raises(RWRReproductionError):
+        verify_result(path, source_kind="json")
+
+
+def test_v3_record_rejects_parity_solver_summary_with_wrong_key_set(tmp_path):
+    parity = dict(_record()["solver_summary"])
+    del parity["maximum_scaled_residual"]
+    path = tmp_path / "bad_parity_keys.json"
+    _write_json(path, _record_v3(parity_solver_summary=parity))
+    with pytest.raises(RWRReproductionError, match="schema mismatch"):
+        verify_result(path, source_kind="json")
+
+
+def test_v3_record_rejects_wrong_image_count(tmp_path):
+    path = tmp_path / "wrong_images.json"
+    record = _record_v3()
+    record["image_count"] = 1
+    _write_json(path, record)
+    with pytest.raises(RWRReproductionError, match="image count"):
+        verify_result(path, source_kind="json")
+
+
+def test_v3_record_rejects_wrong_class_count(tmp_path):
+    path = tmp_path / "wrong_classes.json"
+    record = _record_v3()
+    record["class_count"] = 1
+    _write_json(path, record)
+    with pytest.raises(RWRReproductionError, match="class count"):
+        verify_result(path, source_kind="json")
+
+
+def test_v3_record_v2_verify_record_rejects_a_v3_shaped_record_key_set(tmp_path):
+    # verify_record dispatches purely on format_version -- a record with
+    # v3's extra keys but a v2 format_version tag is rejected as an
+    # unexpected v2 schema (never silently accepted through the wrong path).
+    record = _record_v3()
+    record["format_version"] = RESULT_FORMAT_VERSION  # v2 tag, but v3 key set
+    with pytest.raises(RWRReproductionError, match="unexpected schema"):
+        verify_record(record_with_decimals(record), load_identity(repo_root=ROOT))
+
+
+def record_with_decimals(record):
+    from decimal import Decimal
+    return json.loads(json.dumps(record), parse_float=Decimal)
+
+
+def test_verify_record_requires_a_mapping():
+    with pytest.raises(RWRReproductionError, match="mapping"):
+        verify_record("not a mapping", load_identity(repo_root=ROOT))
+
+
+def test_result_keys_v3_is_exactly_v2_keys_plus_metric_source_and_parity_summary():
+    from src.rwr_reproduction_identity import RESULT_KEYS
+    assert RESULT_KEYS_V3 == RESULT_KEYS | {"metric_source", "parity_solver_summary"}

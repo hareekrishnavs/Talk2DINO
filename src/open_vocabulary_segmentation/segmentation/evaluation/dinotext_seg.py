@@ -37,7 +37,21 @@ class DINOTextSegInference(nn.Module):
         self.bg_thresh = bg_thresh
         self.bg_strategy = bg_strategy
         self.rwr_config = RWRInferenceConfig.from_mapping(rwr)
-        self.rwr_runtime = RWRRuntimeSummary()
+        # Explicit, owned data-flow channels (never a monkeypatch): an
+        # external caller (e.g. an evaluation harness) can read
+        # `natural_evaluation_result` after evaluate() has run, and may
+        # optionally set the two `*_solver_summary_override` attributes
+        # BEFORE the canonical RWR structured record is built, to report
+        # phase-scoped solver telemetry distinct from `self.rwr_runtime`
+        # (which -- for a caller that reruns encode_decode on every
+        # window -- already IS the correct, complete primary summary; the
+        # overrides only matter for a caller whose primary predictions
+        # come from a different code path, e.g. a diagnostic two-pass
+        # cache). None of these are ever consulted by graph/RWR/CGLS math.
+        # All initialized (and later reset) in one place -- see
+        # reset_evaluation_state() -- so construction and reset can never
+        # drift out of sync with each other.
+        self.reset_evaluation_state()
         # self.kp_w = kp_w
 
         self.model = model
@@ -77,6 +91,28 @@ class DINOTextSegInference(nn.Module):
             f"Building DINOTextSegInference with {self.num_classes} classes, test_cfg={test_cfg}, with_bg={with_bg}"
             f", pamr={pamr}, bg_thresh={bg_thresh}"
         )
+
+    def reset_evaluation_state(self) -> None:
+        """Resets every evaluation-owned, instance-scoped data-flow channel
+        to its fresh-construction default. Never touches graph/RWR/CGLS
+        state, model weights, or any argument the constructor validated
+        (test_cfg, rwr_config, classnames, ...) -- only the mutable
+        bookkeeping a single evaluation run accumulates or may set.
+
+        Must be called before every dataset evaluation begins (validate_seg
+        calls this at the top, before building/reusing a
+        DINOTextSegInference and before us.multi_gpu_test runs) so that:
+        a success on one evaluation never leaks into the next; an inference
+        failure or a natural-evaluation failure never leaves stale
+        `natural_evaluation_result`/`*_solver_summary_override` state
+        looking like a completed run; and repeated evaluation on the same
+        model instance (or across sequentially-evaluated dataset instances
+        that happen to share a model) stays correct, without relying on
+        module-global mutable state anywhere in this data flow."""
+        self.rwr_runtime = RWRRuntimeSummary()
+        self.natural_evaluation_result: dict | None = None
+        self.primary_solver_summary_override: dict | None = None
+        self.parity_solver_summary_override: dict | None = None
 
     def encode_decode(self, img, img_metas):
         """Encode images with backbone and decode into a semantic segmentation
