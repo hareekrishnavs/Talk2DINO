@@ -24,6 +24,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from src.e3_evaluation_identity import load_identity as _load_e3_identity
 from src.rwr_reproduction_identity import (
+    FULL_PRECISION_METRIC_SOURCE as _RWR_FULL_PRECISION_METRIC_SOURCE,
     HISTORICAL_EVIDENCE_KEYS as _E10_EVIDENCE_KEYS,
     HISTORICAL_EVIDENCE_PAYLOAD_KEYS as _E10_EVIDENCE_PAYLOAD_KEYS,
     HISTORICAL_EVIDENCE_ROW_KEYS as _E10_EVIDENCE_ROW_KEYS,
@@ -40,6 +41,25 @@ SUPPORTED_PROPAGATION_METHOD = "finite_power_iteration"
 SUPPORTED_METRIC_UNIT = "percent_0_100"
 SUPPORTED_COMPUTE_DTYPE = "float32"
 SUPPORTED_OUTPUT_DTYPE = "float32"
+# Reused directly from the sibling RWR module rather than re-declared here,
+# so there is exactly one place in the codebase that names this value.
+SUPPORTED_METRIC_PRECISION_SOURCE = _RWR_FULL_PRECISION_METRIC_SOURCE
+SUPPORTED_SELF_EDGE_POLICY = "none_for_ordinary_rows"
+SUPPORTED_FALLBACK_ROW_POLICY = "zero_affinity_rows_receive_self_loop_weight_one_invariant_to_k"
+SUPPORTED_AFFINITY_FUNCTION = "relu_cosine_power"
+SUPPORTED_TIE_BREAK_RULE = "stable_descending_argsort_lower_patch_index_wins"
+SUPPORTED_INITIAL_ITERATE = "S0"
+SUPPORTED_RECURRENCE = "P_next = alpha * A_k @ P + (1 - alpha) * S0"
+SUPPORTED_CONVERGENCE_TOLERANCE = "not_applicable"
+SUPPORTED_CHECKPOINT_RESUME_CONTRACT = "resume_at_next_unprocessed_image_boundary_no_partial_window_state"
+SUPPORTED_STITCHING_AVERAGING = "uniform"
+SUPPORTED_CROP_ORDER = "canonical_row_major_sliding_window_order"
+SUPPORTED_DINO_FEATURE_STAGE = "frozen_backbone_patch_tokens_l2_normalized"
+SUPPORTED_CLAMPING_POLICY = "back_shifted_clamp_to_image_bounds"
+SUPPORTED_WINDOW_ENUMERATION = (
+    "sliding_window_geometry.SlidingWindowPlan.build "
+    "(legacy clamped slide_inference grid, row-major flat index order)"
+)
 VARIANT_KEYS = ("k11", "k12")
 VARIANT_K_VALUES = {"k11": 11, "k12": 12}
 
@@ -234,6 +254,19 @@ def _require_exact_string(value: Any, label: str, *, nonempty: bool = True) -> s
     return value
 
 
+def _require_supported_value(value: Any, label: str, expected: str) -> str:
+    """Closed-vocabulary check: ``value`` must be an exact string matching
+    ``expected`` byte-for-byte -- no normalization, case-folding, or
+    whitespace-stripping. Used for every schema-vocabulary field this
+    identity closes to exactly one supported value."""
+    token = _require_exact_string(value, label)
+    if token != expected:
+        raise MatchedK11K12Error(
+            f"{label} must be exactly {expected!r}, observed {token!r}"
+        )
+    return token
+
+
 def _require_exact_bool(value: Any, label: str) -> bool:
     if type(value) is not bool:
         raise MatchedK11K12Error(f"{label} must be an exact boolean")
@@ -405,12 +438,14 @@ def load_identity(
     _require_exact_bool(geometry["align_corners"], "geometry.align_corners")
     if geometry["align_corners"] is not True:
         raise MatchedK11K12Error("geometry.align_corners must be true (canonical evaluation contract)")
-    _require_exact_string(geometry["window_enumeration"], "geometry.window_enumeration")
-    _require_exact_string(geometry["clamping_policy"], "geometry.clamping_policy")
+    _require_supported_value(
+        geometry["window_enumeration"], "geometry.window_enumeration", SUPPORTED_WINDOW_ENUMERATION
+    )
+    _require_supported_value(geometry["clamping_policy"], "geometry.clamping_policy", SUPPORTED_CLAMPING_POLICY)
 
     snapshot = identity["snapshot"]
     _require_exact_string(snapshot["raw_score_stage"], "snapshot.raw_score_stage")
-    _require_exact_string(snapshot["dino_feature_stage"], "snapshot.dino_feature_stage")
+    _require_supported_value(snapshot["dino_feature_stage"], "snapshot.dino_feature_stage", SUPPORTED_DINO_FEATURE_STAGE)
     _require_exact_bool(snapshot["immutability_requirement"], "snapshot.immutability_requirement")
     if snapshot["immutability_requirement"] is not True:
         raise MatchedK11K12Error("snapshot.immutability_requirement must be true")
@@ -433,8 +468,10 @@ def load_identity(
         raise MatchedK11K12Error("graph.variants must be exactly [11, 12]")
     if graph["maximum_rank"] != 12:
         raise MatchedK11K12Error("graph.maximum_rank must be 12")
-    for name in ("self_edge_policy", "fallback_row_policy", "affinity_function", "tie_break_rule"):
-        _require_exact_string(graph[name], f"graph.{name}")
+    _require_supported_value(graph["self_edge_policy"], "graph.self_edge_policy", SUPPORTED_SELF_EDGE_POLICY)
+    _require_supported_value(graph["fallback_row_policy"], "graph.fallback_row_policy", SUPPORTED_FALLBACK_ROW_POLICY)
+    _require_supported_value(graph["affinity_function"], "graph.affinity_function", SUPPORTED_AFFINITY_FUNCTION)
+    _require_supported_value(graph["tie_break_rule"], "graph.tie_break_rule", SUPPORTED_TIE_BREAK_RULE)
     if _require_exact_float(graph["affinity_power"], "graph.affinity_power") <= 0:
         raise MatchedK11K12Error("graph.affinity_power must be positive")
     _require_exact_string(graph["k11_construction_method"], "graph.k11_construction_method")
@@ -455,27 +492,19 @@ def load_identity(
     if not 0 <= alpha < 1:
         raise MatchedK11K12Error("propagation.alpha must satisfy 0 <= alpha < 1")
     _require_exact_int(propagation["steps"], "propagation.steps", minimum=1)
-    _require_exact_string(propagation["initial_iterate"], "propagation.initial_iterate")
-    _require_exact_string(propagation["recurrence"], "propagation.recurrence")
+    _require_supported_value(propagation["initial_iterate"], "propagation.initial_iterate", SUPPORTED_INITIAL_ITERATE)
+    _require_supported_value(propagation["recurrence"], "propagation.recurrence", SUPPORTED_RECURRENCE)
     _require_exact_bool(propagation["early_stopping"], "propagation.early_stopping")
     if propagation["early_stopping"] is not False:
         raise MatchedK11K12Error("propagation.early_stopping must be false")
-    _require_exact_string(propagation["convergence_tolerance"], "propagation.convergence_tolerance")
+    _require_supported_value(
+        propagation["convergence_tolerance"], "propagation.convergence_tolerance", SUPPORTED_CONVERGENCE_TOLERANCE
+    )
     _require_exact_string(propagation["fallback_solver"], "propagation.fallback_solver")
     if propagation["fallback_solver"] != "none":
         raise MatchedK11K12Error("propagation.fallback_solver must be 'none'")
-    _require_exact_string(propagation["compute_dtype"], "propagation.compute_dtype")
-    if propagation["compute_dtype"] != SUPPORTED_COMPUTE_DTYPE:
-        raise MatchedK11K12Error(
-            "propagation.compute_dtype must be exactly "
-            f"{SUPPORTED_COMPUTE_DTYPE!r}, observed {propagation['compute_dtype']!r}"
-        )
-    _require_exact_string(propagation["output_dtype"], "propagation.output_dtype")
-    if propagation["output_dtype"] != SUPPORTED_OUTPUT_DTYPE:
-        raise MatchedK11K12Error(
-            "propagation.output_dtype must be exactly "
-            f"{SUPPORTED_OUTPUT_DTYPE!r}, observed {propagation['output_dtype']!r}"
-        )
+    _require_supported_value(propagation["compute_dtype"], "propagation.compute_dtype", SUPPORTED_COMPUTE_DTYPE)
+    _require_supported_value(propagation["output_dtype"], "propagation.output_dtype", SUPPORTED_OUTPUT_DTYPE)
 
     execution = identity["execution"]
     for name in (
@@ -494,7 +523,11 @@ def load_identity(
     order = _require_exact_string_list(execution["deterministic_variant_order"], "execution.deterministic_variant_order")
     if order != VARIANT_KEYS:
         raise MatchedK11K12Error(f"execution.deterministic_variant_order must be {list(VARIANT_KEYS)}")
-    _require_exact_string(execution["checkpoint_resume_contract"], "execution.checkpoint_resume_contract")
+    _require_supported_value(
+        execution["checkpoint_resume_contract"],
+        "execution.checkpoint_resume_contract",
+        SUPPORTED_CHECKPOINT_RESUME_CONTRACT,
+    )
 
     stitching = identity["stitching"]
     _require_exact_int(
@@ -509,10 +542,8 @@ def load_identity(
     )
     if stitching["interpolation_applications_per_variant_window"] != 1:
         raise MatchedK11K12Error("stitching.interpolation_applications_per_variant_window must be 1")
-    _require_exact_string(stitching["averaging"], "stitching.averaging")
-    if stitching["averaging"] != "uniform":
-        raise MatchedK11K12Error("stitching.averaging must be 'uniform'")
-    _require_exact_string(stitching["crop_order"], "stitching.crop_order")
+    _require_supported_value(stitching["averaging"], "stitching.averaging", SUPPORTED_STITCHING_AVERAGING)
+    _require_supported_value(stitching["crop_order"], "stitching.crop_order", SUPPORTED_CROP_ORDER)
     for name in ("hann", "majority_vote", "center_selection", "sparse_delta_restitching"):
         _require_exact_bool(stitching[name], f"stitching.{name}")
         if stitching[name] is not False:
@@ -522,12 +553,10 @@ def load_identity(
     names = _require_exact_string_list(metrics["metric_names"], "metrics.metric_names")
     if names != ("aAcc", "mIoU", "mAcc"):
         raise MatchedK11K12Error("metrics.metric_names must be exactly ['aAcc', 'mIoU', 'mAcc']")
-    _require_exact_string(metrics["unit"], "metrics.unit")
-    if metrics["unit"] != SUPPORTED_METRIC_UNIT:
-        raise MatchedK11K12Error(
-            f"metrics.unit must be exactly {SUPPORTED_METRIC_UNIT!r}, observed {metrics['unit']!r}"
-        )
-    _require_exact_string(metrics["precision_source"], "metrics.precision_source")
+    _require_supported_value(metrics["unit"], "metrics.unit", SUPPORTED_METRIC_UNIT)
+    _require_supported_value(
+        metrics["precision_source"], "metrics.precision_source", SUPPORTED_METRIC_PRECISION_SOURCE
+    )
     _require_exact_bool(metrics["rounded_prettytable_forbidden"], "metrics.rounded_prettytable_forbidden")
     if metrics["rounded_prettytable_forbidden"] is not True:
         raise MatchedK11K12Error("metrics.rounded_prettytable_forbidden must be true")
@@ -1290,10 +1319,24 @@ __all__ = [
     "MatchedK11K12Error",
     "PER_IMAGE_STATS_SCHEMA_NAME",
     "RESULT_SCHEMA_NAME",
+    "SUPPORTED_AFFINITY_FUNCTION",
+    "SUPPORTED_CHECKPOINT_RESUME_CONTRACT",
+    "SUPPORTED_CLAMPING_POLICY",
     "SUPPORTED_COMPUTE_DTYPE",
+    "SUPPORTED_CONVERGENCE_TOLERANCE",
+    "SUPPORTED_CROP_ORDER",
+    "SUPPORTED_DINO_FEATURE_STAGE",
+    "SUPPORTED_FALLBACK_ROW_POLICY",
+    "SUPPORTED_INITIAL_ITERATE",
+    "SUPPORTED_METRIC_PRECISION_SOURCE",
     "SUPPORTED_METRIC_UNIT",
     "SUPPORTED_OUTPUT_DTYPE",
     "SUPPORTED_PROPAGATION_METHOD",
+    "SUPPORTED_RECURRENCE",
+    "SUPPORTED_SELF_EDGE_POLICY",
+    "SUPPORTED_STITCHING_AVERAGING",
+    "SUPPORTED_TIE_BREAK_RULE",
+    "SUPPORTED_WINDOW_ENUMERATION",
     "VARIANT_K_VALUES",
     "VARIANT_KEYS",
     "load_identity",

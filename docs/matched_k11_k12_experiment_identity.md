@@ -127,20 +127,47 @@ reported summary metric is only as trustworthy as its agreement with them.
 
 ## Closed unit and dtype vocabularies
 
-`metrics.unit`, `propagation.compute_dtype`, and `propagation.output_dtype`
-are each closed to exactly one supported value --
-`SUPPORTED_METRIC_UNIT = "percent_0_100"`,
-`SUPPORTED_COMPUTE_DTYPE = "float32"`,
-`SUPPORTED_OUTPUT_DTYPE = "float32"` -- checked by exact string equality at
-load time, with no normalization, case-folding, or whitespace-stripping.
-`"percent_0_100"` disambiguates from a `[0, 1]` fraction the way
-`"percent"` alone would not; `"float32"` matches the compute dtype the
-existing E3/RWR affinity and propagation code already uses (raw patch
-scores, `knn_weights`, and `propagate_scores`'s `alpha`/`weights` tensors
-are all explicitly `torch.float32`), so an accepted dtype string can never
-silently diverge from the arithmetic this identity actually describes.
-These are schema vocabulary, not experimental result values, so they live
-in this module as Python constants rather than in the TOML.
+**Metric unit**: `metrics.unit` is closed to exactly `"percent_0_100"` --
+metrics are percent on `[0, 100]`, never a `[0, 1]` fraction and never a
+bare `"percent"` (which does not by itself disambiguate the two).
+**Compute dtype**: `propagation.compute_dtype` is closed to exactly
+`"float32"` -- the finite-step recurrence is computed in FP32, matching
+the dtype the existing E3/RWR affinity and propagation code already uses
+(raw patch scores, `knn_weights`, and `propagate_scores`'s `alpha`/weight
+tensors are all explicitly `torch.float32`). **Output dtype**:
+`propagation.output_dtype` is closed to exactly `"float32"` for the same
+reason -- the propagated result is never silently downcast or upcast.
+
+All three (`SUPPORTED_METRIC_UNIT`, `SUPPORTED_COMPUTE_DTYPE`,
+`SUPPORTED_OUTPUT_DTYPE`) are checked by exact string equality at load
+time, with no normalization, case-folding, or whitespace-stripping, and no
+alias table -- `"fraction_0_1"`, `"Percent_0_100"`, `"percent_0_100 "`,
+`"fp32"`, `"Float32"`, and `"torch.float32"` are all rejected exactly like
+any other unsupported value. These are schema vocabulary, not
+experimental result values, so they live in this module as Python
+constants rather than in the TOML.
+
+**Window enumeration**: `geometry.window_enumeration` is closed to exactly
+`sliding_window_geometry.SlidingWindowPlan.build (legacy clamped
+slide_inference grid, row-major flat index order)` -- the legacy
+**clamped** sliding-window grid, enumerated in **row-major flat-index**
+order, and nothing else. A different callable, a different clamping
+policy, or a different enumeration order each change which windows exist
+and in what order, so each defines a different experiment identity, not a
+cosmetic restatement of this one.
+
+These fields, together with every other closed-vocabulary field this
+identity defines (graph self-edge/fallback-row policy, affinity function,
+tie-break rule, propagation initial iterate and recurrence formula,
+convergence tolerance, checkpoint-resume contract, stitching averaging and
+crop order, the DINO feature stage, the geometry clamping policy, the
+window enumeration algorithm, and the metric precision source -- see
+`SUPPORTED_*` in `src/matched_k11_k12_identity.py`) are **frozen
+experiment-identity fields**. Changing any of them to a different, even
+semantically equivalent, value does not describe a variant of this
+experiment -- it describes a *different* experiment identity, and must be
+pre-registered as one (a new TOML, a new `identity_name`, a new commit)
+rather than edited in place.
 
 ## Why paired bootstrap later resamples images and recomputes dataset mIoU
 

@@ -5,9 +5,11 @@ this file never hardcodes one of its own."""
 
 from __future__ import annotations
 
+import ast
 import copy
 import hashlib
 import json
+import re
 import subprocess
 from decimal import Decimal
 from pathlib import Path
@@ -26,9 +28,23 @@ from src.matched_k11_k12_identity import (
     RESULT_SCHEMA_NAME,
     RUNTIME_TELEMETRY_KEYS,
     STITCHING_CONTRACT_KEYS,
+    SUPPORTED_AFFINITY_FUNCTION,
+    SUPPORTED_CHECKPOINT_RESUME_CONTRACT,
+    SUPPORTED_CLAMPING_POLICY,
     SUPPORTED_COMPUTE_DTYPE,
+    SUPPORTED_CONVERGENCE_TOLERANCE,
+    SUPPORTED_CROP_ORDER,
+    SUPPORTED_DINO_FEATURE_STAGE,
+    SUPPORTED_FALLBACK_ROW_POLICY,
+    SUPPORTED_INITIAL_ITERATE,
+    SUPPORTED_METRIC_PRECISION_SOURCE,
     SUPPORTED_METRIC_UNIT,
     SUPPORTED_OUTPUT_DTYPE,
+    SUPPORTED_RECURRENCE,
+    SUPPORTED_SELF_EDGE_POLICY,
+    SUPPORTED_STITCHING_AVERAGING,
+    SUPPORTED_TIE_BREAK_RULE,
+    SUPPORTED_WINDOW_ENUMERATION,
     TOP_RESULT_KEYS,
     VARIANT_K_VALUES,
     VARIANT_KEYS,
@@ -1218,4 +1234,431 @@ def test_closed_vocabulary_mutation_probes_do_not_mutate_the_real_toml(tmp_path)
         with pytest.raises(MatchedK11K12Error):
             load_identity(mutated, repo_root=ROOT)
     after = IDENTITY_PATH.read_bytes()
+    assert before == after
+
+
+# ---------------------------------------------------------------------------
+# Additional closed-vocabulary mutation coverage requested by the second
+# independent-verification repair round: numeric-range alias, case/
+# whitespace mutations on BOTH dtypes (not just unit), empty-string, and
+# missing-key coverage. TOML has no `null` literal (unlike JSON), so
+# "null/missing value" is exercised as key removal, which load_identity's
+# closed-mapping check already rejects generically.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "old, new, match",
+    [
+        ('unit = "percent_0_100"', 'unit = "0_to_100"', r"metrics\.unit"),
+        ('unit = "percent_0_100"', 'unit = ""', r"metrics\.unit"),
+        ('compute_dtype = "float32"', 'compute_dtype = "Float32"', r"propagation\.compute_dtype"),
+        ('compute_dtype = "float32"', 'compute_dtype = "float32 "', r"propagation\.compute_dtype"),
+        ('compute_dtype = "float32"', 'compute_dtype = " float32"', r"propagation\.compute_dtype"),
+        ('compute_dtype = "float32"', 'compute_dtype = ""', r"propagation\.compute_dtype"),
+        ('output_dtype = "float32"', 'output_dtype = "Float32"', r"propagation\.output_dtype"),
+        ('output_dtype = "float32"', 'output_dtype = "float32 "', r"propagation\.output_dtype"),
+        ('output_dtype = "float32"', 'output_dtype = " float32"', r"propagation\.output_dtype"),
+        ('output_dtype = "float32"', 'output_dtype = ""', r"propagation\.output_dtype"),
+    ],
+)
+def test_additional_closed_vocabulary_rejections(tmp_path, old, new, match):
+    mutated = _mutate_identity_toml(tmp_path, old, new)
+    with pytest.raises(MatchedK11K12Error, match=match):
+        load_identity(mutated, repo_root=ROOT)
+
+
+@pytest.mark.parametrize(
+    "removed_line",
+    ['unit = "percent_0_100"\n', 'compute_dtype = "float32"\n', 'output_dtype = "float32"\n'],
+)
+def test_missing_closed_vocabulary_key_rejected(tmp_path, removed_line):
+    raw = IDENTITY_PATH.read_text()
+    assert removed_line in raw
+    mutated = tmp_path / "mutated.toml"
+    mutated.write_text(raw.replace(removed_line, "", 1))
+    with pytest.raises(MatchedK11K12Error, match="unexpected schema"):
+        load_identity(mutated, repo_root=ROOT)
+
+
+def test_closed_vocabulary_diagnostic_helper_message_format():
+    # The shared helper always states field, expected, and observed --
+    # verified directly against one live rejection.
+    with pytest.raises(MatchedK11K12Error) as excinfo:
+        from src.matched_k11_k12_identity import _require_supported_value
+        _require_supported_value("bogus", "some.field", "canonical")
+    message = str(excinfo.value)
+    assert "some.field" in message
+    assert "'canonical'" in message
+    assert "'bogus'" in message
+
+
+# ---------------------------------------------------------------------------
+# Issue 5: audit of every other semantic string field validated only via
+# _require_exact_string. Category-B fields (closed vocabulary) newly closed
+# in this repair round, each with an adversarial mutation test. Category-A
+# fields (free-form/provenance text, or already relationally validated
+# against another loaded identity) are deliberately left unconstrained --
+# see the final response for the full classification.
+# ---------------------------------------------------------------------------
+
+
+ISSUE_5_CLOSED_FIELDS = [
+    ("self_edge_policy", "graph", "graph.self_edge_policy", SUPPORTED_SELF_EDGE_POLICY),
+    ("fallback_row_policy", "graph", "graph.fallback_row_policy", SUPPORTED_FALLBACK_ROW_POLICY),
+    ("affinity_function", "graph", "graph.affinity_function", SUPPORTED_AFFINITY_FUNCTION),
+    ("tie_break_rule", "graph", "graph.tie_break_rule", SUPPORTED_TIE_BREAK_RULE),
+    ("initial_iterate", "propagation", "propagation.initial_iterate", SUPPORTED_INITIAL_ITERATE),
+    ("recurrence", "propagation", "propagation.recurrence", SUPPORTED_RECURRENCE),
+    ("convergence_tolerance", "propagation", "propagation.convergence_tolerance", SUPPORTED_CONVERGENCE_TOLERANCE),
+    (
+        "checkpoint_resume_contract", "execution", "execution.checkpoint_resume_contract",
+        SUPPORTED_CHECKPOINT_RESUME_CONTRACT,
+    ),
+    ("averaging", "stitching", "stitching.averaging", SUPPORTED_STITCHING_AVERAGING),
+    ("crop_order", "stitching", "stitching.crop_order", SUPPORTED_CROP_ORDER),
+    ("dino_feature_stage", "snapshot", "snapshot.dino_feature_stage", SUPPORTED_DINO_FEATURE_STAGE),
+    ("clamping_policy", "geometry", "geometry.clamping_policy", SUPPORTED_CLAMPING_POLICY),
+    ("precision_source", "metrics", "metrics.precision_source", SUPPORTED_METRIC_PRECISION_SOURCE),
+    ("window_enumeration", "geometry", "geometry.window_enumeration", SUPPORTED_WINDOW_ENUMERATION),
+]
+
+
+@pytest.mark.parametrize("field, section, label, expected", ISSUE_5_CLOSED_FIELDS)
+def test_issue_5_field_canonical_value_matches_real_identity(field, section, label, expected):
+    identity = _identity()
+    assert identity[section][field] == expected
+
+
+@pytest.mark.parametrize("field, section, label, expected", ISSUE_5_CLOSED_FIELDS)
+def test_issue_5_field_rejects_unsupported_value(tmp_path, field, section, label, expected):
+    raw = IDENTITY_PATH.read_text()
+    old = f'{field} = "{expected}"'
+    assert old in raw
+    mutated = tmp_path / "mutated.toml"
+    mutated.write_text(raw.replace(old, f'{field} = "unsupported_value_xyz"', 1))
+    with pytest.raises(MatchedK11K12Error, match=re.escape(label)) as excinfo:
+        load_identity(mutated, repo_root=ROOT)
+    message = str(excinfo.value)
+    assert repr(expected) in message
+    assert "'unsupported_value_xyz'" in message
+
+
+def test_metric_precision_source_reuses_the_rwr_module_constant():
+    # Must be the SAME value already established in the sibling RWR module
+    # (src.rwr_reproduction_identity.FULL_PRECISION_METRIC_SOURCE), not a
+    # newly-invented duplicate string.
+    from src.rwr_reproduction_identity import FULL_PRECISION_METRIC_SOURCE
+    assert SUPPORTED_METRIC_PRECISION_SOURCE == FULL_PRECISION_METRIC_SOURCE
+
+
+def test_raw_score_stage_remains_relationally_validated_not_hardcoded():
+    # snapshot.raw_score_stage is intentionally NOT closed to a local
+    # hardcoded literal in this module -- it is already validated
+    # relationally against the loaded parent RWR identity's own
+    # rwr.score_stage field (the same pattern Fix 1 restored for top_k).
+    # Adding a second, redundant hardcoded closure here would reintroduce
+    # exactly the anti-pattern this repair round removed.
+    source = (ROOT / "src/matched_k11_k12_identity.py").read_text()
+    assert 'SUPPORTED_RAW_SCORE_STAGE' not in source
+    assert '"snapshot.raw_score_stage": (identity["snapshot"]["raw_score_stage"], rwr_identity["rwr"]["score_stage"])' in source
+
+
+def test_free_form_fields_remain_unconstrained():
+    # Category-A fields must NOT have been given a supported-value closure:
+    # description, required_relationship, dataset.name, image_id, and the
+    # runtime-environment provenance strings are genuinely free-form/
+    # relationally-validated and must still accept arbitrary text.
+    identity = _identity()
+    mutable_free_form = copy.deepcopy(identity)
+    mutable_free_form["identity"]["description"] = "an arbitrary new description of this experiment"
+    # load_identity is not re-invoked here (description isn't cross-checked
+    # against anything) -- this documents the expectation structurally: no
+    # SUPPORTED_DESCRIPTION-style constant exists in the module.
+    source = (ROOT / "src/matched_k11_k12_identity.py").read_text()
+    for forbidden_constant in (
+        "SUPPORTED_DESCRIPTION", "SUPPORTED_IDENTITY_NAME", "SUPPORTED_DATASET_NAME",
+        "SUPPORTED_REQUIRED_RELATIONSHIP", "SUPPORTED_IMAGE_ID", "SUPPORTED_GIT_BRANCH",
+        "SUPPORTED_GPU_MODEL",
+    ):
+        assert forbidden_constant not in source
+
+
+# ---------------------------------------------------------------------------
+# CLI-level adversarial confirmation for every Issue 5 field: exit 2, field
+# named, no traceback, real TOML left untouched.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("field, section, label, expected", ISSUE_5_CLOSED_FIELDS)
+def test_cli_preflight_rejects_issue_5_mutations_cleanly(tmp_path, field, section, label, expected):
+    raw = IDENTITY_PATH.read_text()
+    old = f'{field} = "{expected}"'
+    mutated = tmp_path / "mutated.toml"
+    mutated.write_text(raw.replace(old, f'{field} = "unsupported_value_xyz"', 1))
+    result = subprocess.run(
+        [
+            "python", str(ROOT / "verify_matched_k11_k12.py"), "--identity", str(mutated),
+            "preflight", "--repo-root", str(ROOT),
+        ],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 2
+    assert label in result.stderr
+    assert "Traceback" not in result.stderr
+    assert "Traceback" not in result.stdout
+
+
+def test_issue_5_mutation_probes_do_not_mutate_the_real_toml(tmp_path):
+    before = IDENTITY_PATH.read_bytes()
+    for field, section, label, expected in ISSUE_5_CLOSED_FIELDS:
+        raw = IDENTITY_PATH.read_text()
+        old = f'{field} = "{expected}"'
+        mutated = tmp_path / f"mutated_{field}.toml"
+        mutated.write_text(raw.replace(old, f'{field} = "unsupported_value_xyz"', 1))
+        with pytest.raises(MatchedK11K12Error):
+            load_identity(mutated, repo_root=ROOT)
+    after = IDENTITY_PATH.read_bytes()
+    assert before == after
+
+
+def test_all_issue_5_fields_now_use_the_shared_supported_value_helper():
+    # AST-level check (not grep) that every Issue-5 field's validation call
+    # site is a call to `_require_supported_value`, not a bare
+    # `_require_exact_string`-only check.
+    source = (ROOT / "src/matched_k11_k12_identity.py").read_text()
+    tree = ast.parse(source)
+    calls_to_require_supported_value = set()
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_require_supported_value"
+        ):
+            if node.args and isinstance(node.args[1], ast.Constant) and isinstance(node.args[1].value, str):
+                calls_to_require_supported_value.add(node.args[1].value)
+    for field, section, label, expected in ISSUE_5_CLOSED_FIELDS:
+        assert label in calls_to_require_supported_value, f"{label} is not validated via _require_supported_value"
+
+
+# ---------------------------------------------------------------------------
+# Dedicated coverage for geometry.window_enumeration -- the field the
+# complete semantic-string audit found still validated only as a bare
+# non-empty string, despite naming a specific window-enumeration algorithm
+# exactly like its already-closed siblings (affinity_function,
+# tie_break_rule, self_edge_policy, ...).
+# ---------------------------------------------------------------------------
+
+
+_WINDOW_ENUMERATION_LINE = f'window_enumeration = "{SUPPORTED_WINDOW_ENUMERATION}"'
+
+
+def _mutate_window_enumeration(tmp_path, replacement, *, label="mutated"):
+    raw = IDENTITY_PATH.read_text()
+    assert _WINDOW_ENUMERATION_LINE in raw
+    mutated = tmp_path / f"{label}.toml"
+    mutated.write_text(raw.replace(_WINDOW_ENUMERATION_LINE, replacement, 1))
+    return mutated
+
+
+def test_window_enumeration_canonical_value_matches_real_identity():
+    identity = _identity()
+    assert identity["geometry"]["window_enumeration"] == SUPPORTED_WINDOW_ENUMERATION
+
+
+def test_window_enumeration_exact_canonical_value_passes(tmp_path):
+    # Round-trip: rewriting the file with the *same* canonical value must
+    # still load cleanly.
+    mutated = tmp_path / "roundtrip.toml"
+    mutated.write_text(IDENTITY_PATH.read_text())
+    identity = load_identity(mutated, repo_root=ROOT)
+    assert identity["geometry"]["window_enumeration"] == SUPPORTED_WINDOW_ENUMERATION
+
+
+def test_window_enumeration_arbitrary_unrelated_algorithm_rejected(tmp_path):
+    mutated = _mutate_window_enumeration(
+        tmp_path, 'window_enumeration = "some_other_unverified_windowing_scheme"'
+    )
+    with pytest.raises(MatchedK11K12Error, match=re.escape("geometry.window_enumeration")):
+        load_identity(mutated, repo_root=ROOT)
+
+
+def test_window_enumeration_different_module_path_rejected(tmp_path):
+    mutated = _mutate_window_enumeration(
+        tmp_path,
+        'window_enumeration = "other_module.OtherPlan.build '
+        '(legacy clamped slide_inference grid, row-major flat index order)"',
+    )
+    with pytest.raises(MatchedK11K12Error, match=re.escape("geometry.window_enumeration")):
+        load_identity(mutated, repo_root=ROOT)
+
+
+def test_window_enumeration_case_mutation_rejected(tmp_path):
+    mutated = _mutate_window_enumeration(
+        tmp_path,
+        'window_enumeration = "Sliding_Window_Geometry.SlidingWindowPlan.build '
+        '(Legacy Clamped Slide_Inference Grid, Row-Major Flat Index Order)"',
+    )
+    with pytest.raises(MatchedK11K12Error, match=re.escape("geometry.window_enumeration")):
+        load_identity(mutated, repo_root=ROOT)
+
+
+def test_window_enumeration_leading_whitespace_rejected(tmp_path):
+    mutated = _mutate_window_enumeration(
+        tmp_path, f'window_enumeration = " {SUPPORTED_WINDOW_ENUMERATION}"'
+    )
+    with pytest.raises(MatchedK11K12Error, match=re.escape("geometry.window_enumeration")):
+        load_identity(mutated, repo_root=ROOT)
+
+
+def test_window_enumeration_trailing_whitespace_rejected(tmp_path):
+    mutated = _mutate_window_enumeration(
+        tmp_path, f'window_enumeration = "{SUPPORTED_WINDOW_ENUMERATION} "'
+    )
+    with pytest.raises(MatchedK11K12Error, match=re.escape("geometry.window_enumeration")):
+        load_identity(mutated, repo_root=ROOT)
+
+
+def test_window_enumeration_changed_clamping_description_rejected(tmp_path):
+    mutated = _mutate_window_enumeration(
+        tmp_path,
+        'window_enumeration = "sliding_window_geometry.SlidingWindowPlan.build '
+        '(legacy unclamped slide_inference grid, row-major flat index order)"',
+    )
+    with pytest.raises(MatchedK11K12Error, match=re.escape("geometry.window_enumeration")):
+        load_identity(mutated, repo_root=ROOT)
+
+
+def test_window_enumeration_changed_ordering_description_rejected(tmp_path):
+    mutated = _mutate_window_enumeration(
+        tmp_path,
+        'window_enumeration = "sliding_window_geometry.SlidingWindowPlan.build '
+        '(legacy clamped slide_inference grid, column-major flat index order)"',
+    )
+    with pytest.raises(MatchedK11K12Error, match=re.escape("geometry.window_enumeration")):
+        load_identity(mutated, repo_root=ROOT)
+
+
+def test_window_enumeration_empty_string_rejected(tmp_path):
+    mutated = _mutate_window_enumeration(tmp_path, 'window_enumeration = ""')
+    with pytest.raises(MatchedK11K12Error, match=re.escape("geometry.window_enumeration")):
+        load_identity(mutated, repo_root=ROOT)
+
+
+def test_window_enumeration_integer_rejected(tmp_path):
+    mutated = _mutate_window_enumeration(tmp_path, "window_enumeration = 1")
+    with pytest.raises(MatchedK11K12Error, match=re.escape("geometry.window_enumeration")):
+        load_identity(mutated, repo_root=ROOT)
+
+
+def test_window_enumeration_boolean_rejected(tmp_path):
+    mutated = _mutate_window_enumeration(tmp_path, "window_enumeration = true")
+    with pytest.raises(MatchedK11K12Error, match=re.escape("geometry.window_enumeration")):
+        load_identity(mutated, repo_root=ROOT)
+
+
+def test_window_enumeration_missing_key_rejected(tmp_path):
+    raw = IDENTITY_PATH.read_text()
+    line = _WINDOW_ENUMERATION_LINE + "\n"
+    assert line in raw
+    mutated = tmp_path / "missing.toml"
+    mutated.write_text(raw.replace(line, "", 1))
+    with pytest.raises(MatchedK11K12Error, match="unexpected schema"):
+        load_identity(mutated, repo_root=ROOT)
+
+
+def test_window_enumeration_cli_preflight_exit_2(tmp_path):
+    mutated = _mutate_window_enumeration(
+        tmp_path, 'window_enumeration = "some_other_unverified_windowing_scheme"'
+    )
+    result = subprocess.run(
+        [
+            "python", str(ROOT / "verify_matched_k11_k12.py"), "--identity", str(mutated),
+            "preflight", "--repo-root", str(ROOT),
+        ],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 2
+
+
+def test_window_enumeration_diagnostic_names_field(tmp_path):
+    mutated = _mutate_window_enumeration(
+        tmp_path, 'window_enumeration = "some_other_unverified_windowing_scheme"'
+    )
+    with pytest.raises(MatchedK11K12Error) as excinfo:
+        load_identity(mutated, repo_root=ROOT)
+    assert "geometry.window_enumeration" in str(excinfo.value)
+
+
+def test_window_enumeration_diagnostic_includes_expected_and_observed(tmp_path):
+    mutated = _mutate_window_enumeration(
+        tmp_path, 'window_enumeration = "some_other_unverified_windowing_scheme"'
+    )
+    with pytest.raises(MatchedK11K12Error) as excinfo:
+        load_identity(mutated, repo_root=ROOT)
+    message = str(excinfo.value)
+    assert repr(SUPPORTED_WINDOW_ENUMERATION) in message
+    assert "'some_other_unverified_windowing_scheme'" in message
+
+
+def test_window_enumeration_cli_emits_no_traceback(tmp_path):
+    mutated = _mutate_window_enumeration(
+        tmp_path, 'window_enumeration = "some_other_unverified_windowing_scheme"'
+    )
+    result = subprocess.run(
+        [
+            "python", str(ROOT / "verify_matched_k11_k12.py"), "--identity", str(mutated),
+            "preflight", "--repo-root", str(ROOT),
+        ],
+        capture_output=True, text=True,
+    )
+    assert "Traceback" not in result.stderr
+    assert "Traceback" not in result.stdout
+    assert result.stderr.startswith("MATCHED K11/K12 VERIFICATION FAIL:")
+
+
+def test_window_enumeration_mutation_probes_leave_original_toml_bytes_unchanged(tmp_path):
+    before = IDENTITY_PATH.read_bytes()
+    for replacement in (
+        'window_enumeration = "some_other_unverified_windowing_scheme"',
+        f'window_enumeration = " {SUPPORTED_WINDOW_ENUMERATION}"',
+        f'window_enumeration = "{SUPPORTED_WINDOW_ENUMERATION} "',
+        'window_enumeration = ""',
+        "window_enumeration = 1",
+        "window_enumeration = true",
+    ):
+        mutated = _mutate_window_enumeration(tmp_path, replacement, label=f"probe_{hash(replacement) & 0xffff}")
+        with pytest.raises(MatchedK11K12Error):
+            load_identity(mutated, repo_root=ROOT)
+    after = IDENTITY_PATH.read_bytes()
+    assert before == after
+
+
+def test_window_enumeration_successful_validation_returns_independent_mapping(tmp_path):
+    # load_identity must not hand back (or internally retain a mutable
+    # alias to) shared state: two independent successful loads of the same
+    # canonical file produce equal but non-aliased mappings, and mutating
+    # one returned mapping must not affect the other or a subsequent load.
+    mutated = tmp_path / "roundtrip.toml"
+    mutated.write_text(IDENTITY_PATH.read_text())
+    first = load_identity(mutated, repo_root=ROOT)
+    second = load_identity(mutated, repo_root=ROOT)
+    assert first == second
+    assert first is not second
+    first["geometry"]["window_enumeration"] = "tampered"
+    assert second["geometry"]["window_enumeration"] == SUPPORTED_WINDOW_ENUMERATION
+    third = load_identity(mutated, repo_root=ROOT)
+    assert third["geometry"]["window_enumeration"] == SUPPORTED_WINDOW_ENUMERATION
+
+
+def test_window_enumeration_failed_validation_leaves_module_constants_untouched(tmp_path):
+    # A failed load must not corrupt the module-level SUPPORTED_* constant
+    # (e.g. via an accidental shared-reference mutation in the validator).
+    before = SUPPORTED_WINDOW_ENUMERATION
+    mutated = _mutate_window_enumeration(
+        tmp_path, 'window_enumeration = "some_other_unverified_windowing_scheme"'
+    )
+    with pytest.raises(MatchedK11K12Error):
+        load_identity(mutated, repo_root=ROOT)
+    from src.matched_k11_k12_identity import SUPPORTED_WINDOW_ENUMERATION as after
     assert before == after
