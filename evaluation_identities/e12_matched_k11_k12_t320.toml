@@ -1,0 +1,151 @@
+format_version = "talk2dino-matched-k11-k12-identity-v1"
+
+# This identity pre-registers a connectivity dose-response experiment: it
+# compares matched k=11 and k=12 directed row-stochastic RWR graphs under
+# T=320 finite-step propagation, with every other inference condition held
+# fixed. It is not COVER-DR, DCR, SUR, semantic-consensus repair, or learned
+# graph reweighting -- see [prohibited] below. k=11 is formed as the first
+# 11 entries of the SAME canonical top-12 ordered neighbour selection used
+# for k=12 (a matched-prefix intervention equivalent to deleting the rank-12
+# edge and renormalizing), never an independently selected graph.
+
+[identity]
+name = "e12-matched-k11-k12-t320"
+schema_version = "talk2dino-matched-k11-k12-identity-v1"
+description = "Matched k=11 vs k=12 finite-step (T=320) directed RWR connectivity dose-response experiment: removes exactly the twelfth ranked outgoing edge from every non-fallback graph row, holding the E3 backbone pass, DINO features, raw pre-sigmoid scores, top-12 neighbour selection, finite-step propagation backend, alpha, step count, crop/window order, and downstream stitching fixed between the two variants."
+required_ancestor_commit = "e03d1f501d039811ad4b9b4505e8e5b5ae2862eb"
+
+[parent_identities]
+e3_identity_path = "evaluation_identities/e3_paired_soft_routing.toml"
+e3_identity_name = "e3-paired-soft-routing"
+e3_identity_sha256 = "db9cb8d407d6b5770d13c2b6546a33008206ae44ebcdc55f6b7384813eec477c"
+rwr_identity_path = "evaluation_identities/e3_canonical_directed_rwr.toml"
+rwr_identity_name = "e3-canonical-directed-rwr"
+rwr_identity_sha256 = "da0eb69de586328b53aeea83a9a48cd089dd53666522e5d1d3d5237742dbd365"
+required_relationship = "matched_k11_k12_shares_e3_backbone_and_canonical_rwr_graph_construction"
+
+[dataset]
+name = "COCO-Stuff 164k validation"
+protocol = "coco_stuff_164k_val2017"
+images = 5000
+classes = 171
+background_class = false
+evaluation_split_identity = "e3-paired-soft-routing"
+
+[geometry]
+crop = [448, 448]
+stride = [224, 224]
+patch_grid = [32, 32]
+patch_size = [14, 14]
+align_corners = true
+window_enumeration = "sliding_window_geometry.SlidingWindowPlan.build (legacy clamped slide_inference grid, row-major flat index order)"
+clamping_policy = "back_shifted_clamp_to_image_bounds"
+
+[snapshot]
+raw_score_stage = "pre_sigmoid_pre_upsample_pre_stitch"
+dino_feature_stage = "frozen_backbone_patch_tokens_l2_normalized"
+immutability_requirement = true
+one_shared_snapshot_per_crop = true
+
+[graph]
+directed = true
+row_stochastic = true
+maximum_rank = 12
+variants = [11, 12]
+matched_prefix_construction = true
+k11_construction_method = "matched_prefix_of_canonical_top12"
+self_edge_policy = "none_for_ordinary_rows"
+fallback_row_policy = "zero_affinity_rows_receive_self_loop_weight_one_invariant_to_k"
+affinity_function = "relu_cosine_power"
+affinity_power = 3.0
+tie_break_rule = "stable_descending_argsort_lower_patch_index_wins"
+artificial_tie_perturbation = false
+graph_symmetrization = false
+
+[propagation]
+method = "finite_power_iteration"
+alpha = 0.98
+steps = 320
+initial_iterate = "S0"
+recurrence = "P_next = alpha * A_k @ P + (1 - alpha) * S0"
+early_stopping = false
+convergence_tolerance = "not_applicable"
+fallback_solver = "none"
+compute_dtype = "float32"
+output_dtype = "float32"
+
+[execution]
+shared_backbone_pass = true
+shared_scores = true
+shared_features = true
+shared_affinity = true
+shared_top12_selection = true
+graph_normalizations = 2
+deterministic_variant_order = ["k11", "k12"]
+second_backbone_pass = false
+checkpoint_resume_contract = "resume_at_next_unprocessed_image_boundary_no_partial_window_state"
+
+[stitching]
+sigmoid_applications_per_variant_window = 1
+interpolation_applications_per_variant_window = 1
+averaging = "uniform"
+crop_order = "canonical_row_major_sliding_window_order"
+hann = false
+majority_vote = false
+center_selection = false
+sparse_delta_restitching = false
+
+[metrics]
+metric_names = ["aAcc", "mIoU", "mAcc"]
+unit = "percent_0_100"
+precision_source = "full_precision_area_statistics_from_mmseg_pre_eval"
+rounded_prettytable_forbidden = true
+minimum_metric_decimal_places = 6
+class_count = 171
+per_image_per_class_artifact_required = true
+image_order_digest_required = true
+
+[historical_reference]
+reference_kind = "finite_step_reference"
+source_commit = "fd5d61583671fb4e7bd44eb14e9a112f822039df"
+source_path = "ablationAll/e10_adaptive_diffusion/results/global_sweep_ext_converged.json"
+source_blob = "8135f2868366447d475ded0d461ac949d6ec2b5b"
+source_sha256 = "a0c020bb7e1ed9684137f5d98836934c25ecd2fc20d45552d36e934c13f5e85b"
+k12_alpha = 0.98
+k12_steps = 320
+k12_evaluated_images = 5000
+k12_aAcc = 48.528725957459656
+k12_mIoU = 29.87719634810705
+k12_mAcc = 54.13708897297259
+reproduction_tolerance_absolute_mIoU = 0.01
+sanity_anchor_only = true
+
+[window_count_reference]
+value = 11075
+source_commit = "218f17ead0e78939c58bd1473c93ca091287a719"
+source_path = "trust_centrality_full_5000_rerun_v4.json"
+source_blob = "9b126e1c3216ea6f1bb76f304deeef29bd70785d"
+source_sha256 = "220d78b9722c171f9adaeb95367c5254c2331ca5a6a38b04513ed03243833eed"
+
+[result_contract]
+schema_name = "talk2dino-matched-k11-k12-t320-result-v1"
+variant_k_values = [11, 12]
+variant_order = ["k11", "k12"]
+
+[prohibited]
+list = [
+    "semantic_consensus",
+    "t4_targeting",
+    "dcr",
+    "sur",
+    "sherman_morrison",
+    "edge_influence_gradients",
+    "learned_weights",
+    "dense_inverse",
+    "cgls",
+    "solver_fallback",
+    "changed_crop_stride",
+    "pamr",
+    "independently_selected_k11_graph",
+    "artificial_similarity_perturbation",
+]
