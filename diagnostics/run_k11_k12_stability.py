@@ -224,6 +224,18 @@ def _build_inference(repo_root: Path, e3_identity: dict[str, Any], device: str):
     cfg = load_config(str(config_path))
 
     dataset_config_path = resolve_e3_dataset_config_path(e3_identity, cfg, repo_root=repo_root)
+    # Every dataset config's pipeline references the custom "FloatImage"
+    # mmseg transform, which is registered into mmcv's PIPELINES registry
+    # only as a side effect of importing `main` (its definition site).
+    # Real production evaluation always runs through `main.py`, so it gets
+    # this registration for free; this diagnostic runner never otherwise
+    # imports `main`, so it must trigger the same registration explicitly
+    # here -- after task/path resolution succeeds, immediately before
+    # `build_seg_dataset` needs it, so a validation failure still short-
+    # circuits before this (or any other) expensive import. Nothing else
+    # from `main` is used -- this stays a side-effect-only import, never a
+    # reimplementation of `main`'s own logic.
+    import main  # noqa: F401
     dataset = build_seg_dataset(dataset_config_path)
 
     model = build_model(cfg.model)

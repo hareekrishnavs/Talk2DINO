@@ -346,8 +346,16 @@ def test_resolver_canonical_real_identity_and_config(tmp_path):
 
 def _install_inference_stubs(*, evaluate_map, model_calls, dataset_calls, inference_calls, checkpoint_calls):
     saved = {name: sys.modules.get(name) for name in (
-        "utils", "utils.config", "models", "segmentation", "segmentation.evaluation", "mmcv", "mmcv.runner",
+        "utils", "utils.config", "models", "segmentation", "segmentation.evaluation", "mmcv", "mmcv.runner", "main",
     )}
+
+    # `_build_inference` imports the real `main` module purely for its
+    # "FloatImage" mmseg pipeline registration side effect (see the real
+    # source). `main.py` itself pulls in heavy, unrelated production
+    # dependencies (mmcv.parallel, torch.distributed, timm, ...) that have
+    # nothing to do with dataset-task/path resolution, so it is stubbed
+    # out here exactly like the other heavy entry points.
+    sys.modules["main"] = types.ModuleType("main")
 
     utils_mod = types.ModuleType("utils")
     utils_mod.__path__ = []
@@ -475,6 +483,37 @@ def test_build_dinotext_seg_inference_receives_same_resolved_path(synth_repo, fa
     # both consumers received the IDENTICAL resolved path (same original
     # safe repository-relative string, not a resolved absolute path)
     assert dataset_calls == inference_calls == ["configs/valid.py"]
+
+
+def test_main_import_for_pipeline_registration_is_positioned_after_resolution_and_before_build_seg_dataset():
+    # Regression test for the "FloatImage is not in the pipeline registry"
+    # defect: `_build_inference` must import `main` (for its mmseg
+    # PIPELINES registration side effect) only AFTER task/path resolution
+    # succeeds and immediately before `build_seg_dataset` needs it -- so a
+    # validation failure still short-circuits before this (or any other)
+    # import/construction work, and a successful resolution reliably has
+    # the registration in place before the dataset is built.
+    import ast
+    import inspect
+
+    source = inspect.getsource(runner._build_inference)
+    tree = ast.parse(source)
+    function_node = tree.body[0]
+
+    resolve_call_index = import_main_index = build_seg_dataset_index = None
+    for index, node in enumerate(function_node.body):
+        stmt_source = ast.unparse(node)
+        if "resolve_e3_dataset_config_path(" in stmt_source and resolve_call_index is None:
+            resolve_call_index = index
+        if isinstance(node, ast.Import) and any(alias.name == "main" for alias in node.names):
+            import_main_index = index
+        if "build_seg_dataset(" in stmt_source and build_seg_dataset_index is None:
+            build_seg_dataset_index = index
+
+    assert resolve_call_index is not None, "resolve_e3_dataset_config_path call not found"
+    assert import_main_index is not None, "import main not found"
+    assert build_seg_dataset_index is not None, "build_seg_dataset call not found"
+    assert resolve_call_index < import_main_index < build_seg_dataset_index
 
 
 @pytest.mark.parametrize(
