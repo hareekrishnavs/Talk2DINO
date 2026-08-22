@@ -219,6 +219,7 @@ def _build_inference(repo_root: Path, e3_identity: dict[str, Any], device: str):
     from models import build_model
     from segmentation.evaluation import build_seg_dataset, build_dinotext_seg_inference
     from mmcv.runner import CheckpointLoader
+    from torch.utils.data import Subset
 
     config_path = repo_root / e3_identity["evaluation"]["config_path"]
     cfg = load_config(str(config_path))
@@ -250,7 +251,16 @@ def _build_inference(repo_root: Path, e3_identity: dict[str, Any], device: str):
         model.cuda()
     model.eval()
 
-    inference = build_dinotext_seg_inference(model, dataset, cfg, dataset_config_path)
+    # build_dinotext_seg_inference only ever reads dataset.dataset.CLASSES
+    # (a throwaway classname lookup -- it is never stored on the returned
+    # inference object), but unconditionally expects a torch Subset-style
+    # wrapper: production evaluation (main.py) always wraps its dataset in
+    # Subset(dataset, range(...)) before this exact call, even for the
+    # single-job/full-dataset case. This wrapper is local to this one call
+    # -- the raw, unwrapped `dataset` returned below still exposes the
+    # .img_infos/.data_infos and direct indexing the manifest builder and
+    # window processing require.
+    inference = build_dinotext_seg_inference(model, Subset(dataset, range(len(dataset))), cfg, dataset_config_path)
     inference.reset_evaluation_state()
     return inference, dataset
 

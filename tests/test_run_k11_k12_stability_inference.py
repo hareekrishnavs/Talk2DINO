@@ -344,7 +344,7 @@ def test_resolver_canonical_real_identity_and_config(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _install_inference_stubs(*, evaluate_map, model_calls, dataset_calls, inference_calls, checkpoint_calls):
+def _install_inference_stubs(*, evaluate_map, model_calls, dataset_calls, inference_calls, checkpoint_calls, inference_dataset_calls=None):
     saved = {name: sys.modules.get(name) for name in (
         "utils", "utils.config", "models", "segmentation", "segmentation.evaluation", "mmcv", "mmcv.runner", "main",
     )}
@@ -393,7 +393,8 @@ def _install_inference_stubs(*, evaluate_map, model_calls, dataset_calls, infere
     segmentation_eval_mod = types.ModuleType("segmentation.evaluation")
 
     class FakeDataset:
-        pass
+        def __len__(self):
+            return 3
 
     def fake_build_seg_dataset(path):
         dataset_calls.append(path)
@@ -405,6 +406,8 @@ def _install_inference_stubs(*, evaluate_map, model_calls, dataset_calls, infere
 
     def fake_build_dinotext_seg_inference(model, dataset, cfg, seg_config):
         inference_calls.append(seg_config)
+        if inference_dataset_calls is not None:
+            inference_dataset_calls.append(dataset)
         return FakeInference()
 
     segmentation_eval_mod.build_seg_dataset = fake_build_seg_dataset
@@ -483,6 +486,46 @@ def test_build_dinotext_seg_inference_receives_same_resolved_path(synth_repo, fa
     # both consumers received the IDENTICAL resolved path (same original
     # safe repository-relative string, not a resolved absolute path)
     assert dataset_calls == inference_calls == ["configs/valid.py"]
+
+
+def test_dataset_subset_wrapping_is_scoped_to_build_dinotext_seg_inference_only(synth_repo, fake_checkpoint_file):
+    # Regression test for the "'COCOStuffDataset' object has no attribute
+    # 'dataset'" defect: build_dinotext_seg_inference unconditionally reads
+    # dataset.dataset.CLASSES, exactly matching how a torch Subset wraps an
+    # underlying dataset -- production evaluation (main.py) always passes a
+    # Subset there, even for the full/single-job case. That wrapping must
+    # be local to this one call: the dataset _build_inference itself
+    # RETURNS to its caller must remain the raw, unwrapped object (the
+    # manifest builder and window processing need direct .img_infos/
+    # .data_infos access and direct indexing, which a Subset does not
+    # expose the same way).
+    from torch.utils.data import Subset
+
+    identity = {
+        "evaluation": {"config_path": "configs/eval.yml"},
+        "dataset": {"task": "synthetic_orchestration_task", "config_path": "configs/valid.py"},
+        "projection": {"checkpoint_path": str(fake_checkpoint_file.relative_to(synth_repo))},
+    }
+    model_calls, dataset_calls, inference_calls, checkpoint_calls = [], [], [], []
+    inference_dataset_calls = []
+    saved = _install_inference_stubs(
+        evaluate_map={"synthetic_orchestration_task": "configs/valid.py"},
+        model_calls=model_calls, dataset_calls=dataset_calls,
+        inference_calls=inference_calls, checkpoint_calls=checkpoint_calls,
+        inference_dataset_calls=inference_dataset_calls,
+    )
+    try:
+        inference, returned_dataset = runner._build_inference(synth_repo, identity, "cpu")
+    finally:
+        _restore_stubs(saved)
+
+    assert len(inference_dataset_calls) == 1
+    passed_to_inference = inference_dataset_calls[0]
+    assert isinstance(passed_to_inference, Subset)
+    # the Subset wraps the SAME underlying dataset object that gets returned
+    assert passed_to_inference.dataset is returned_dataset
+    # but the RETURNED dataset itself is the raw object, not a Subset
+    assert not isinstance(returned_dataset, Subset)
 
 
 def test_main_import_for_pipeline_registration_is_positioned_after_resolution_and_before_build_seg_dataset():
