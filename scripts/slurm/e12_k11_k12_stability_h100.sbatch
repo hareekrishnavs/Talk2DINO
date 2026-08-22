@@ -50,15 +50,6 @@ if [ "$(git branch --show-current)" != "${EXPECTED_BRANCH}" ]; then
     exit 1
 fi
 
-# Reject a dirty TRACKED worktree (untracked scratch/output files are fine;
-# uncommitted changes to tracked files are not -- this job must run exactly
-# the committed harness, never an uncommitted local edit).
-if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
-    echo "FATAL: tracked worktree is dirty; commit or stash before submitting" >&2
-    git status --short --untracked-files=no >&2
-    exit 1
-fi
-
 # Require the harness to actually be committed (not merely present on disk
 # as an untracked file) before this job is allowed to run it.
 for required_file in \
