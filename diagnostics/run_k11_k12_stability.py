@@ -125,7 +125,57 @@ def _reject_tracked_output_path(root: Path, path: Path) -> None:
         )
 
 
-def resolve_e3_dataset_config_path(e3_identity: dict[str, Any], cfg: Any) -> str:
+def _validate_task_key(value: Any, label: str) -> str:
+    """Validate a dataset-task lookup key: an exact ``str``, non-empty,
+    containing at least one non-whitespace character, and equal to its own
+    ``.strip()`` -- a padded value (``" coco_stuff"``, ``"coco_stuff\\n"``,
+    etc.) fails rather than being silently normalized into acceptance.
+    Never strips or otherwise mutates the value before returning it."""
+    if type(value) is not str or not value:
+        raise K11K12StabilityGateError(f"{label} must be an exact non-empty string, observed {value!r}")
+    if not value.strip():
+        raise K11K12StabilityGateError(f"{label} must contain at least one non-whitespace character, observed {value!r}")
+    if value != value.strip():
+        raise K11K12StabilityGateError(f"{label} must not have leading or trailing whitespace, observed {value!r}")
+    return value
+
+
+def _validate_safe_repo_relative_file_path(value: Any, label: str, *, repo_root: Path) -> str:
+    """Validate ``value`` as an exact, unpadded, repository-relative path
+    to an existing regular file inside ``repo_root`` -- never absolute,
+    never containing a ``..`` component or a backslash, never resolving
+    (following symlinks) outside the repository. Returns the original
+    repository-relative string unchanged (never the resolved absolute
+    path), because the production entry points this feeds
+    (``build_seg_dataset``, ``build_dinotext_seg_inference``) expect that
+    same configured-path string. A candidate that fails any single check
+    is rejected outright -- never normalized into a safe equivalent."""
+    if type(value) is not str or not value:
+        raise K11K12StabilityGateError(f"{label} must be an exact non-empty string, observed {value!r}")
+    if value != value.strip():
+        raise K11K12StabilityGateError(f"{label} must not have leading or trailing whitespace, observed {value!r}")
+    if "\x00" in value:
+        raise K11K12StabilityGateError(f"{label} must not contain a NUL byte")
+    if "\\" in value:
+        raise K11K12StabilityGateError(f"{label} must use POSIX path separators only (no backslashes), observed {value!r}")
+    path = Path(value)
+    if path.is_absolute():
+        raise K11K12StabilityGateError(f"{label} must be repository-relative, not absolute, observed {value!r}")
+    if ".." in path.parts:
+        raise K11K12StabilityGateError(f"{label} must not contain a '..' path component, observed {value!r}")
+
+    root = repo_root.resolve()
+    candidate = (repo_root / value).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        raise K11K12StabilityGateError(f"{label} resolves outside the repository root, observed {value!r}")
+    if not candidate.is_file():
+        raise K11K12StabilityGateError(f"{label} must refer to an existing regular file, observed {value!r}")
+    return value
+
+
+def resolve_e3_dataset_config_path(e3_identity: dict[str, Any], cfg: Any, *, repo_root: Path) -> str:
     """Resolve the dataset configuration path for the E3 identity's own
     registered dataset task -- never a hardcoded literal such as
     ``"stuff"`` or ``"coco_stuff"``. ``e3_identity["dataset"]["task"]`` is
@@ -133,18 +183,16 @@ def resolve_e3_dataset_config_path(e3_identity: dict[str, Any], cfg: Any) -> str
     resolved value is cross-checked against the identity's own recorded
     ``dataset.config_path`` before it is used to construct anything, so a
     tampered or stale config can never silently substitute a different
-    dataset. Never mutates ``e3_identity`` or ``cfg``."""
+    dataset. Both the expected (identity) and resolved (evaluation config)
+    paths are independently validated for path safety before the equality
+    comparison, so an unsafe expected path is never masked by an unsafe
+    observed path that happens to match it. Never mutates ``e3_identity``
+    or ``cfg``."""
     dataset_identity = e3_identity["dataset"]
-    task = dataset_identity["task"]
-    if type(task) is not str or not task:
-        raise K11K12StabilityGateError(
-            f"E3 dataset task must be an exact non-empty string, observed {task!r}"
-        )
-    expected_config_path = dataset_identity["config_path"]
-    if type(expected_config_path) is not str or not expected_config_path:
-        raise K11K12StabilityGateError(
-            f"E3 dataset config_path must be an exact non-empty string, observed {expected_config_path!r}"
-        )
+    task = _validate_task_key(dataset_identity["task"], "e3_identity.dataset.task")
+    expected_config_path = _validate_safe_repo_relative_file_path(
+        dataset_identity["config_path"], "e3_identity.dataset.config_path", repo_root=repo_root
+    )
 
     evaluate_section = cfg.evaluate
     if task not in evaluate_section:
@@ -152,12 +200,9 @@ def resolve_e3_dataset_config_path(e3_identity: dict[str, Any], cfg: Any) -> str
             f"E3 dataset task {task!r} is not present in the resolved evaluation config "
             f"(expected config path {expected_config_path!r})"
         )
-    resolved_config_path = evaluate_section.get(task)
-    if type(resolved_config_path) is not str or not resolved_config_path:
-        raise K11K12StabilityGateError(
-            f"E3 dataset task {task!r} resolved to a non-string/empty config path in the "
-            f"evaluation config (expected {expected_config_path!r}, observed {resolved_config_path!r})"
-        )
+    resolved_config_path = _validate_safe_repo_relative_file_path(
+        evaluate_section.get(task), f"resolved evaluation config path for E3 dataset task {task!r}", repo_root=repo_root
+    )
     if resolved_config_path != expected_config_path:
         raise K11K12StabilityGateError(
             f"E3 dataset task {task!r}: resolved config path disagrees with the registered "
@@ -178,7 +223,7 @@ def _build_inference(repo_root: Path, e3_identity: dict[str, Any], device: str):
     config_path = repo_root / e3_identity["evaluation"]["config_path"]
     cfg = load_config(str(config_path))
 
-    dataset_config_path = resolve_e3_dataset_config_path(e3_identity, cfg)
+    dataset_config_path = resolve_e3_dataset_config_path(e3_identity, cfg, repo_root=repo_root)
     dataset = build_seg_dataset(dataset_config_path)
 
     model = build_model(cfg.model)
