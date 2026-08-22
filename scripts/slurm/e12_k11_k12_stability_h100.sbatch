@@ -35,6 +35,11 @@ EXPECTED_BRANCH="e12-connectivity-analysis"
 VENV="/scratch/haree/venv/talk2dino-a100"
 OUTPUT_DIR="/scratch/haree/e12_k11_k12_stability"
 
+# Vision-backbone weights (DINOv2, CLIP, etc.) are large, pretrained,
+# third-party files that live outside the repository; point local_weights.py
+# at the existing scratch cache rather than requiring a copy under weights/.
+export TALK2DINO_WEIGHT_DIR="/scratch/haree/weights"
+
 cd "${REPO_ROOT}"
 
 echo "Git commit:    $(git rev-parse HEAD)"
