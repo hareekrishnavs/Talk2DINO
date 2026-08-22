@@ -125,6 +125,47 @@ def _reject_tracked_output_path(root: Path, path: Path) -> None:
         )
 
 
+def resolve_e3_dataset_config_path(e3_identity: dict[str, Any], cfg: Any) -> str:
+    """Resolve the dataset configuration path for the E3 identity's own
+    registered dataset task -- never a hardcoded literal such as
+    ``"stuff"`` or ``"coco_stuff"``. ``e3_identity["dataset"]["task"]`` is
+    the sole authority for which key to look up in ``cfg.evaluate``; the
+    resolved value is cross-checked against the identity's own recorded
+    ``dataset.config_path`` before it is used to construct anything, so a
+    tampered or stale config can never silently substitute a different
+    dataset. Never mutates ``e3_identity`` or ``cfg``."""
+    dataset_identity = e3_identity["dataset"]
+    task = dataset_identity["task"]
+    if type(task) is not str or not task:
+        raise K11K12StabilityGateError(
+            f"E3 dataset task must be an exact non-empty string, observed {task!r}"
+        )
+    expected_config_path = dataset_identity["config_path"]
+    if type(expected_config_path) is not str or not expected_config_path:
+        raise K11K12StabilityGateError(
+            f"E3 dataset config_path must be an exact non-empty string, observed {expected_config_path!r}"
+        )
+
+    evaluate_section = cfg.evaluate
+    if task not in evaluate_section:
+        raise K11K12StabilityGateError(
+            f"E3 dataset task {task!r} is not present in the resolved evaluation config "
+            f"(expected config path {expected_config_path!r})"
+        )
+    resolved_config_path = evaluate_section.get(task)
+    if type(resolved_config_path) is not str or not resolved_config_path:
+        raise K11K12StabilityGateError(
+            f"E3 dataset task {task!r} resolved to a non-string/empty config path in the "
+            f"evaluation config (expected {expected_config_path!r}, observed {resolved_config_path!r})"
+        )
+    if resolved_config_path != expected_config_path:
+        raise K11K12StabilityGateError(
+            f"E3 dataset task {task!r}: resolved config path disagrees with the registered "
+            f"E3 identity (expected {expected_config_path!r}, observed {resolved_config_path!r})"
+        )
+    return resolved_config_path
+
+
 def _build_inference(repo_root: Path, e3_identity: dict[str, Any], device: str):
     """Construct the real model + canonical dataset + DINOTextSegInference
     via exactly the same entry points production evaluation uses (never a
@@ -137,7 +178,8 @@ def _build_inference(repo_root: Path, e3_identity: dict[str, Any], device: str):
     config_path = repo_root / e3_identity["evaluation"]["config_path"]
     cfg = load_config(str(config_path))
 
-    dataset = build_seg_dataset(cfg.evaluate.stuff if "stuff" in cfg.evaluate else cfg.evaluate.get("stuff"))
+    dataset_config_path = resolve_e3_dataset_config_path(e3_identity, cfg)
+    dataset = build_seg_dataset(dataset_config_path)
 
     model = build_model(cfg.model)
     checkpoint_path = repo_root / e3_identity["projection"]["checkpoint_path"]
@@ -151,7 +193,7 @@ def _build_inference(repo_root: Path, e3_identity: dict[str, Any], device: str):
         model.cuda()
     model.eval()
 
-    inference = build_dinotext_seg_inference(model, dataset, cfg, cfg.evaluate.stuff)
+    inference = build_dinotext_seg_inference(model, dataset, cfg, dataset_config_path)
     inference.reset_evaluation_state()
     return inference, dataset
 
