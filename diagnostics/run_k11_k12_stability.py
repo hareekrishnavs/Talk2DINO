@@ -36,12 +36,14 @@ from __future__ import annotations
 import argparse
 import datetime
 import hashlib
+import importlib
 import json
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator, Mapping
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _OVS_ROOT = _REPO_ROOT / "src/open_vocabulary_segmentation"
@@ -63,7 +65,7 @@ from src.k11_k12_stability_report import (
     verify_checkpoint_record,
     write_checkpoint_atomically,
 )
-from src.k11_k12_stability_manifest import build_bounded_manifest, manifest_geometry_from_e3_identity
+from src.k11_k12_stability_manifest import ImageGeometryRecord, build_bounded_manifest, manifest_geometry_from_e3_identity
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -72,9 +74,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--repo-root", type=Path, default=repository_root())
     parser.add_argument("--identity", type=Path, default=None)
-    parser.add_argument("--output", type=Path, required=True, help="final result JSON path")
+    parser.add_argument("--output", type=Path, default=None, help="final result JSON path")
     parser.add_argument(
-        "--checkpoint", type=Path, required=True,
+        "--checkpoint", type=Path, default=None,
         help="checkpoint JSON path, updated atomically after every window",
     )
     parser.add_argument(
@@ -89,6 +91,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run-manifest-only", action="store_true",
         help="build and print the bounded window manifest, then exit without running the gate",
+    )
+    parser.add_argument(
+        "--smoke-one-image", action="store_true",
+        help=(
+            "bounded, non-GPU smoke check: construct the real canonical dataset, run the "
+            "canonical test pipeline on dataset index 0 only, print its authoritative inference "
+            "shape and SlidingWindowPlan, then exit. Builds no model, initializes no CUDA. "
+            "--output/--checkpoint are not required with this flag."
+        ),
     )
     return parser
 
@@ -211,16 +222,14 @@ def resolve_e3_dataset_config_path(e3_identity: dict[str, Any], cfg: Any, *, rep
     return resolved_config_path
 
 
-def _build_inference(repo_root: Path, e3_identity: dict[str, Any], device: str, *, log_dir: Path):
-    """Construct the real model + canonical dataset + DINOTextSegInference
-    via exactly the same entry points production evaluation uses (never a
-    monkeypatch, never reimplemented)."""
+def _build_dataset_only(repo_root: Path, e3_identity: dict[str, Any]) -> tuple[Any, Any, str]:
+    """Resolve the dataset config and construct the real canonical dataset
+    -- and nothing else: no model, no checkpoint, no CUDA. Returns
+    ``(cfg, dataset, dataset_config_path)`` so callers that also need the
+    model (``_build_inference``) can continue from the same loaded ``cfg``
+    and resolved path without reloading/re-resolving either."""
     from utils.config import load_config
-    from utils.logger import get_logger
-    from models import build_model
-    from segmentation.evaluation import build_seg_dataset, build_dinotext_seg_inference
-    from mmcv.runner import CheckpointLoader
-    from torch.utils.data import Subset
+    from segmentation.evaluation import build_seg_dataset
 
     config_path = repo_root / e3_identity["evaluation"]["config_path"]
     cfg = load_config(str(config_path))
@@ -239,6 +248,20 @@ def _build_inference(repo_root: Path, e3_identity: dict[str, Any], device: str, 
     # reimplementation of `main`'s own logic.
     import main  # noqa: F401
     dataset = build_seg_dataset(dataset_config_path)
+    return cfg, dataset, dataset_config_path
+
+
+def _build_inference(repo_root: Path, e3_identity: dict[str, Any], device: str, *, log_dir: Path):
+    """Construct the real model + canonical dataset + DINOTextSegInference
+    via exactly the same entry points production evaluation uses (never a
+    monkeypatch, never reimplemented)."""
+    from utils.logger import get_logger
+    from models import build_model
+    from segmentation.evaluation import build_dinotext_seg_inference
+    from mmcv.runner import CheckpointLoader
+    from torch.utils.data import Subset
+
+    cfg, dataset, dataset_config_path = _build_dataset_only(repo_root, e3_identity)
 
     model = build_model(cfg.model)
     checkpoint_path = repo_root / e3_identity["projection"]["checkpoint_path"]
@@ -283,14 +306,222 @@ def _build_inference(repo_root: Path, e3_identity: dict[str, Any], device: str, 
     return inference, dataset
 
 
+@dataclass(frozen=True)
+class PreparedDiagnosticImage:
+    """One canonical dataset sample already run through the real
+    canonical test pipeline exactly once. Retains the actual transformed
+    CPU tensor and validated metadata so window processing never reloads
+    or retransforms the same image merely to crop its selected windows."""
+
+    dataset_index: int
+    image_id: str
+    image_tensor: Any  # torch.Tensor, shape (C, H, W), CPU
+    img_metas: Mapping[str, Any]
+    inference_height: int
+    inference_width: int
+    source_shape_provenance: str
+
+    @property
+    def geometry(self) -> ImageGeometryRecord:
+        return ImageGeometryRecord(
+            dataset_index=self.dataset_index,
+            image_id=self.image_id,
+            inference_height=self.inference_height,
+            inference_width=self.inference_width,
+            source_shape_provenance=self.source_shape_provenance,
+        )
+
+
+def _extract_prepared_image(dataset: Any, dataset_index: int) -> PreparedDiagnosticImage:
+    """Run the canonical mmseg test pipeline exactly once for this dataset
+    index and extract verified, authoritative inference geometry.
+
+    ``dataset.img_infos``/``dataset.data_infos`` never carry height/width
+    for the real COCOStuffDataset (only ``filename``/``ann``) -- image
+    dimensions exist only after the pipeline has actually loaded and
+    resized the image. This mirrors exactly the spatial source production
+    ``DINOTextSegInference.slide_inference`` uses: ``batch_size, _, h_img,
+    w_img = img.shape`` -- the *processed tensor's own shape* -- never a
+    raw PIL/header read and never a hand-reimplemented resize formula.
+    ``img_meta['img_shape']`` and (when present) ``img_meta['pad_shape']``
+    are independently cross-checked against that tensor shape; any
+    disagreement fails closed rather than picking one source silently.
+
+    The canonical test pipeline (``MultiScaleFlipAug`` with a single
+    ``img_scale`` and ``flip=False``) wraps every field in a length-1
+    list, one entry per test-time augmentation. Any dataset config that
+    resolves to more than one augmentation is rejected outright -- this
+    gate never silently averages or picks the first of several TTA
+    variants.
+    """
+    import torch
+
+    raw = dataset[dataset_index]
+
+    img_list = raw.get("img") if hasattr(raw, "get") else None
+    if img_list is None:
+        raise K11K12StabilityGateError(f"dataset[{dataset_index}] is missing an 'img' field")
+    if not isinstance(img_list, list) or len(img_list) != 1:
+        observed = len(img_list) if isinstance(img_list, list) else type(img_list).__name__
+        raise K11K12StabilityGateError(
+            f"dataset[{dataset_index}]['img'] must contain exactly one canonical test-time "
+            f"augmentation, observed {observed!r} -- refusing to silently pick one of several"
+        )
+    image_tensor = img_list[0]
+    if not isinstance(image_tensor, torch.Tensor):
+        raise K11K12StabilityGateError(
+            f"dataset[{dataset_index}]['img'][0] must be a tensor, observed {type(image_tensor).__name__}"
+        )
+    if image_tensor.dim() != 3:
+        raise K11K12StabilityGateError(
+            f"dataset[{dataset_index}]['img'][0] must be a (C, H, W) tensor, observed shape {tuple(image_tensor.shape)}"
+        )
+    if not torch.isfinite(image_tensor).all():
+        raise K11K12StabilityGateError(f"dataset[{dataset_index}]['img'][0] contains non-finite values")
+
+    meta_list = raw.get("img_metas") if hasattr(raw, "get") else None
+    if meta_list is None:
+        raise K11K12StabilityGateError(f"dataset[{dataset_index}] is missing an 'img_metas' field")
+    if not isinstance(meta_list, list) or len(meta_list) != 1:
+        observed = len(meta_list) if isinstance(meta_list, list) else type(meta_list).__name__
+        raise K11K12StabilityGateError(
+            f"dataset[{dataset_index}]['img_metas'] must contain exactly one canonical test-time "
+            f"augmentation, observed {observed!r} -- refusing to silently pick one of several"
+        )
+    meta_container = meta_list[0]
+    img_meta = meta_container.data if hasattr(meta_container, "data") else meta_container
+    if not isinstance(img_meta, Mapping):
+        raise K11K12StabilityGateError(f"dataset[{dataset_index}]['img_metas'][0] did not unwrap to a mapping")
+
+    tensor_h = int(image_tensor.shape[-2])
+    tensor_w = int(image_tensor.shape[-1])
+    if tensor_h <= 0 or tensor_w <= 0:
+        raise K11K12StabilityGateError(
+            f"dataset[{dataset_index}] processed tensor has nonpositive dimensions ({tensor_h}, {tensor_w})"
+        )
+
+    img_shape = img_meta.get("img_shape")
+    if img_shape is None or len(img_shape) < 2:
+        raise K11K12StabilityGateError(f"dataset[{dataset_index}] img_metas is missing a valid 'img_shape'")
+    meta_h, meta_w = int(img_shape[0]), int(img_shape[1])
+    if (tensor_h, tensor_w) != (meta_h, meta_w):
+        raise K11K12StabilityGateError(
+            f"dataset[{dataset_index}]: processed tensor shape ({tensor_h}, {tensor_w}) disagrees with "
+            f"img_meta['img_shape'] ({meta_h}, {meta_w})"
+        )
+    provenance = "tensor==img_shape"
+
+    pad_shape = img_meta.get("pad_shape")
+    if pad_shape is not None and len(pad_shape) >= 2:
+        pad_h, pad_w = int(pad_shape[0]), int(pad_shape[1])
+        # The canonical test pipeline has no Pad transform, so pad_shape
+        # is expected to equal img_shape/the tensor exactly for every
+        # sample; a mismatch would mean an unexpected padding step crept
+        # into the resolved config, which must fail closed rather than
+        # silently trusting one of the disagreeing sources.
+        if (pad_h, pad_w) != (tensor_h, tensor_w):
+            raise K11K12StabilityGateError(
+                f"dataset[{dataset_index}]: processed tensor shape ({tensor_h}, {tensor_w}) disagrees with "
+                f"img_meta['pad_shape'] ({pad_h}, {pad_w}) -- this pipeline has no Pad transform, so "
+                "pad_shape must equal the tensor/img_shape exactly"
+            )
+        provenance = "tensor==img_shape==pad_shape"
+
+    filename = img_meta.get("filename") or img_meta.get("ori_filename")
+    image_id = str(filename) if filename else str(dataset_index)
+
+    # .detach().cpu() alone can return a tensor that SHARES the original's
+    # underlying storage whenever the source is already an ungraded CPU
+    # tensor (as every sample from this pipeline is) -- mutating one would
+    # silently corrupt the other. .clone() forces an independently-owned
+    # copy, so the retained canonical sample can never be corrupted by
+    # anything a later consumer does with a tensor derived from it.
+    prepared_tensor = image_tensor.detach().cpu().clone()
+
+    return PreparedDiagnosticImage(
+        dataset_index=dataset_index,
+        image_id=image_id,
+        image_tensor=prepared_tensor,
+        img_metas=dict(img_meta),
+        inference_height=tensor_h,
+        inference_width=tensor_w,
+        source_shape_provenance=provenance,
+    )
+
+
+def _iter_prepared_images(dataset: Any) -> Iterator[PreparedDiagnosticImage]:
+    """Lazily run the canonical test pipeline once per dataset index, in
+    canonical order. A generator, not a list: the caller controls how far
+    to pull from it, so images beyond what is needed to reach the
+    registered bounded window count are never processed."""
+    for dataset_index in range(len(dataset)):
+        yield _extract_prepared_image(dataset, dataset_index)
+
+
 def _process_window(inference, image_tensor, manifest_entry: dict[str, Any]):
     """Extract the crop, run one backbone forward via the existing
-    read-only snapshot API, and return (s0, dino_features, grid_hw)."""
+    read-only snapshot API, and return (s0, dino_features, grid_hw).
+
+    A plain slice of ``image_tensor`` (the cached, reused canonical
+    sample) is a *view* sharing its storage -- if the downstream model
+    path ever mutated that view in place, it would silently corrupt the
+    retained canonical tensor for every other window of the same image.
+    ``.clone()`` here copies only the small crop region, never the whole
+    image, so the canonical tensor can never be corrupted regardless of
+    what the downstream model call does with its input."""
     row0, col0 = manifest_entry["crop_origin"]
     row1, col1 = manifest_entry["crop_end"]
-    crop = image_tensor[:, :, row0:row1, col0:col1]
+    crop = image_tensor[:, :, row0:row1, col0:col1].clone()
     snapshot = inference.model.generate_patch_snapshot(crop, inference.text_embedding)
     return snapshot.unary_scores[0], snapshot.dino_features[0], snapshot.grid_hw
+
+
+def _run_one_image_smoke(args: argparse.Namespace) -> int:
+    """Bounded, non-GPU smoke check: construct the real canonical dataset,
+    run the canonical test pipeline on dataset index 0 only, and print its
+    authoritative inference shape and SlidingWindowPlan. Builds no model,
+    initializes no CUDA. Exists to prove, against the real dataset, that
+    ``dataset.img_infos``/``dataset.data_infos`` lack height/width (only
+    ``filename``/``ann`` are present) and that the adapter correctly
+    derives verified dimensions from the processed inference tensor
+    instead."""
+    from src.matched_k11_k12_identity import load_identity as load_matched_identity
+    from src.e3_evaluation_identity import load_identity as load_e3_identity
+
+    identity = load_identity(args.identity, repo_root=args.repo_root)
+    validate_static_configuration(repo_root=args.repo_root, identity_path=args.identity, check_git=True)
+    matched_identity = load_matched_identity(
+        args.repo_root / identity["parent_identity"]["matched_identity_path"], repo_root=args.repo_root
+    )
+    e3_identity = load_e3_identity(
+        args.repo_root / matched_identity["parent_identities"]["e3_identity_path"], repo_root=args.repo_root
+    )
+
+    _, dataset, dataset_config_path = _build_dataset_only(args.repo_root, e3_identity)
+
+    raw_img_info = (
+        dataset.img_infos[0] if hasattr(dataset, "img_infos") else dataset.data_infos[0]
+    )
+    print(f"dataset_config_path:  {dataset_config_path}")
+    print(f"dataset length:       {len(dataset)}")
+    print(f"raw img_infos[0] keys (no height/width for the real dataset): {sorted(raw_img_info.keys())}")
+
+    prepared = _extract_prepared_image(dataset, 0)
+    print(f"processed tensor shape:      {tuple(prepared.image_tensor.shape)}")
+    print(f"authoritative inference H/W: ({prepared.inference_height}, {prepared.inference_width})")
+    print(f"source shape provenance:     {prepared.source_shape_provenance}")
+    print(f"image_id:                    {prepared.image_id}")
+
+    geometry = manifest_geometry_from_e3_identity(e3_identity)
+    geometry_module = importlib.import_module("segmentation.evaluation.sliding_window_geometry")
+    plan = geometry_module.SlidingWindowPlan.build(
+        image_size=geometry_module.SpatialSize(prepared.inference_height, prepared.inference_width),
+        crop_size=geometry_module.SpatialSize(geometry.crop_height, geometry.crop_width),
+        stride=geometry_module.SpatialSize(geometry.stride_height, geometry.stride_width),
+    )
+    print(f"SlidingWindowPlan window count for this image: {len(plan.windows)}")
+    print("K11/K12 STABILITY GATE SMOKE PASS")
+    return 0
 
 
 def run_gate(args: argparse.Namespace) -> int:
@@ -341,8 +572,23 @@ def run_gate(args: argparse.Namespace) -> int:
 
     inference, dataset = _build_inference(args.repo_root, e3_identity, args.device, log_dir=args.output.parent)
     geometry = manifest_geometry_from_e3_identity(e3_identity)
+
+    # prepared_images caches each canonical sample's already-transformed
+    # CPU tensor as it is produced, keyed by dataset_index, so window
+    # processing below reuses it directly instead of reloading/
+    # retransforming the same image through the pipeline again. The
+    # generator is lazy: build_bounded_manifest only pulls as many images
+    # as are actually needed to reach the registered bounded window count,
+    # so images beyond that are never run through the pipeline at all.
+    prepared_images: dict[int, PreparedDiagnosticImage] = {}
+
+    def _geometry_records():
+        for prepared in _iter_prepared_images(dataset):
+            prepared_images[prepared.dataset_index] = prepared
+            yield prepared.geometry
+
     manifest, manifest_digest = build_bounded_manifest(
-        dataset,
+        _geometry_records(),
         canonical_window_count=identity["sample_selection"]["canonical_window_count"],
         geometry=geometry,
     )
@@ -373,7 +619,10 @@ def run_gate(args: argparse.Namespace) -> int:
     affinity_power = 3.0
 
     def _process_one_window(entry: dict[str, Any]) -> dict[str, Any]:
-        image_tensor = dataset[entry["dataset_index"]]["img"]
+        # Reuse the already-transformed CPU tensor cached while building
+        # the manifest -- never reload/retransform the same image merely
+        # to process one of its selected windows.
+        image_tensor = prepared_images[entry["dataset_index"]].image_tensor
         if args.device == "cuda":
             image_tensor = image_tensor.cuda()
         s0, dino_features, grid_hw = _process_window(inference, image_tensor.unsqueeze(0), entry)
@@ -672,6 +921,10 @@ def run_gate(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.smoke_one_image:
+            return _run_one_image_smoke(args)
+        if args.output is None or args.checkpoint is None:
+            raise K11K12StabilityGateError("--output and --checkpoint are required unless --smoke-one-image is passed")
         return run_gate(args)
     except K11K12StabilityGateError as error:
         print(f"K11/K12 STABILITY GATE FAIL: {error}", file=sys.stderr)

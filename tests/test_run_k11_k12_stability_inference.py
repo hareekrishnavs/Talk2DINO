@@ -639,16 +639,18 @@ def test_process_global_logger_not_initialized_when_resolution_fails(synth_repo,
 
 def test_main_import_for_pipeline_registration_is_positioned_after_resolution_and_before_build_seg_dataset():
     # Regression test for the "FloatImage is not in the pipeline registry"
-    # defect: `_build_inference` must import `main` (for its mmseg
-    # PIPELINES registration side effect) only AFTER task/path resolution
-    # succeeds and immediately before `build_seg_dataset` needs it -- so a
-    # validation failure still short-circuits before this (or any other)
-    # import/construction work, and a successful resolution reliably has
-    # the registration in place before the dataset is built.
+    # defect: `_build_dataset_only` (the shared dataset-construction path
+    # both `_build_inference` and the CPU smoke command use) must import
+    # `main` (for its mmseg PIPELINES registration side effect) only AFTER
+    # task/path resolution succeeds and immediately before
+    # `build_seg_dataset` needs it -- so a validation failure still
+    # short-circuits before this (or any other) import/construction work,
+    # and a successful resolution reliably has the registration in place
+    # before the dataset is built.
     import ast
     import inspect
 
-    source = inspect.getsource(runner._build_inference)
+    source = inspect.getsource(runner._build_dataset_only)
     tree = ast.parse(source)
     function_node = tree.body[0]
 
@@ -773,3 +775,23 @@ def test_main_catches_K11K12StabilityGateError_from_run_gate_as_exit_2_no_traceb
     assert "Traceback" not in captured.err
     assert "K11/K12 STABILITY GATE FAIL" in captured.err
     assert "synthetic dataset-task/path resolution failure" in captured.err
+
+
+def test_process_one_window_reuses_cached_prepared_image_not_dataset_reload():
+    # Regression test: window processing must read the already-transformed
+    # image tensor from the prepared_images cache (built once per image
+    # while the manifest is constructed), never re-index the raw dataset
+    # object -- which would both retransform the image redundantly and
+    # (for the real dataset) return the un-unwrapped list/DataContainer
+    # structure _extract_prepared_image already validates and unwraps.
+    import ast
+    import inspect
+
+    source = inspect.getsource(runner.run_gate)
+    tree = ast.parse(source)
+    process_one_window = next(
+        n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_process_one_window"
+    )
+    body_source = ast.unparse(process_one_window)
+    assert "prepared_images[entry" in body_source
+    assert 'dataset[entry["dataset_index"]]' not in body_source

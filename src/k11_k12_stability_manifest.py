@@ -1,13 +1,26 @@
 """Pure, CPU-only construction of the bounded k11/k12 stability gate's
 window manifest.
 
-Depends only on validated image metadata, a validated crop/stride geometry
-pair, the canonical :class:`SlidingWindowPlan`, and an explicit canonical
-window-count limit -- never on mmcv, mmseg, CUDA, model construction, or
-dataset initialization. Crop/stride are supplied by the caller, derived
-from the authoritative E3 evaluation identity via
+Depends only on validated per-image inference geometry records, a
+validated crop/stride geometry pair, the canonical
+:class:`SlidingWindowPlan`, and an explicit canonical window-count limit
+-- never on mmcv, mmseg, torch, CUDA, model construction, or dataset
+initialization. Crop/stride are supplied by the caller, derived from the
+authoritative E3 evaluation identity via
 :func:`manifest_geometry_from_e3_identity`; this module never invents or
 hardcodes a crop/stride pair of its own.
+
+Per-image inference height/width are supplied by the caller as
+:class:`ImageGeometryRecord` values, derived from the *actual processed
+inference tensor* the real mmseg test pipeline produces for that image
+(see ``diagnostics.run_k11_k12_stability._extract_prepared_image``) --
+never from ``dataset.img_infos``/``dataset.data_infos``, which for the
+real COCOStuffDataset never carry height/width at all (only ``filename``
+and ``ann``; dimensions only exist once an image has actually been loaded
+and resized by the pipeline). This module has no way to fabricate that
+distinction itself -- it trusts the geometry records it is given were
+derived from the real inference tensor, and the adapter that builds them
+is responsible for that verification.
 
 ``SlidingWindowPlan``/``SpatialSize`` live in
 ``segmentation.evaluation.sliding_window_geometry``, a pure-Python module
@@ -35,7 +48,7 @@ import sys
 import types
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from src.k11_k12_stability_gate_identity import K11K12StabilityGateError
 
@@ -79,6 +92,44 @@ def manifest_geometry_from_e3_identity(e3_identity: Mapping[str, Any]) -> Manife
     )
 
 
+@dataclass(frozen=True)
+class ImageGeometryRecord:
+    """Authoritative, already-verified per-image inference geometry: the
+    exact spatial dimensions the real canonical test pipeline produced for
+    this dataset index, never raw ``img_infos`` metadata or a PIL/header
+    read. ``source_shape_provenance`` records which independent sources
+    (the processed tensor, ``img_meta['img_shape']``,
+    ``img_meta['pad_shape']``) agreed to produce this height/width, purely
+    for audit purposes -- it never affects manifest construction itself."""
+
+    dataset_index: int
+    image_id: str
+    inference_height: int
+    inference_width: int
+    source_shape_provenance: str
+
+    def __post_init__(self) -> None:
+        if isinstance(self.dataset_index, bool) or not isinstance(self.dataset_index, int) or self.dataset_index < 0:
+            raise K11K12StabilityGateError(
+                f"ImageGeometryRecord.dataset_index must be a non-negative exact integer, observed {self.dataset_index!r}"
+            )
+        if type(self.image_id) is not str or not self.image_id:
+            raise K11K12StabilityGateError(
+                f"ImageGeometryRecord.image_id must be an exact non-empty string, observed {self.image_id!r}"
+            )
+        for name in ("inference_height", "inference_width"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise K11K12StabilityGateError(
+                    f"ImageGeometryRecord.{name} must be a positive exact integer, observed {value!r}"
+                )
+        if type(self.source_shape_provenance) is not str or not self.source_shape_provenance:
+            raise K11K12StabilityGateError(
+                "ImageGeometryRecord.source_shape_provenance must be an exact non-empty string, "
+                f"observed {self.source_shape_provenance!r}"
+            )
+
+
 def _load_sliding_window_geometry_module():
     module_name = "segmentation.evaluation.sliding_window_geometry"
     if module_name in sys.modules:
@@ -99,19 +150,25 @@ def _sha256_bytes(data: bytes) -> str:
 
 
 def build_bounded_manifest(
-    dataset: Any, *, canonical_window_count: int, geometry: ManifestGeometry
+    image_geometries: Iterable[ImageGeometryRecord],
+    *,
+    canonical_window_count: int,
+    geometry: ManifestGeometry,
 ) -> tuple[list[dict], str]:
     """Enumerate exactly the first ``canonical_window_count`` windows in
     canonical image order, then ``SlidingWindowPlan.build`` row-major
     flat-index order. Returns ``(manifest_entries, manifest_sha256)``.
 
-    ``dataset`` must already be the canonical, unmodified COCO-Stuff
-    validation dataset object (as built by
-    ``segmentation.evaluation.build_seg_dataset`` from the resolved E3
-    config) -- this function never invents image order, crop, or stride;
-    ``geometry`` (crop/stride) is supplied by the caller from the
-    authoritative E3 identity, and image order/dimensions come from the
-    dataset object itself.
+    ``image_geometries`` must yield :class:`ImageGeometryRecord` values in
+    canonical, non-decreasing ``dataset_index`` order -- typically a lazy
+    generator over the real dataset that runs the canonical test pipeline
+    exactly once per image, so images beyond what is needed to reach
+    ``canonical_window_count`` are never visited (this function stops
+    pulling from the iterable as soon as the target is reached). This
+    function never invents image order, crop, stride, or per-image
+    dimensions; ``geometry`` (crop/stride) is supplied by the caller from
+    the authoritative E3 identity, and per-image dimensions come from the
+    already-verified ``image_geometries`` records themselves.
     """
     if isinstance(canonical_window_count, bool) or not isinstance(canonical_window_count, int) or canonical_window_count < 1:
         raise K11K12StabilityGateError("canonical_window_count must be a positive exact integer")
@@ -125,19 +182,35 @@ def build_bounded_manifest(
     target = canonical_window_count
     manifest: list[dict] = []
     sample_order_index = 0
-    for dataset_index in range(len(dataset)):
-        if sample_order_index >= target:
+    last_dataset_index: int | None = None
+    _EXHAUSTED = object()
+    iterator = iter(image_geometries)
+
+    while sample_order_index < target:
+        # Checking the target BEFORE pulling the next record (rather than
+        # `for record in image_geometries:` with a break inside the loop
+        # body) is deliberate: a plain `for` loop always calls `next()` to
+        # test for exhaustion before the body runs, which would pull one
+        # image beyond what is needed whenever the target lands exactly on
+        # an image boundary -- and for a lazy, pipeline-driving generator,
+        # that means running the real, expensive test pipeline on an image
+        # that is never actually used.
+        record = next(iterator, _EXHAUSTED)
+        if record is _EXHAUSTED:
             break
-        img_info = (
-            dataset.img_infos[dataset_index]
-            if hasattr(dataset, "img_infos")
-            else dataset.data_infos[dataset_index]
-        )
-        height = int(img_info["height"])
-        width = int(img_info["width"])
-        image_id = str(img_info.get("filename", dataset_index))
+        if not isinstance(record, ImageGeometryRecord):
+            raise K11K12StabilityGateError(
+                f"image_geometries must yield ImageGeometryRecord values, observed {type(record).__name__}"
+            )
+        if last_dataset_index is not None and record.dataset_index <= last_dataset_index:
+            raise K11K12StabilityGateError(
+                "image_geometries must be in strictly increasing dataset_index order "
+                f"(saw {record.dataset_index!r} after {last_dataset_index!r})"
+            )
+        last_dataset_index = record.dataset_index
+
         plan = SlidingWindowPlan.build(
-            image_size=SpatialSize(height, width),
+            image_size=SpatialSize(record.inference_height, record.inference_width),
             crop_size=SpatialSize(geometry.crop_height, geometry.crop_width),
             stride=SpatialSize(geometry.stride_height, geometry.stride_width),
         )
@@ -147,15 +220,16 @@ def build_bounded_manifest(
             manifest.append(
                 {
                     "sample_order_index": sample_order_index,
-                    "dataset_index": dataset_index,
-                    "image_id": image_id,
-                    "image_height": height,
-                    "image_width": width,
+                    "dataset_index": record.dataset_index,
+                    "image_id": record.image_id,
+                    "image_height": record.inference_height,
+                    "image_width": record.inference_width,
                     "window_flat_index": window.index,
                     "crop_origin": [window.origin.row, window.origin.col],
                     "crop_end": [window.end.row, window.end.col],
                     "clamped": bool(window.clamped_vertical or window.clamped_horizontal),
                     "patch_grid": [geometry.crop_height // 14, geometry.crop_width // 14],
+                    "source_shape_provenance": record.source_shape_provenance,
                 }
             )
             sample_order_index += 1
@@ -170,6 +244,7 @@ def build_bounded_manifest(
 
 
 __all__ = [
+    "ImageGeometryRecord",
     "ManifestGeometry",
     "build_bounded_manifest",
     "manifest_geometry_from_e3_identity",

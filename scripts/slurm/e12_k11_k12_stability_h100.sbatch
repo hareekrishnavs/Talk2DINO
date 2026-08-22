@@ -50,6 +50,18 @@ if [ "$(git branch --show-current)" != "${EXPECTED_BRANCH}" ]; then
     exit 1
 fi
 
+# Reject TRACKED changes only (staged or unstaged) -- unrelated untracked
+# files (e.g. historical local JSON artifacts elsewhere in the repo) are
+# fine and must not block submission. This job must run exactly the
+# committed harness, never an uncommitted tracked edit.
+if ! git diff --quiet --exit-code || ! git diff --cached --quiet --exit-code; then
+    echo "FATAL: tracked worktree has uncommitted changes; commit or stash before submitting" >&2
+    echo "Changed tracked files:" >&2
+    git diff --name-only >&2
+    git diff --cached --name-only >&2
+    exit 1
+fi
+
 # Require the harness to actually be committed (not merely present on disk
 # as an untracked file) before this job is allowed to run it.
 for required_file in \

@@ -81,12 +81,88 @@ stride are never hardcoded in this module: the caller
 preflighted E3 evaluation identity, and passes the resulting immutable
 `ManifestGeometry` in explicitly -- the same authority
 `verify_e3_identity.py` itself uses for the E3 evaluation's own crop/
-stride. `build_bounded_manifest` depends only on validated image metadata,
-that geometry, the canonical `SlidingWindowPlan`, and the canonical
-window-count limit; it requires no mmcv, mmseg, CUDA, model construction,
-or dataset initialization, and is covered directly by
-`tests/test_k11_k12_stability_manifest.py` with hand-derived window
-fixtures (never a reimplementation of the enumeration under test).
+stride. `build_bounded_manifest` depends only on already-verified per-image
+geometry records (see "Canonical transformed-sample manifest
+construction" below), that crop/stride geometry, the canonical
+`SlidingWindowPlan`, and the canonical window-count limit; it requires no
+mmcv, mmseg, CUDA, model construction, or dataset initialization, and is
+covered directly by `tests/test_k11_k12_stability_manifest.py` with
+hand-derived window fixtures (never a reimplementation of the enumeration
+under test).
+
+## Canonical transformed-sample manifest construction
+
+**`dataset.img_infos`/`dataset.data_infos` are an identity index, not a
+spatial-dimension authority.** For the real `COCOStuffDataset`, each entry
+is only `{"filename": ..., "ann": {"seg_map": ...}}` -- confirmed by
+reading mmseg's own `CustomDataset.load_annotations` directly, and
+independently reproduced against the real dataset: `dataset.img_infos[0]`
+has no `"height"`/`"width"` key at all, and an earlier version of this
+harness that assumed one crashed with `KeyError: 'height'`. Raw encoded
+image dimensions are **not** the inference dimensions: the mmseg test
+pipeline (`LoadImageFromFile` -> `MultiScaleFlipAug` -> `Resize` ->
+... -> `ImageToTensor` -> `Collect`) resizes every image before it ever
+reaches the model, and only the *processed* tensor's shape reflects what
+inference actually sees. Confirmed on a real sample: the raw/original
+size (`img_meta["ori_shape"]`, descriptive only, never used for window
+construction) was `426x640`, while the processed tensor -- and
+`img_meta["img_shape"]`/`["pad_shape"]` -- were `448x673`. Raw PIL/OpenCV
+header dimensions are never read or used anywhere in this path.
+
+Production `DINOTextSegInference.slide_inference` builds its own sliding
+window plan from exactly one source:
+`segmentation/evaluation/dinotext_seg.py`'s `batch_size, _, h_img, w_img
+= img.shape` -- the **processed tensor's own shape**, not
+`img_meta["img_shape"]` (used elsewhere, only to crop padded predictions
+back down before the final resize) and not `img_meta["pad_shape"]`. The
+diagnostic adapter,
+`diagnostics.run_k11_k12_stability._extract_prepared_image`, mirrors that
+exact authority: it takes the processed tensor's `shape[-2:]` as the
+inference height/width, then independently cross-checks that value
+against `img_meta["img_shape"]` and (when present) `["pad_shape"]` --
+these are cross-checks, never substitutes; any disagreement fails closed
+rather than silently trusting one source over another. This pipeline has
+no `Pad` transform, so `pad_shape` is expected to equal the tensor/
+`img_shape` exactly for every sample.
+
+The adapter runs the canonical test pipeline **exactly once** per
+retained image (`dataset[i]`, not reloaded or retransformed for each of
+that image's selected windows) and returns an immutable
+`PreparedDiagnosticImage` -- dataset index, image ID, the processed
+tensor, a copy-safe `img_metas` mapping, verified inference height/width,
+and a `source_shape_provenance` string recording which sources agreed
+(`"tensor==img_shape"` or `"tensor==img_shape==pad_shape"`). The prepared
+tensor independently **owns** its CPU storage
+(`image_tensor.detach().cpu().clone()`): `.detach().cpu()` alone can
+return a tensor that shares the original's underlying storage whenever
+the source is already an ungraded CPU tensor, which every sample from
+this pipeline is, so `.clone()` is required to guarantee later
+consumers can never corrupt the retained canonical sample. Window
+processing (`_process_window`) clones only the small selected crop, never
+the whole image, before handing it to the model -- so even an in-place
+mutation downstream cannot corrupt the cached image shared by that
+image's other windows.
+
+`diagnostics.run_k11_k12_stability.run_gate` drives this lazily: a
+generator wraps `_iter_prepared_images`, caching each `PreparedDiagnosticImage`
+by dataset index as it is produced and yielding only its geometry record
+to `build_bounded_manifest`. `build_bounded_manifest` pulls from that
+generator until exactly the registered `canonical_window_count` (100)
+windows are selected, in dataset-index and row-major order, and never
+pulls one image further -- so an image is only ever run through the real
+pipeline if at least one of its windows is actually needed, and the final
+image contributes only the row-major prefix required to reach exactly
+100. Window processing later reuses the cached tensor via that same
+dataset-index key; the dataset is never re-indexed. The manifest digest
+(carried by both the checkpoint and the final result) is computed over
+the fully-verified per-window records -- processed height/width, crop
+box, clamped status, and shape provenance -- so any drift in inference
+dimensions, dataset order, or window boxes changes the digest and is
+caught on resume.
+
+None of this changes what the gate *is*: a bounded numerical/runtime
+stability check over 100 canonical windows, never a full dataset mIoU
+evaluation.
 
 ## Real snapshot extraction path
 

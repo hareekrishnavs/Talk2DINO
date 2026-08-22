@@ -2,18 +2,27 @@
 the bounded k11/k12 finite-step stability gate.
 
 Tests the actual ``build_bounded_manifest``/``ManifestGeometry``/
-``manifest_geometry_from_e3_identity`` implementation in
-``src.k11_k12_stability_manifest`` -- never a reimplementation of it.
-Expected window geometry below is hand-derived from the legacy
-``slide_inference`` grid formula (``grid_n = max(dim - crop + stride - 1,
-0) // stride + 1``), not produced by calling ``SlidingWindowPlan`` and
-comparing to itself.
+``ImageGeometryRecord``/``manifest_geometry_from_e3_identity``
+implementation in ``src.k11_k12_stability_manifest`` -- never a
+reimplementation of it. Expected window geometry below is hand-derived
+from the legacy ``slide_inference`` grid formula (``grid_n = max(dim -
+crop + stride - 1, 0) // stride + 1``), not produced by calling
+``SlidingWindowPlan`` and comparing to itself.
 
-Importing this module requires no mmcv, mmseg, CUDA, model construction,
-or dataset initialization: ``build_bounded_manifest`` only ever imports
-``segmentation.evaluation.sliding_window_geometry``, a pure-Python module,
-via a safe loader that never executes the real (mmcv-eager)
-``segmentation/evaluation/__init__.py``.
+``build_bounded_manifest`` consumes only already-verified
+``ImageGeometryRecord`` values -- never a raw dataset object, and never
+``dataset.img_infos``/``dataset.data_infos`` directly (which, for the
+real COCOStuffDataset, never carry height/width at all: only ``filename``
+and ``ann``). The adapter that derives authoritative per-image geometry
+from the real, processed inference tensor lives in
+``diagnostics.run_k11_k12_stability`` and is covered separately in
+``tests/test_k11_k12_stability_prepared_image.py``.
+
+Importing this module requires no mmcv, mmseg, torch, CUDA, model
+construction, or dataset initialization: ``build_bounded_manifest`` only
+ever imports ``segmentation.evaluation.sliding_window_geometry``, a
+pure-Python module, via a safe loader that never executes the real
+(mmcv-eager) ``segmentation/evaluation/__init__.py``.
 """
 
 from __future__ import annotations
@@ -25,6 +34,7 @@ import pytest
 
 from src.k11_k12_stability_gate_identity import K11K12StabilityGateError
 from src.k11_k12_stability_manifest import (
+    ImageGeometryRecord,
     ManifestGeometry,
     build_bounded_manifest,
     manifest_geometry_from_e3_identity,
@@ -35,23 +45,12 @@ ROOT = Path(__file__).parents[1]
 SMALL_GEOMETRY = ManifestGeometry(crop_height=100, crop_width=100, stride_height=50, stride_width=50)
 
 
-class FakeDataset:
-    def __init__(self, img_infos):
-        self.img_infos = img_infos
-
-    def __len__(self):
-        return len(self.img_infos)
-
-
-class FakeDatasetDataInfos:
-    """Some dataset implementations expose ``data_infos`` instead of
-    ``img_infos``; the manifest builder must support both."""
-
-    def __init__(self, data_infos):
-        self.data_infos = data_infos
-
-    def __len__(self):
-        return len(self.data_infos)
+def _record(dataset_index, image_id, height, width, provenance="tensor==img_shape==pad_shape"):
+    return ImageGeometryRecord(
+        dataset_index=dataset_index, image_id=image_id,
+        inference_height=height, inference_width=width,
+        source_shape_provenance=provenance,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +76,49 @@ def test_manifest_geometry_is_frozen():
 
 
 # ---------------------------------------------------------------------------
+# ImageGeometryRecord validation
+# ---------------------------------------------------------------------------
+
+
+def test_image_geometry_record_accepts_valid_values():
+    record = _record(0, "a.jpg", 448, 448)
+    assert record.inference_height == 448
+    assert record.source_shape_provenance == "tensor==img_shape==pad_shape"
+
+
+@pytest.mark.parametrize("bad_index", [True, -1, 1.5, "0", None])
+def test_image_geometry_record_rejects_bad_dataset_index(bad_index):
+    with pytest.raises(K11K12StabilityGateError):
+        ImageGeometryRecord(dataset_index=bad_index, image_id="a.jpg", inference_height=1, inference_width=1, source_shape_provenance="p")
+
+
+@pytest.mark.parametrize("bad_id", ["", None, 0, True, ["a.jpg"]])
+def test_image_geometry_record_rejects_bad_image_id(bad_id):
+    with pytest.raises(K11K12StabilityGateError):
+        ImageGeometryRecord(dataset_index=0, image_id=bad_id, inference_height=1, inference_width=1, source_shape_provenance="p")
+
+
+@pytest.mark.parametrize("bad_dim", [0, -1, True, 1.5, "448", None])
+def test_image_geometry_record_rejects_bad_dimensions(bad_dim):
+    with pytest.raises(K11K12StabilityGateError):
+        ImageGeometryRecord(dataset_index=0, image_id="a.jpg", inference_height=bad_dim, inference_width=1, source_shape_provenance="p")
+    with pytest.raises(K11K12StabilityGateError):
+        ImageGeometryRecord(dataset_index=0, image_id="a.jpg", inference_height=1, inference_width=bad_dim, source_shape_provenance="p")
+
+
+@pytest.mark.parametrize("bad_provenance", ["", None, 0, True])
+def test_image_geometry_record_rejects_bad_provenance(bad_provenance):
+    with pytest.raises(K11K12StabilityGateError):
+        ImageGeometryRecord(dataset_index=0, image_id="a.jpg", inference_height=1, inference_width=1, source_shape_provenance=bad_provenance)
+
+
+def test_image_geometry_record_is_frozen():
+    record = _record(0, "a.jpg", 448, 448)
+    with pytest.raises(Exception):
+        record.inference_height = 200  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
 # build_bounded_manifest: hand-derived single-image fixtures
 # ---------------------------------------------------------------------------
 
@@ -84,8 +126,8 @@ def test_manifest_geometry_is_frozen():
 def test_image_taller_than_crop_last_row_clamped():
     # height=220, width=100 (== crop_w), crop=100, stride=50.
     # grid_rows = max(220-100+50-1, 0)//50+1 = 4; grid_cols = 1.
-    dataset = FakeDataset([{"height": 220, "width": 100, "filename": "tall.jpg"}])
-    manifest, digest = build_bounded_manifest(dataset, canonical_window_count=4, geometry=SMALL_GEOMETRY)
+    records = [_record(0, "tall.jpg", 220, 100)]
+    manifest, digest = build_bounded_manifest(records, canonical_window_count=4, geometry=SMALL_GEOMETRY)
     assert len(manifest) == 4
     expected = [
         (0, 0, [0, 0], [100, 100], False),
@@ -99,13 +141,14 @@ def test_image_taller_than_crop_last_row_clamped():
         assert entry["crop_origin"] == origin
         assert entry["crop_end"] == end
         assert entry["clamped"] == clamped
+        assert entry["source_shape_provenance"] == "tensor==img_shape==pad_shape"
 
 
 def test_image_wider_than_crop_last_column_clamped():
     # height=100 (== crop_h), width=220, crop=100, stride=50.
     # grid_rows = 1; grid_cols = 4.
-    dataset = FakeDataset([{"height": 100, "width": 220, "filename": "wide.jpg"}])
-    manifest, digest = build_bounded_manifest(dataset, canonical_window_count=4, geometry=SMALL_GEOMETRY)
+    records = [_record(0, "wide.jpg", 100, 220)]
+    manifest, digest = build_bounded_manifest(records, canonical_window_count=4, geometry=SMALL_GEOMETRY)
     assert len(manifest) == 4
     expected = [
         (0, [0, 0], [100, 100], False),
@@ -127,8 +170,8 @@ def test_image_smaller_than_crop_single_unclamped_window():
     # though the window covers less than the full 100x100 crop -- this is
     # WindowGeometry's own established "origin was back-shifted" semantic,
     # not "extent is smaller than nominal crop".
-    dataset = FakeDataset([{"height": 60, "width": 60, "filename": "small.jpg"}])
-    manifest, digest = build_bounded_manifest(dataset, canonical_window_count=1, geometry=SMALL_GEOMETRY)
+    records = [_record(0, "small.jpg", 60, 60)]
+    manifest, digest = build_bounded_manifest(records, canonical_window_count=1, geometry=SMALL_GEOMETRY)
     assert len(manifest) == 1
     entry = manifest[0]
     assert entry["crop_origin"] == [0, 0]
@@ -137,8 +180,8 @@ def test_image_smaller_than_crop_single_unclamped_window():
 
 
 def test_image_exactly_crop_sized_single_unclamped_window():
-    dataset = FakeDataset([{"height": 100, "width": 100, "filename": "exact.jpg"}])
-    manifest, digest = build_bounded_manifest(dataset, canonical_window_count=1, geometry=SMALL_GEOMETRY)
+    records = [_record(0, "exact.jpg", 100, 100)]
+    manifest, digest = build_bounded_manifest(records, canonical_window_count=1, geometry=SMALL_GEOMETRY)
     assert len(manifest) == 1
     entry = manifest[0]
     assert entry["crop_origin"] == [0, 0]
@@ -147,8 +190,8 @@ def test_image_exactly_crop_sized_single_unclamped_window():
 
 
 def test_patch_grid_derived_from_geometry_not_hardcoded():
-    dataset = FakeDataset([{"height": 100, "width": 100, "filename": "exact.jpg"}])
-    manifest, _ = build_bounded_manifest(dataset, canonical_window_count=1, geometry=SMALL_GEOMETRY)
+    records = [_record(0, "exact.jpg", 100, 100)]
+    manifest, _ = build_bounded_manifest(records, canonical_window_count=1, geometry=SMALL_GEOMETRY)
     assert manifest[0]["patch_grid"] == [100 // 14, 100 // 14]
 
 
@@ -157,34 +200,29 @@ def test_patch_grid_derived_from_geometry_not_hardcoded():
 # ---------------------------------------------------------------------------
 
 
-def _three_image_dataset():
-    return FakeDataset(
-        [
-            {"height": 220, "width": 100, "filename": "imgA.jpg"},  # 4 windows
-            {"height": 60, "width": 60, "filename": "imgB.jpg"},  # 1 window
-            {"height": 100, "width": 220, "filename": "imgC.jpg"},  # 4 windows
-        ]
-    )
+def _three_image_records():
+    return [
+        _record(0, "imgA.jpg", 220, 100),  # 4 windows
+        _record(1, "imgB.jpg", 60, 60),  # 1 window
+        _record(2, "imgC.jpg", 100, 220),  # 4 windows
+    ]
 
 
 def test_multiple_images_stopping_exactly_at_total_windows():
-    dataset = _three_image_dataset()
-    manifest, _ = build_bounded_manifest(dataset, canonical_window_count=9, geometry=SMALL_GEOMETRY)
+    manifest, _ = build_bounded_manifest(_three_image_records(), canonical_window_count=9, geometry=SMALL_GEOMETRY)
     assert len(manifest) == 9
     assert [e["dataset_index"] for e in manifest] == [0, 0, 0, 0, 1, 2, 2, 2, 2]
 
 
 def test_stopping_partway_through_an_image():
-    dataset = _three_image_dataset()
-    manifest, _ = build_bounded_manifest(dataset, canonical_window_count=6, geometry=SMALL_GEOMETRY)
+    manifest, _ = build_bounded_manifest(_three_image_records(), canonical_window_count=6, geometry=SMALL_GEOMETRY)
     assert len(manifest) == 6
     assert [e["dataset_index"] for e in manifest] == [0, 0, 0, 0, 1, 2]
     assert manifest[-1]["window_flat_index"] == 0  # first window of the third image only
 
 
 def test_row_major_ordering_within_and_across_images():
-    dataset = _three_image_dataset()
-    manifest, _ = build_bounded_manifest(dataset, canonical_window_count=9, geometry=SMALL_GEOMETRY)
+    manifest, _ = build_bounded_manifest(_three_image_records(), canonical_window_count=9, geometry=SMALL_GEOMETRY)
     for dataset_index in {0, 1, 2}:
         flat_indices = [e["window_flat_index"] for e in manifest if e["dataset_index"] == dataset_index]
         assert flat_indices == sorted(flat_indices)
@@ -193,22 +231,30 @@ def test_row_major_ordering_within_and_across_images():
 
 
 def test_flat_index_and_sample_order_index_continuity():
-    dataset = _three_image_dataset()
-    manifest, _ = build_bounded_manifest(dataset, canonical_window_count=9, geometry=SMALL_GEOMETRY)
+    manifest, _ = build_bounded_manifest(_three_image_records(), canonical_window_count=9, geometry=SMALL_GEOMETRY)
     assert [e["sample_order_index"] for e in manifest] == list(range(9))
 
 
-def test_image_ids_taken_from_filename():
-    dataset = _three_image_dataset()
-    manifest, _ = build_bounded_manifest(dataset, canonical_window_count=9, geometry=SMALL_GEOMETRY)
+def test_image_ids_taken_from_records():
+    manifest, _ = build_bounded_manifest(_three_image_records(), canonical_window_count=9, geometry=SMALL_GEOMETRY)
     assert {e["image_id"] for e in manifest if e["dataset_index"] == 0} == {"imgA.jpg"}
     assert {e["image_id"] for e in manifest if e["dataset_index"] == 1} == {"imgB.jpg"}
 
 
-def test_dataset_with_data_infos_attribute_supported():
-    dataset = FakeDatasetDataInfos([{"height": 100, "width": 100, "filename": "d.jpg"}])
-    manifest, _ = build_bounded_manifest(dataset, canonical_window_count=1, geometry=SMALL_GEOMETRY)
-    assert manifest[0]["image_id"] == "d.jpg"
+def test_generator_input_accepted_and_only_pulled_as_needed():
+    pulled = []
+
+    def _gen():
+        for record in _three_image_records():
+            pulled.append(record.dataset_index)
+            yield record
+
+    manifest, _ = build_bounded_manifest(_gen(), canonical_window_count=6, geometry=SMALL_GEOMETRY)
+    assert len(manifest) == 6
+    # only images 0, 1, 2 were needed to reach 6 windows (4+1+1) -- the
+    # generator must never be pulled beyond that, proving no image beyond
+    # what is needed is ever processed
+    assert pulled == [0, 1, 2]
 
 
 # ---------------------------------------------------------------------------
@@ -217,57 +263,87 @@ def test_dataset_with_data_infos_attribute_supported():
 
 
 def test_manifest_digest_deterministic_across_calls():
-    dataset = _three_image_dataset()
-    manifest1, digest1 = build_bounded_manifest(dataset, canonical_window_count=9, geometry=SMALL_GEOMETRY)
-    manifest2, digest2 = build_bounded_manifest(dataset, canonical_window_count=9, geometry=SMALL_GEOMETRY)
+    manifest1, digest1 = build_bounded_manifest(_three_image_records(), canonical_window_count=9, geometry=SMALL_GEOMETRY)
+    manifest2, digest2 = build_bounded_manifest(_three_image_records(), canonical_window_count=9, geometry=SMALL_GEOMETRY)
     assert digest1 == digest2
     assert manifest1 == manifest2
 
 
 def test_manifest_digest_changes_with_different_geometry():
-    dataset = _three_image_dataset()
-    _, digest_a = build_bounded_manifest(dataset, canonical_window_count=9, geometry=SMALL_GEOMETRY)
+    _, digest_a = build_bounded_manifest(_three_image_records(), canonical_window_count=9, geometry=SMALL_GEOMETRY)
     other_geometry = ManifestGeometry(crop_height=90, crop_width=90, stride_height=45, stride_width=45)
-    _, digest_b = build_bounded_manifest(dataset, canonical_window_count=1, geometry=other_geometry)
+    _, digest_b = build_bounded_manifest(_three_image_records(), canonical_window_count=1, geometry=other_geometry)
     assert digest_a != digest_b
 
 
-def test_wrong_metadata_missing_height_raises():
-    dataset = FakeDataset([{"width": 100, "filename": "bad.jpg"}])
-    with pytest.raises(KeyError):
-        build_bounded_manifest(dataset, canonical_window_count=1, geometry=SMALL_GEOMETRY)
+def test_non_image_geometry_record_input_rejected():
+    with pytest.raises(K11K12StabilityGateError):
+        build_bounded_manifest([{"dataset_index": 0, "image_id": "a", "inference_height": 1, "inference_width": 1}], canonical_window_count=1, geometry=SMALL_GEOMETRY)
+
+
+def test_out_of_order_dataset_index_rejected():
+    # canonical_window_count=2 (not 1) is required so the second record is
+    # actually consumed before the target is reached -- with target=1 the
+    # function would stop after the first (single-window) image and never
+    # even look at the second, structurally unable to detect the ordering
+    # violation.
+    records = [_record(1, "b.jpg", 100, 100), _record(0, "a.jpg", 100, 100)]
+    with pytest.raises(K11K12StabilityGateError, match="increasing"):
+        build_bounded_manifest(records, canonical_window_count=2, geometry=SMALL_GEOMETRY)
+
+
+def test_duplicate_dataset_index_rejected():
+    records = [_record(0, "a.jpg", 100, 100), _record(0, "a2.jpg", 100, 100)]
+    with pytest.raises(K11K12StabilityGateError, match="increasing"):
+        build_bounded_manifest(records, canonical_window_count=2, geometry=SMALL_GEOMETRY)
 
 
 def test_insufficient_total_windows_raises():
-    dataset = FakeDataset([{"height": 100, "width": 100, "filename": "exact.jpg"}])
+    records = [_record(0, "exact.jpg", 100, 100)]
     with pytest.raises(K11K12StabilityGateError, match="expected exactly"):
-        build_bounded_manifest(dataset, canonical_window_count=5, geometry=SMALL_GEOMETRY)
+        build_bounded_manifest(records, canonical_window_count=5, geometry=SMALL_GEOMETRY)
 
 
 def test_bad_canonical_window_count_rejected():
-    dataset = FakeDataset([{"height": 100, "width": 100, "filename": "exact.jpg"}])
+    records = [_record(0, "exact.jpg", 100, 100)]
     for bad_count in (0, -1, True, 1.5, "9"):
         with pytest.raises(K11K12StabilityGateError):
-            build_bounded_manifest(dataset, canonical_window_count=bad_count, geometry=SMALL_GEOMETRY)
+            build_bounded_manifest(records, canonical_window_count=bad_count, geometry=SMALL_GEOMETRY)
 
 
 def test_bad_geometry_type_rejected():
-    dataset = FakeDataset([{"height": 100, "width": 100, "filename": "exact.jpg"}])
+    records = [_record(0, "exact.jpg", 100, 100)]
     with pytest.raises(K11K12StabilityGateError):
-        build_bounded_manifest(dataset, canonical_window_count=1, geometry={"crop_height": 100})
+        build_bounded_manifest(records, canonical_window_count=1, geometry={"crop_height": 100})
 
 
-def test_input_img_infos_not_mutated():
-    img_infos = [{"height": 220, "width": 100, "filename": "imgA.jpg"}]
-    before = json.dumps(img_infos, sort_keys=True)
-    dataset = FakeDataset(img_infos)
-    build_bounded_manifest(dataset, canonical_window_count=4, geometry=SMALL_GEOMETRY)
-    after = json.dumps(img_infos, sort_keys=True)
-    assert before == after
+def test_input_records_list_not_mutated():
+    records = _three_image_records()
+    before = list(records)
+    build_bounded_manifest(records, canonical_window_count=9, geometry=SMALL_GEOMETRY)
+    assert records == before
+
+
+def test_no_executable_access_to_img_infos_height_or_width():
+    # Regression test for the real-dataset defect: build_bounded_manifest
+    # must never assume/access img_infos["height"]/["width"] -- it no
+    # longer even receives a dataset object at all.
+    import ast
+    import inspect
+
+    from src import k11_k12_stability_manifest
+
+    source = inspect.getsource(k11_k12_stability_manifest.build_bounded_manifest)
+    assert "img_infos" not in source
+    assert "data_infos" not in source
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant) and node.slice.value in ("height", "width"):
+            raise AssertionError("build_bounded_manifest must not subscript ['height']/['width'] from raw metadata")
 
 
 # ---------------------------------------------------------------------------
-# E3-identity-derived geometry: authority flow (Finding 3)
+# E3-identity-derived geometry: authority flow
 # ---------------------------------------------------------------------------
 
 
