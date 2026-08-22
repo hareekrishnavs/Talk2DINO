@@ -346,7 +346,7 @@ def test_resolver_canonical_real_identity_and_config(tmp_path):
 
 def _install_inference_stubs(*, evaluate_map, model_calls, dataset_calls, inference_calls, checkpoint_calls, inference_dataset_calls=None):
     saved = {name: sys.modules.get(name) for name in (
-        "utils", "utils.config", "models", "segmentation", "segmentation.evaluation", "mmcv", "mmcv.runner", "main",
+        "utils", "utils.config", "utils.logger", "models", "segmentation", "segmentation.evaluation", "mmcv", "mmcv.runner", "main",
     )}
 
     # `_build_inference` imports the real `main` module purely for its
@@ -367,6 +367,10 @@ def _install_inference_stubs(*, evaluate_map, model_calls, dataset_calls, infere
     utils_config_mod.load_config = fake_load_config
     sys.modules["utils"] = utils_mod
     sys.modules["utils.config"] = utils_config_mod
+
+    utils_logger_mod = types.ModuleType("utils.logger")
+    utils_logger_mod.get_logger = lambda cfg=None, log_level=None: None
+    sys.modules["utils.logger"] = utils_logger_mod
 
     models_mod = types.ModuleType("models")
     models_mod.__path__ = []
@@ -460,7 +464,7 @@ def test_build_seg_dataset_receives_resolved_path_exactly(synth_repo, fake_check
         inference_calls=inference_calls, checkpoint_calls=checkpoint_calls,
     )
     try:
-        runner._build_inference(synth_repo, identity, "cpu")
+        runner._build_inference(synth_repo, identity, "cpu", log_dir=synth_repo / "logs")
     finally:
         _restore_stubs(saved)
     assert dataset_calls == ["configs/valid.py"]
@@ -479,7 +483,7 @@ def test_build_dinotext_seg_inference_receives_same_resolved_path(synth_repo, fa
         inference_calls=inference_calls, checkpoint_calls=checkpoint_calls,
     )
     try:
-        runner._build_inference(synth_repo, identity, "cpu")
+        runner._build_inference(synth_repo, identity, "cpu", log_dir=synth_repo / "logs")
     finally:
         _restore_stubs(saved)
     assert inference_calls == ["configs/valid.py"]
@@ -515,7 +519,7 @@ def test_dataset_subset_wrapping_is_scoped_to_build_dinotext_seg_inference_only(
         inference_dataset_calls=inference_dataset_calls,
     )
     try:
-        inference, returned_dataset = runner._build_inference(synth_repo, identity, "cpu")
+        inference, returned_dataset = runner._build_inference(synth_repo, identity, "cpu", log_dir=synth_repo / "logs")
     finally:
         _restore_stubs(saved)
 
@@ -526,6 +530,111 @@ def test_dataset_subset_wrapping_is_scoped_to_build_dinotext_seg_inference_only(
     assert passed_to_inference.dataset is returned_dataset
     # but the RETURNED dataset itself is the raw object, not a Subset
     assert not isinstance(returned_dataset, Subset)
+
+
+def test_process_global_logger_initialized_before_build_dinotext_seg_inference(synth_repo, fake_checkpoint_file):
+    # Regression test for the "'NoneType' object has no attribute
+    # 'startswith'" defect: DINOTextSegInference.__init__ calls the bare
+    # get_logger(), which relies on a prior get_logger(cfg) call having
+    # already initialized the shared process-global logger name --
+    # production evaluation (main.py) always does this once, early.
+    # `_build_inference` must do the same, using the caller's already-
+    # validated scratch log_dir (never inside the tracked repository),
+    # and only AFTER every validation step (see the failure-order test
+    # below), immediately before build_dinotext_seg_inference needs it.
+    identity = {
+        "evaluation": {"config_path": "configs/eval.yml"},
+        "dataset": {"task": "synthetic_orchestration_task", "config_path": "configs/valid.py"},
+        "projection": {"checkpoint_path": str(fake_checkpoint_file.relative_to(synth_repo))},
+    }
+    logger_calls = []
+    order = []
+
+    saved = {n: sys.modules.get(n) for n in ("utils", "utils.config", "utils.logger", "models", "segmentation", "segmentation.evaluation", "mmcv", "mmcv.runner", "main")}
+    try:
+        sys.modules["main"] = types.ModuleType("main")
+        u = types.ModuleType("utils"); u.__path__ = []
+        uc = types.ModuleType("utils.config")
+        uc.load_config = lambda path: FakeCfg(FakeEvaluate({"synthetic_orchestration_task": "configs/valid.py"}))
+        sys.modules["utils"] = u; sys.modules["utils.config"] = uc
+
+        ul = types.ModuleType("utils.logger")
+        def fake_get_logger(cfg=None, log_level=None):
+            logger_calls.append(cfg.output if cfg is not None else None)
+            order.append("get_logger")
+            return None
+        ul.get_logger = fake_get_logger
+        sys.modules["utils.logger"] = ul
+
+        md = types.ModuleType("models"); md.__path__ = []
+        class FM:
+            def load_state_dict(self, sd, strict=False): pass
+            def cuda(self): pass
+            def eval(self): pass
+        def bm(cfg):
+            order.append("build_model"); return FM()
+        md.build_model = bm
+        sys.modules["models"] = md
+
+        sg = types.ModuleType("segmentation"); sg.__path__ = []
+        sge = types.ModuleType("segmentation.evaluation")
+        class FakeDataset:
+            def __len__(self): return 3
+        def bsd(path):
+            order.append("build_seg_dataset"); return FakeDataset()
+        class FI:
+            def reset_evaluation_state(self): pass
+        def bdsi(model, dataset, cfg, seg_config):
+            order.append("build_dinotext_seg_inference"); return FI()
+        sge.build_seg_dataset = bsd
+        sge.build_dinotext_seg_inference = bdsi
+        sys.modules["segmentation"] = sg; sys.modules["segmentation.evaluation"] = sge
+
+        mc = types.ModuleType("mmcv"); mc.__path__ = []
+        mcr = types.ModuleType("mmcv.runner")
+        class CL:
+            @staticmethod
+            def load_checkpoint(path, map_location=None):
+                order.append("CheckpointLoader.load_checkpoint"); return {"state_dict": {}}
+        mcr.CheckpointLoader = CL
+        sys.modules["mmcv"] = mc; sys.modules["mmcv.runner"] = mcr
+
+        log_dir = synth_repo / "does_not_exist_yet" / "logs"
+        assert not log_dir.exists()
+        runner._build_inference(synth_repo, identity, "cpu", log_dir=log_dir)
+    finally:
+        for n, m in saved.items():
+            if m is None: sys.modules.pop(n, None)
+            else: sys.modules[n] = m
+
+    assert len(logger_calls) == 1
+    assert logger_calls[0] == str(log_dir)
+    assert log_dir.is_dir()  # created as a side effect
+    assert order == ["build_seg_dataset", "build_model", "CheckpointLoader.load_checkpoint", "get_logger", "build_dinotext_seg_inference"]
+
+
+def test_process_global_logger_not_initialized_when_resolution_fails(synth_repo, fake_checkpoint_file):
+    identity = {
+        "evaluation": {"config_path": "configs/eval.yml"},
+        "dataset": {"task": "task_not_in_cfg", "config_path": "configs/valid.py"},
+        "projection": {"checkpoint_path": str(fake_checkpoint_file.relative_to(synth_repo))},
+    }
+    logger_calls = []
+    saved = _install_inference_stubs(
+        evaluate_map={"some_other_task": "configs/valid.py"},
+        model_calls=[], dataset_calls=[], inference_calls=[], checkpoint_calls=[],
+    )
+    orig_get_logger = sys.modules["utils.logger"].get_logger
+    sys.modules["utils.logger"].get_logger = lambda cfg=None, log_level=None: logger_calls.append(1)
+    log_dir = synth_repo / "never_created" / "logs"
+    try:
+        with pytest.raises(K11K12StabilityGateError):
+            runner._build_inference(synth_repo, identity, "cpu", log_dir=log_dir)
+    finally:
+        sys.modules["utils.logger"].get_logger = orig_get_logger
+        _restore_stubs(saved)
+    assert logger_calls == []
+    assert not log_dir.exists()
 
 
 def test_main_import_for_pipeline_registration_is_positioned_after_resolution_and_before_build_seg_dataset():
@@ -580,7 +689,7 @@ def test_resolution_failure_occurs_before_all_downstream_operations(synth_repo, 
     )
     try:
         with pytest.raises(K11K12StabilityGateError, match=match) if match else pytest.raises(K11K12StabilityGateError):
-            runner._build_inference(synth_repo, identity, "cpu")
+            runner._build_inference(synth_repo, identity, "cpu", log_dir=synth_repo / "logs")
     finally:
         _restore_stubs(saved)
     assert model_calls == []
@@ -603,7 +712,7 @@ def test_resolution_failure_for_unsafe_path_occurs_before_all_downstream_operati
     )
     try:
         with pytest.raises(K11K12StabilityGateError):
-            runner._build_inference(synth_repo, identity, "cpu")
+            runner._build_inference(synth_repo, identity, "cpu", log_dir=synth_repo / "logs")
     finally:
         _restore_stubs(saved)
     assert model_calls == []

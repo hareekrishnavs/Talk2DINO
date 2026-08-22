@@ -211,11 +211,12 @@ def resolve_e3_dataset_config_path(e3_identity: dict[str, Any], cfg: Any, *, rep
     return resolved_config_path
 
 
-def _build_inference(repo_root: Path, e3_identity: dict[str, Any], device: str):
+def _build_inference(repo_root: Path, e3_identity: dict[str, Any], device: str, *, log_dir: Path):
     """Construct the real model + canonical dataset + DINOTextSegInference
     via exactly the same entry points production evaluation uses (never a
     monkeypatch, never reimplemented)."""
     from utils.config import load_config
+    from utils.logger import get_logger
     from models import build_model
     from segmentation.evaluation import build_seg_dataset, build_dinotext_seg_inference
     from mmcv.runner import CheckpointLoader
@@ -250,6 +251,23 @@ def _build_inference(repo_root: Path, e3_identity: dict[str, Any], device: str):
     if device == "cuda":
         model.cuda()
     model.eval()
+
+    # Production evaluation (main.py) always initializes a process-global
+    # logger via get_logger(cfg) before constructing anything; downstream
+    # code (DINOTextSegInference.__init__, invoked by
+    # build_dinotext_seg_inference below) calls the bare get_logger(),
+    # which relies on that prior initialization and otherwise crashes on a
+    # None logger name. cfg.model_name is already the config's own
+    # declared display name (from its _base_ defaults); cfg.output must be
+    # an existing, non-tracked directory for the log file mmcv's logger
+    # always writes -- log_dir is the caller's already-validated scratch
+    # output directory (never inside the tracked repository). Deferred to
+    # here, after every validation step, so a failure still short-circuits
+    # before this (or any other) expensive/stateful work.
+    log_dir = Path(log_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    cfg.output = str(log_dir)
+    get_logger(cfg)
 
     # build_dinotext_seg_inference only ever reads dataset.dataset.CLASSES
     # (a throwaway classname lookup -- it is never stored on the returned
@@ -321,7 +339,7 @@ def run_gate(args: argparse.Namespace) -> int:
     if args.device == "cuda" and not torch.cuda.is_available():
         raise K11K12StabilityGateError("--device cuda requested but CUDA is not available")
 
-    inference, dataset = _build_inference(args.repo_root, e3_identity, args.device)
+    inference, dataset = _build_inference(args.repo_root, e3_identity, args.device, log_dir=args.output.parent)
     geometry = manifest_geometry_from_e3_identity(e3_identity)
     manifest, manifest_digest = build_bounded_manifest(
         dataset,
