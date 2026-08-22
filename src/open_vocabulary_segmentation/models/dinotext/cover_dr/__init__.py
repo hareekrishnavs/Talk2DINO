@@ -1,5 +1,25 @@
 """Opt-in components for COVER-DR experiments."""
 
+from .finite_step_regime import (
+    ConditionDiagnostics,
+    DenseEquilibriumReference,
+    FiniteStepRegimeError,
+    FiniteStepTrace,
+    LabelSensitivity,
+    MatchedDelta,
+    MatchedGraphDiagnostics,
+    SnapshotComparison,
+    build_matched_k11_from_k12,
+    compare_label_sensitivity,
+    compare_snapshots,
+    compute_condition_diagnostics,
+    compute_matched_delta,
+    compute_matched_graph_diagnostics,
+    delta_stability_error,
+    dense_fp64_equilibrium_reference,
+    diagnostic_pixel_argmax_map,
+    finite_step_propagate,
+)
 from .graph import DirectedTopKGraph, build_directed_topk_graph
 from .inference import (
     FULL_PRECISION_METRIC_SOURCE,
@@ -28,7 +48,25 @@ from .rwr import (
 )
 
 __all__ = [
+    "ConditionDiagnostics",
+    "DenseEquilibriumReference",
     "DirectedTopKGraph",
+    "FiniteStepRegimeError",
+    "FiniteStepTrace",
+    "LabelSensitivity",
+    "MatchedDelta",
+    "MatchedGraphDiagnostics",
+    "SnapshotComparison",
+    "build_matched_k11_from_k12",
+    "compare_label_sensitivity",
+    "compare_snapshots",
+    "compute_condition_diagnostics",
+    "compute_matched_delta",
+    "compute_matched_graph_diagnostics",
+    "delta_stability_error",
+    "dense_fp64_equilibrium_reference",
+    "diagnostic_pixel_argmax_map",
+    "finite_step_propagate",
     "FULL_PRECISION_METRIC_SOURCE",
     "RESULT_FORMAT_VERSION_V3",
     "RWRInferenceConfig",

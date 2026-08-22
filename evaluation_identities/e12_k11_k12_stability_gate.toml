@@ -1,0 +1,92 @@
+format_version = "talk2dino-k11-k12-stability-gate-identity-v1"
+
+# A bounded numerical/runtime gate that must pass before the full matched
+# k11-vs-k12 finite-step evaluation is ever run. This is not a method
+# efficacy experiment, not a full-validation run, not COVER-DR, not T4
+# semantic repair, not DCR/SUR, and not an equilibrium CGLS reproduction --
+# see [prohibited] below. It answers six bounded questions on a small,
+# deterministically-selected sample of real windows: is the matched graph
+# construction correct; is FP32 finite-step propagation numerically
+# reliable; is T=320 stable relative to T=160/T=640; is the k11-k12
+# difference distinguishable from finite-step/arithmetic noise; is runtime
+# compatible with the full evaluation; and can the finite-step kernel be
+# safely reused by a later production evaluator.
+
+[identity]
+name = "e12-k11-k12-stability-gate"
+schema_version = "talk2dino-k11-k12-stability-gate-identity-v1"
+description = "Bounded numerical and runtime stability gate for the matched k11/k12 finite-step experiment: validates matched-prefix graph construction, FP32 finite-step reliability against FP64 finite-step and dense FP64 equilibrium references, T=160/320/640 stability, and k11-k12 delta stability, on a deterministic 100-window sample -- before any full 5000-image evaluation is attempted."
+required_ancestor_commit = "bb127cc9e0dacf391b508e8fd673a665f7ab28ae"
+
+[parent_identity]
+matched_identity_path = "evaluation_identities/e12_matched_k11_k12_t320.toml"
+matched_identity_name = "e12-matched-k11-k12-t320"
+matched_identity_sha256 = "1f4eea731ae7b803a5e2d572d0a1f59b3275ec240d36061d03540706e3bbc259"
+required_relationship = "bounded_numerical_gate_before_full_matched_evaluation"
+
+[sample_selection]
+rule = "first_n_canonical_windows_in_canonical_image_then_window_order"
+canonical_window_count = 100
+image_order_source = "coco_stuff_164k_validation_canonical_dataset_order"
+window_order_source = "sliding_window_geometry_slidingwindowplan_build_row_major_flat_index"
+allow_partial_final_image = true
+
+[reference_windows]
+fp64_finite_step_reference_window_count = 20
+dense_equilibrium_reference_window_count = 20
+condition_number_window_count = 10
+
+[snapshots]
+steps = [160, 320, 640]
+initial_iterate = "S0"
+
+[propagation]
+method = "finite_power_iteration"
+alpha = 0.98
+compute_dtype = "float32"
+reference_dtype = "float64"
+
+[tolerances]
+fp32_fp64_relative_frobenius_error_max = 0.001
+fp32_fp64_max_absolute_error_max = 0.05
+fp32_fp64_argmax_disagreement_rate_max = 0.01
+dense_equilibrium_residual_relative_max = 0.000001
+t_snapshot_relative_frobenius_change_max = 0.02
+t_snapshot_argmax_disagreement_rate_max = 0.01
+delta_stability_relative_max = 0.05
+determinism_replay_count = 2
+determinism_exact_bytes_required = true
+
+[gate_thresholds]
+effect_near_noise_relative_delta_norm_max = 0.01
+truncation_sensitive_relative_change_min = 0.02
+clear_signal_relative_delta_norm_min = 0.05
+epsilon_denominator_floor = 0.000001
+
+[result_contract]
+schema_name = "talk2dino-k11-k12-stability-gate-v1"
+checkpoint_schema_name = "talk2dino-k11-k12-stability-checkpoint-v1"
+regime_classifications = ["CLEAR_MATCHED_SIGNAL", "NUMERICALLY_STABLE_BUT_EFFECT_NEAR_NOISE", "NUMERICALLY_STABLE_BUT_REGIME_INCONCLUSIVE", "TRUNCATION_SENSITIVE", "INVALID"]
+
+[prohibited]
+list = [
+    "method_efficacy_claim",
+    "full_validation_run",
+    "cover_dr",
+    "t4_semantic_repair",
+    "dcr",
+    "sur",
+    "equilibrium_cgls_reproduction",
+    "dataset_miou_claim",
+    "random_sampling",
+    "class_based_selection",
+    "gt_based_selection",
+    "runtime_based_selection",
+    "difficult_window_skipping",
+    "synthetic_window_substitution",
+    "independently_selected_k11_graph",
+    "artificial_similarity_perturbation",
+    "early_termination",
+    "solver_fallback",
+    "dense_solve_in_production_path",
+]
