@@ -441,7 +441,9 @@ def _run_evaluation(args: argparse.Namespace) -> int:
     # --- main per-image loop ---
     while next_dataset_index < image_count:
         dataset_index = next_dataset_index
-        prepared: PreparedDiagnosticImage = _extract_prepared_image(dataset, dataset_index)
+        prepared: PreparedDiagnosticImage = _extract_prepared_image(
+            dataset, dataset_index, canonical_image_id=expected_image_ids[dataset_index],
+        )
         if prepared.image_id != expected_image_ids[dataset_index]:
             raise K11K12PowerEvaluationError(
                 f"dataset[{dataset_index}] image_id {prepared.image_id!r} disagrees with the "

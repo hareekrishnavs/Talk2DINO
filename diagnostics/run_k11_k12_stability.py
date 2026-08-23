@@ -66,6 +66,7 @@ from src.k11_k12_stability_report import (
     write_checkpoint_atomically,
 )
 from src.k11_k12_stability_manifest import ImageGeometryRecord, build_bounded_manifest, manifest_geometry_from_e3_identity
+from src.dataset_image_identity import reconcile_canonical_image_id
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -332,9 +333,29 @@ class PreparedDiagnosticImage:
         )
 
 
-def _extract_prepared_image(dataset: Any, dataset_index: int) -> PreparedDiagnosticImage:
+def _extract_prepared_image(
+    dataset: Any,
+    dataset_index: int,
+    *,
+    canonical_image_id: str | None = None,
+    image_root: str | None = None,
+) -> PreparedDiagnosticImage:
     """Run the canonical mmseg test pipeline exactly once for this dataset
     index and extract verified, authoritative inference geometry.
+
+    ``canonical_image_id``/``image_root`` are optional explicit overrides
+    (callers that have already computed the canonical dataset-relative ID
+    -- e.g. the evaluator's own ``_expected_image_ids`` -- should pass it
+    here so it is never independently re-derived at two call sites). When
+    omitted, both are derived from ``dataset`` itself: the canonical ID
+    from ``dataset.img_infos[dataset_index]["filename"]`` (the same
+    authoritative source ``_expected_image_ids`` uses), and the image root
+    from ``dataset.img_dir`` when present, or ``"."`` for a dataset that
+    models no directory structure at all. Either way, the returned
+    ``PreparedDiagnosticImage.image_id`` is always the canonical
+    dataset-relative ID -- see :func:`src.dataset_image_identity.
+    reconcile_canonical_image_id` -- never the pipeline's resolved
+    physical path.
 
     ``dataset.img_infos``/``dataset.data_infos`` never carry height/width
     for the real COCOStuffDataset (only ``filename``/``ann``) -- image
@@ -427,8 +448,41 @@ def _extract_prepared_image(dataset: Any, dataset_index: int) -> PreparedDiagnos
             )
         provenance = "tensor==img_shape==pad_shape"
 
-    filename = img_meta.get("filename") or img_meta.get("ori_filename")
-    image_id = str(filename) if filename else str(dataset_index)
+    if canonical_image_id is None:
+        infos = dataset.img_infos if hasattr(dataset, "img_infos") else dataset.data_infos
+        if dataset_index >= len(infos) or not isinstance(infos[dataset_index], Mapping) or "filename" not in infos[dataset_index]:
+            raise K11K12StabilityGateError(
+                f"dataset.img_infos[{dataset_index}] is missing a 'filename' entry; "
+                "cannot derive the canonical image ID"
+            )
+        canonical_image_id = infos[dataset_index]["filename"]
+
+    if image_root is None:
+        if hasattr(dataset, "img_dir"):
+            candidate_root = dataset.img_dir
+            if candidate_root is None or (isinstance(candidate_root, str) and not candidate_root.strip()):
+                raise K11K12StabilityGateError(
+                    f"dataset.img_dir is present but empty/None; cannot reconcile canonical image "
+                    f"identity for dataset[{dataset_index}] without a valid image root"
+                )
+            image_root = candidate_root
+        else:
+            # No directory concept at all (e.g. a flat synthetic dataset
+            # stand-in): the canonical relative ID and the pipeline's
+            # resolved filename are expected to coincide directly.
+            image_root = "."
+
+    pipeline_filename = img_meta.get("filename")
+    if not pipeline_filename:
+        raise K11K12StabilityGateError(
+            f"dataset[{dataset_index}]['img_metas'][0] is missing a 'filename' entry"
+        )
+
+    image_id = reconcile_canonical_image_id(
+        canonical_relative_id=canonical_image_id,
+        image_root=image_root,
+        pipeline_resolved_filename=pipeline_filename,
+    )
 
     # .detach().cpu() alone can return a tensor that SHARES the original's
     # underlying storage whenever the source is already an ungraded CPU

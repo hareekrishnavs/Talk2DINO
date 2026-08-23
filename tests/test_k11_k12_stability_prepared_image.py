@@ -86,12 +86,35 @@ def _tensor(height=100, width=100, channels=3, fill=0.5):
 class FakeDataset:
     """A dataset stand-in whose ``img_infos`` deliberately lack height/
     width (matching the real COCOStuffDataset), and whose ``__getitem__``
-    returns the real canonical pipeline's exact wrapped structure."""
+    returns the real canonical pipeline's exact wrapped structure.
+
+    ``img_infos[i]["filename"]`` is derived from the sample's own pipeline
+    metadata filename (falling back to an explicit per-sample override, or
+    an index-based default only when the sample carries no metadata at
+    all) -- exactly mirroring the real dataset's guarantee that
+    ``img_infos`` and the pipeline's resolved metadata always agree on the
+    same underlying file. This dataset models no directory structure
+    (``img_dir`` is deliberately left unset), so the canonical ID and the
+    pipeline-resolved filename are expected to coincide directly.
+    """
 
     def __init__(self, samples):
         # samples: list of dicts with keys "img" (Tensor) and "img_meta" (dict)
         self._samples = samples
-        self.img_infos = [{"filename": s.get("filename", f"img{i}.jpg"), "ann": {"seg_map": "x.png"}} for i, s in enumerate(samples)]
+        infos = []
+        for i, sample in enumerate(samples):
+            filename = sample.get("filename")
+            if filename is None:
+                meta = sample.get("img_meta")
+                if meta is None and sample.get("meta_list"):
+                    first = sample["meta_list"][0]
+                    meta = first.data if hasattr(first, "data") else first
+                if meta is not None:
+                    filename = meta.get("filename") or meta.get("ori_filename")
+            if filename is None:
+                filename = f"img{i}.jpg"
+            infos.append({"filename": filename, "ann": {"seg_map": "x.png"}})
+        self.img_infos = infos
         self.getitem_calls = []
 
     def __len__(self):
@@ -557,23 +580,28 @@ def test_no_pil_import_in_diagnostics_module():
             assert node.module is None or not node.module.split(".")[0] == "PIL"
 
 
-def test_no_executable_access_to_img_infos_height_or_width_in_adapter():
+def test_no_executable_access_to_img_infos_or_data_infos_height_or_width_in_adapter():
+    # img_infos/data_infos access is now legitimate and expected (deriving
+    # the canonical dataset-relative image ID, when the caller does not
+    # already supply one via canonical_image_id -- see
+    # src.dataset_image_identity.reconcile_canonical_image_id): the real
+    # COCOStuffDataset's img_infos entries carry only "filename"/"ann",
+    # never "height"/"width" (those only exist after the pipeline has
+    # actually loaded and resized the image), so the only regression this
+    # guards against is a reintroduced ["height"]/["width"] subscript on
+    # raw (pre-pipeline) metadata.
     import ast
     import inspect
 
     source = inspect.getsource(runner._extract_prepared_image)
     tree = ast.parse(source)
     function_node = tree.body[0]
-    # exclude the function's own docstring (which legitimately mentions
-    # "img_infos" in prose explaining why it is NOT used) before scanning
+    # exclude the function's own docstring before scanning
     body = function_node.body[1:] if (
         function_node.body and isinstance(function_node.body[0], ast.Expr)
         and isinstance(function_node.body[0].value, ast.Constant)
         and isinstance(function_node.body[0].value.value, str)
     ) else function_node.body
-    body_source = ast.unparse(ast.Module(body=body, type_ignores=[]))
-    assert "img_infos" not in body_source
-    assert "data_infos" not in body_source
     for node in ast.walk(ast.Module(body=body, type_ignores=[])):
         if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant) and node.slice.value in ("height", "width"):
             raise AssertionError("_extract_prepared_image must not subscript ['height']/['width'] from raw metadata")
@@ -613,3 +641,185 @@ def test_end_to_end_generator_to_manifest_stops_early_and_matches_geometry():
     # only the first 2 images (1 window each) were needed -- images 2-4
     # must never have been visited
     assert dataset.getitem_calls == [0, 1]
+
+
+# ---------------------------------------------------------------------------
+# Image-identity wiring: canonical_image_id/image_root plumbing through
+# _extract_prepared_image, including the exact real-dataset regression
+# exposed by SLURM job 20340482 (see docs/matched_k11_k12_power_evaluation.md
+# and tests/test_dataset_image_identity.py for the underlying pure-helper
+# coverage; these tests cover only the wiring, not the reconciliation
+# algorithm itself).
+# ---------------------------------------------------------------------------
+
+
+class _DirDataset:
+    """A dataset stand-in that DOES model a directory structure (img_dir),
+    matching the real COCOStuffDataset shape: img_infos carries the bare
+    dataset-relative filename, img_dir is the physical prefix, and
+    __getitem__'s pipeline metadata reports the *resolved* physical path
+    -- exactly mirroring what mmseg's LoadImageFromFile actually does."""
+
+    def __init__(self, img_dir, entries):
+        # entries: list of (bare_filename, tensor, extra_meta_overrides)
+        self.img_dir = img_dir
+        self._entries = entries
+        self.img_infos = [{"filename": bare, "ann": {"seg_map": "x.png"}} for bare, _, _ in entries]
+        self.getitem_calls = []
+
+    def __len__(self):
+        return len(self._entries)
+
+    def __getitem__(self, index):
+        self.getitem_calls.append(index)
+        bare, tensor, overrides = self._entries[index]
+        resolved = f"{self.img_dir}/{bare}"
+        meta = _img_meta(*tensor.shape[-2:], filename=resolved)
+        meta.update(overrides)
+        return {"img": [tensor], "img_metas": [FakeDataContainer(meta)]}
+
+
+def test_original_job_20340482_regression_fixed():
+    """Exact reproduction of the real-dataset values recorded from SLURM
+    job 20340482 and the independent CPU dataset inspection: img_infos
+    filename '000000000139.jpg', img_dir
+    './data/coco_stuff164k/images/val2017', pipeline-resolved filename
+    './data/coco_stuff164k/images/val2017/000000000139.jpg'. Must now
+    reconcile successfully and return exactly the bare canonical ID."""
+    dataset = _DirDataset(
+        "./data/coco_stuff164k/images/val2017",
+        [("000000000139.jpg", _tensor(448, 673), {})],
+    )
+    prepared = runner._extract_prepared_image(dataset, 0)
+    assert prepared.image_id == "000000000139.jpg"
+    assert "/" not in prepared.image_id
+    assert "coco_stuff164k" not in prepared.image_id
+
+
+def test_directory_structured_dataset_reconciles_multiple_images_correctly():
+    dataset = _DirDataset(
+        "/data/coco_stuff164k/images/val2017",
+        [
+            ("000000000139.jpg", _tensor(100, 100), {}),
+            ("000000000285.jpg", _tensor(100, 100), {}),
+        ],
+    )
+    prepared0 = runner._extract_prepared_image(dataset, 0)
+    prepared1 = runner._extract_prepared_image(dataset, 1)
+    assert prepared0.image_id == "000000000139.jpg"
+    assert prepared1.image_id == "000000000285.jpg"
+
+
+def test_explicit_canonical_image_id_override_used_when_consistent():
+    dataset = _DirDataset("/data/images", [("real.jpg", _tensor(50, 50), {})])
+    prepared = runner._extract_prepared_image(dataset, 0, canonical_image_id="real.jpg")
+    assert prepared.image_id == "real.jpg"
+
+
+def test_explicit_canonical_image_id_override_still_verified_against_pipeline():
+    # A caller-supplied canonical ID that disagrees with what the pipeline
+    # actually resolved must still fail closed -- the override is not a
+    # bypass of verification, only of the internal img_infos lookup.
+    dataset = _DirDataset("/data/images", [("real.jpg", _tensor(50, 50), {})])
+    with pytest.raises(K11K12StabilityGateError, match="disagrees"):
+        runner._extract_prepared_image(dataset, 0, canonical_image_id="wrong.jpg")
+
+
+def test_explicit_image_root_override_used_instead_of_dataset_img_dir():
+    dataset = _DirDataset("/data/wrong_root", [("img.jpg", _tensor(50, 50), {})])
+    # override image_root to match a pipeline path under a *different* root
+    # than dataset.img_dir claims -- and adjust the fake pipeline resolution
+    # to match that override, proving the override (not dataset.img_dir) is
+    # what gets used.
+    dataset.img_dir = "/data/wrong_root"
+    dataset._entries = [("img.jpg", _tensor(50, 50), {"filename": "/data/actual_root/img.jpg"})]
+    prepared = runner._extract_prepared_image(dataset, 0, image_root="/data/actual_root")
+    assert prepared.image_id == "img.jpg"
+
+
+def test_missing_filename_in_pipeline_metadata_rejected():
+    meta = _img_meta(50, 50)
+    del meta["filename"]
+    del meta["ori_filename"]
+    dataset = FakeDataset([{"img": _tensor(50, 50), "img_meta": meta, "filename": "x.jpg"}])
+    with pytest.raises(K11K12StabilityGateError, match="filename"):
+        runner._extract_prepared_image(dataset, 0)
+
+
+def test_malformed_img_infos_missing_filename_key_rejected():
+    class BadInfosDataset:
+        img_infos = [{"ann": {"seg_map": "x.png"}}]  # no "filename" key at all
+
+        def __len__(self):
+            return 1
+
+        def __getitem__(self, i):
+            return {"img": [_tensor(50, 50)], "img_metas": [FakeDataContainer(_img_meta(50, 50))]}
+
+    with pytest.raises(K11K12StabilityGateError, match="filename"):
+        runner._extract_prepared_image(BadInfosDataset(), 0)
+
+
+def test_missing_img_infos_entry_for_index_rejected():
+    class ShortInfosDataset:
+        img_infos = []  # dataset_index 0 is out of range
+
+        def __len__(self):
+            return 1
+
+        def __getitem__(self, i):
+            return {"img": [_tensor(50, 50)], "img_metas": [FakeDataContainer(_img_meta(50, 50))]}
+
+    with pytest.raises(K11K12StabilityGateError, match="filename"):
+        runner._extract_prepared_image(ShortInfosDataset(), 0)
+
+
+def test_invalid_img_dir_none_rejected():
+    dataset = _DirDataset("placeholder", [("img.jpg", _tensor(50, 50), {})])
+    dataset.img_dir = None
+    with pytest.raises(K11K12StabilityGateError, match="img_dir"):
+        runner._extract_prepared_image(dataset, 0)
+
+
+def test_invalid_img_dir_empty_string_rejected():
+    dataset = _DirDataset("placeholder", [("img.jpg", _tensor(50, 50), {})])
+    dataset.img_dir = ""
+    with pytest.raises(K11K12StabilityGateError, match="img_dir"):
+        runner._extract_prepared_image(dataset, 0)
+
+
+def test_invalid_img_dir_whitespace_only_rejected():
+    dataset = _DirDataset("placeholder", [("img.jpg", _tensor(50, 50), {})])
+    dataset.img_dir = "   "
+    with pytest.raises(K11K12StabilityGateError, match="img_dir"):
+        runner._extract_prepared_image(dataset, 0)
+
+
+def test_missing_img_dir_attribute_defaults_to_flat_reconciliation():
+    # No img_dir attribute at all (FakeDataset never defines one): the
+    # canonical ID and the pipeline-resolved filename are expected to
+    # coincide directly (image_root defaults to ".").
+    dataset = FakeDataset([_good_sample(filename="flat.jpg")])
+    assert not hasattr(dataset, "img_dir")
+    prepared = runner._extract_prepared_image(dataset, 0)
+    assert prepared.image_id == "flat.jpg"
+
+
+def test_no_full_path_leaks_into_returned_image_id_for_real_style_data():
+    dataset = _DirDataset(
+        "/opt/synthetic_cluster_home/example_user/example_dataset_root/images/val2017",
+        [("000000000139.jpg", _tensor(50, 50), {})],
+    )
+    prepared = runner._extract_prepared_image(dataset, 0)
+    assert prepared.image_id == "000000000139.jpg"
+    assert "synthetic_cluster_home" not in prepared.image_id
+    assert "example_user" not in prepared.image_id
+    assert "example_dataset_root" not in prepared.image_id
+
+
+def test_dataset_metadata_not_mutated_by_identity_reconciliation():
+    dataset = _DirDataset("/data/images", [("img.jpg", _tensor(50, 50), {})])
+    img_infos_before = [dict(entry) for entry in dataset.img_infos]
+    runner._extract_prepared_image(dataset, 0)
+    assert dataset.img_infos == img_infos_before
+    assert dataset.img_dir == "/data/images"
