@@ -21,6 +21,16 @@ from .finite_step_regime import (
     finite_step_propagate,
 )
 from .graph import DirectedTopKGraph, build_directed_topk_graph
+from .matched_power_evaluator import (
+    ImageVariantStitchResult,
+    MatchedPowerEvaluatorError,
+    WindowOperationTelemetry,
+    WindowVariantResult,
+    aggregate_telemetry,
+    finalize_prediction,
+    process_one_window,
+    stitch_one_image,
+)
 from .inference import (
     FULL_PRECISION_METRIC_SOURCE,
     RESULT_FORMAT_VERSION_V3,
@@ -53,10 +63,18 @@ __all__ = [
     "DirectedTopKGraph",
     "FiniteStepRegimeError",
     "FiniteStepTrace",
+    "ImageVariantStitchResult",
     "LabelSensitivity",
     "MatchedDelta",
     "MatchedGraphDiagnostics",
+    "MatchedPowerEvaluatorError",
     "SnapshotComparison",
+    "WindowOperationTelemetry",
+    "WindowVariantResult",
+    "aggregate_telemetry",
+    "finalize_prediction",
+    "process_one_window",
+    "stitch_one_image",
     "build_matched_k11_from_k12",
     "compare_label_sensitivity",
     "compare_snapshots",

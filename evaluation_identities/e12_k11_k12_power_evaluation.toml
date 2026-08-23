@@ -1,0 +1,85 @@
+format_version = "talk2dino-k11-k12-power-evaluation-identity-v1"
+
+# Execution/schema identity for the single-GPU matched k11-vs-k12 power
+# evaluator. This identity intentionally does NOT redeclare alpha, steps,
+# crop, stride, affinity_power, or any other scientific value already
+# registered in the parent matched identity
+# (evaluation_identities/e12_matched_k11_k12_t320.toml) -- the evaluator
+# loads those directly from that file, never duplicating them here or in
+# Python/tests/SBATCH scripts. This identity only registers execution
+# contract facts that are specific to *this evaluator binary*: run-mode
+# image counts, checkpoint granularity, result/checkpoint/artifact schema
+# names, and the stability-gate acceptance policy that must pass before
+# this evaluator is permitted to run.
+
+[identity]
+name = "e12-k11-k12-power-evaluation"
+schema_version = "talk2dino-k11-k12-power-evaluation-identity-v1"
+description = "Dedicated single-GPU evaluator for the matched k=11 vs k=12 finite-step (T=320) connectivity dose-response experiment: computes both variants from one shared canonical E3 snapshot per window using the exact finite-step kernel verified by GPU stability-gate job 20300858, stitches each variant independently with canonical E3/RWR window accumulation, and reports full-precision paired aAcc/mIoU/mAcc plus per-image/per-class sufficient statistics. Requires an accepted k11/k12 stability-gate result before any dataset or model construction."
+required_ancestor_commit = "47584d4314c87bfc5389cf2beb937b79b1f327a9"
+
+[parent_identity]
+matched_identity_path = "evaluation_identities/e12_matched_k11_k12_t320.toml"
+matched_identity_name = "e12-matched-k11-k12-t320"
+matched_identity_sha256 = "1f4eea731ae7b803a5e2d572d0a1f59b3275ec240d36061d03540706e3bbc259"
+required_relationship = "power_evaluator_reuses_matched_identity_scientific_values_verbatim"
+
+[stability_gate]
+gate_identity_path = "evaluation_identities/e12_k11_k12_stability_gate.toml"
+gate_identity_name = "e12-k11-k12-stability-gate"
+gate_identity_sha256 = "8b3698720a40bb6ee43b526e92e454000dd9bfa529644bf741503386d26d67d0"
+required_gate_windows_processed = 100
+accepted_classifications = [
+    "CLEAR_MATCHED_SIGNAL",
+    "NUMERICALLY_STABLE_BUT_EFFECT_NEAR_NOISE",
+    "NUMERICALLY_STABLE_BUT_REGIME_INCONCLUSIVE",
+]
+required_relationship = "bounded_gate_must_pass_before_power_evaluation"
+
+[run_modes]
+pilot20_image_count = 20
+pilot100_image_count = 100
+full_image_count = 5000
+pilot20_schema_name = "talk2dino-k11-k12-power-evaluation-pilot20-result-v1"
+pilot100_schema_name = "talk2dino-k11-k12-power-evaluation-pilot100-result-v1"
+full_schema_name = "talk2dino-k11-k12-power-evaluation-full-result-v1"
+checkpoint_schema_name = "talk2dino-k11-k12-power-evaluation-checkpoint-v1"
+image_order_source = "coco_stuff_164k_validation_canonical_dataset_order"
+window_order_source = "sliding_window_geometry_slidingwindowplan_build_row_major_flat_index"
+
+[checkpoint]
+granularity = "one_complete_image_both_variants"
+serializes_gpu_tensors = false
+
+[artifacts]
+per_image_stats_manifest_schema_name = "talk2dino-k11-k12-power-evaluation-per-image-stats-v1"
+per_image_stats_array_format = "npz_allow_pickle_false"
+
+[metrics]
+metric_names = ["aAcc", "mIoU", "mAcc"]
+unit = "percent_0_100"
+precision_source = "full_precision_area_statistics_from_mmseg_pre_eval"
+class_count = 171
+paired_delta_field = "delta_mIoU_percentage_points"
+
+[prohibited]
+list = [
+    "arbitrary_max_images_for_authoritative_runs",
+    "pilot_result_accepted_as_full_result",
+    "second_backbone_pass_for_k12",
+    "independently_selected_k11_graph",
+    "cgls",
+    "dense_solve_in_production_path",
+    "early_termination",
+    "solver_fallback",
+    "t4_semantic_repair",
+    "dcr",
+    "sur",
+    "pamr",
+    "hann_stitching",
+    "majority_vote_stitching",
+    "center_selection_stitching",
+    "sparse_delta_restitching",
+    "efficacy_pass_fail_claim_from_evaluator",
+    "generic_main_eval_path_without_verified_adapter",
+]
