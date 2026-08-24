@@ -1,0 +1,115 @@
+format_version = "talk2dino-native-edge-support-reachability-gate-identity-v1"
+
+# Sole-authority identity for the offline, CPU-only 20-image structural
+# reachability GATE. This is deliberately downstream of, and structurally
+# separate from, the native-edge-support AUDIT
+# (evaluation_identities/e12_native_edge_support_audit.toml): the audit
+# measures; this gate only FORMALIZES the audit's own already-registered
+# mechanics20 decision into a roadmap authorization record. It never
+# recomputes the audit's alignment rule, support definition, or
+# REACHABLE/STRUCTURALLY_UNREACHABLE/ALIGNMENT_LIMITED/INCONCLUSIVE
+# thresholds -- those live exclusively in the parent identity and are only
+# referenced/cross-validated here, never duplicated as a second authority.
+# The gate reproduces the parent decision by calling the parent's own
+# classify_reachability function against the parent's own funnel -- it
+# never introduces a new empirical threshold after observing data.
+
+[identity]
+name = "e12-native-edge-support-reachability-gate"
+schema_version = "talk2dino-native-edge-support-reachability-gate-identity-v1"
+description = "Deterministic, fail-closed decision artifact consuming the verified mechanics20 native-edge-support audit result and formally deciding whether the roadmap may proceed to structural pruning. Never measures efficacy; never changes the audit's alignment rule, thresholds, populations, or support definition after observing the result. Reproduces the parent's own decision via the parent's own classifier and records which downstream stages are authorized or skipped as a consequence."
+required_ancestor_commit = "b62d023a09b641d0e5cfbf0cbee5207c89021363"
+
+[parent_identity]
+native_audit_identity_path = "evaluation_identities/e12_native_edge_support_audit.toml"
+native_audit_identity_name = "e12-native-edge-support-audit"
+native_audit_identity_sha256 = "ffda09b892212edf99aeb4736fb34e503d649b18e610e215a45beb0ded4861c8"
+required_relationship = "gate_reproduces_parent_audit_decision_via_parent_classifier_never_a_second_threshold_authority"
+
+[parent_contract]
+required_run_mode = "mechanics20"
+required_image_count = 20
+required_complete = true
+required_final = false
+required_schema = "talk2dino-native-edge-support-audit-mechanics20-result-v1"
+
+[decision_vocabulary]
+outcomes = ["REACHABLE", "STRUCTURALLY_UNREACHABLE", "ALIGNMENT_LIMITED", "INCONCLUSIVE"]
+
+[decision_mapping]
+REACHABLE = "PROCEED_TO_ELIGIBILITY_MATCHED_PRUNING"
+STRUCTURALLY_UNREACHABLE = "STOP_STRUCTURAL_CONNECTIVITY_BRANCH"
+ALIGNMENT_LIMITED = "STOP_NATIVE_SUPPORT_ALIGNMENT_LIMITED"
+INCONCLUSIVE = "DO_NOT_PROCEED_INCONCLUSIVE"
+
+[roadmap]
+structural_stages_gated_on_reachable = [
+    "feat: add eligibility-matched one-edge pruning variants",
+    "test: add matched-budget graph and replay suite",
+    "eval: add paired bootstrap and sample-size lock",
+    "eval: run locked structural-connectivity efficacy pilot",
+]
+next_stage_if_reachable = "feat: add eligibility-matched one-edge pruning variants"
+next_stage_if_not_reachable = "eval: add COCO-Object protocol confirmation"
+skip_reason_template = "skipped because the preregistered mechanics gate did not return REACHABLE, not because efficacy was measured and found negative"
+
+[required_fields]
+funnel_fields = [
+    "images", "windows", "graph_rows", "directed_edges", "rows_with_other_crop",
+    "rows_with_aligned_observer", "edges_with_observer", "rows_any_defined", "rows_all_defined",
+    "rows_any_defined_zero_support", "misclassified_rows", "misclassified_rows_any_defined",
+    "misclassified_rows_all_defined", "aligned_window_pairs", "unaligned_window_pairs",
+    "clamped_windows", "non_clamped_windows", "unanimous_support_edges", "direction_reversal_only_cases",
+    "rows_with_unique_least_support", "rows_tied_for_least_support", "correct_rows_any_defined",
+]
+undefined_reason_fields = ["single_window_image", "no_exactly_aligned_observer_covering_both_endpoints"]
+cross_tab_tables = [
+    "support_defined_vs_source_correct", "all_defined_vs_source_correct",
+    "support_defined_vs_stitched_correct", "all_defined_vs_stitched_correct",
+]
+
+[cause_decomposition]
+desired_categories = [
+    "single_window_no_alternative_view",
+    "multi_window_no_overlapping_alternative",
+    "candidate_observer_origin_unaligned",
+    "source_maps_but_destination_outside_shared_overlap",
+    "other_exact_geometry_failure",
+    "support_defined",
+]
+combined_fallback_category = "no_native_observer_cause_not_further_identifiable"
+infer_from_pair_counts = false
+fabricate_unavailable_subcategories = false
+rerun_audit_to_fill_gaps = false
+
+[units]
+allowed = ["count", "fraction_0_1", "percent_0_100", "dimensionless"]
+
+[policy]
+no_threshold_relaxation = true
+no_approximate_alignment_introduced = true
+no_pruning_implemented = true
+no_efficacy_computation = true
+deterministic_output = true
+cuda_required = false
+model_required = false
+dataset_required = false
+
+[run_mode]
+schema_name = "talk2dino-native-edge-support-reachability-gate-result-v1"
+checkpoint_schema_name = "n/a-single-shot-offline-no-checkpoint"
+
+[prohibited]
+list = [
+    "efficacy_computation",
+    "pruning_implementation",
+    "threshold_relaxation",
+    "approximate_alignment",
+    "nearest_neighbor_feature_transport",
+    "bilinear_feature_transport",
+    "learned_feature_transport",
+    "post_hoc_rule_change_after_observing_result",
+    "gpu_rerun_to_fill_descriptive_field",
+    "fabricated_cause_subcategory",
+    "silent_file_selection_in_production",
+]
