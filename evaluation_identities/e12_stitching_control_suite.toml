@@ -1,0 +1,156 @@
+format_version = "talk2dino-stitching-control-suite-identity-v1"
+
+# Execution/schema identity for the reusable stitching control suite. This
+# identity is a scientific-protocol control: it holds the shared k12
+# finite-step propagation configuration fixed (graph, alpha, steps,
+# affinity) and varies ONLY the crop-to-image aggregation rule across four
+# frozen variants. It does not redeclare alpha/steps/crop/stride/
+# affinity_power itself -- those are loaded directly from the parent
+# matched identity (evaluation_identities/e12_matched_k11_k12_t320.toml)
+# via the parent power-evaluation identity
+# (evaluation_identities/e12_k11_k12_power_evaluation.toml), never
+# duplicated here or in Python/tests/SBATCH scripts.
+
+[identity]
+name = "e12-stitching-control-suite"
+schema_version = "talk2dino-stitching-control-suite-identity-v1"
+description = "Reusable stitching-control suite: holds the matched k12 finite-step propagation (T=320, alpha=0.98, directed top-12 graph, ReLU(cosine)^3) fixed across four frozen crop-to-image aggregation variants (uniform_probability, hann_probability, uniform_score, hann_score) to determine whether crop artifacts are explained or mitigated by standard stitching policy, independent of any graph or propagation change. uniform_probability must reproduce the existing matched k12 evaluator's stitching exactly."
+required_ancestor_commit = "94b5ed50970493a58441aa161bcb1ec6f0f4e718"
+
+[parent_identity]
+power_evaluation_identity_path = "evaluation_identities/e12_k11_k12_power_evaluation.toml"
+power_evaluation_identity_name = "e12-k11-k12-power-evaluation"
+power_evaluation_identity_sha256 = "f4ef0d7faa4401c694b70f2a91502ef01a3dcd05d49548178a6ca83a2270360f"
+matched_identity_path = "evaluation_identities/e12_matched_k11_k12_t320.toml"
+matched_identity_name = "e12-matched-k11-k12-t320"
+matched_identity_sha256 = "1f4eea731ae7b803a5e2d572d0a1f59b3275ec240d36061d03540706e3bbc259"
+e3_identity_path = "evaluation_identities/e3_paired_soft_routing.toml"
+e3_identity_name = "e3-paired-soft-routing"
+e3_identity_sha256 = "db9cb8d407d6b5770d13c2b6546a33008206ae44ebcdc55f6b7384813eec477c"
+required_relationship = "stitching_control_reuses_matched_k12_scientific_values_verbatim_varies_only_aggregation"
+
+[propagation]
+shared_variant = "k12"
+k = 12
+alpha = 0.98
+steps = 320
+graph_mode = "directed_topk"
+affinity_function = "relu_cosine_power"
+affinity_power = 3.0
+self_edge_policy = "none_for_ordinary_rows"
+fallback_row_policy = "zero_affinity_rows_receive_self_loop_weight_one"
+score_stage = "pre_sigmoid_pre_upsample_pre_stitch"
+
+[dataset]
+name = "COCO-Stuff 164k validation"
+protocol = "coco_stuff_164k_val2017"
+images = 5000
+classes = 171
+background_class = false
+
+[geometry]
+crop = [448, 448]
+stride = [224, 224]
+interpolation_mode = "bilinear"
+align_corners = true
+crop_order = "row_major_flat_index"
+window_order_source = "sliding_window_geometry_slidingwindowplan_build_row_major_flat_index"
+
+[checkpoint_binding]
+projection_name = "vitb_mlp_infonce_paired_soft_routing_tau010"
+projection_sha256 = "9632117c18613674eeddcb35f86193d37da203a9cbd837cf500c4121b5fa9942"
+
+[variants]
+names = ["uniform_probability", "hann_probability", "uniform_score", "hann_score"]
+order = ["uniform_probability", "hann_probability", "uniform_score", "hann_score"]
+uniform_identity_anchor = "uniform_probability"
+
+[variants.uniform_probability]
+stage = "probability"
+weighting = "uniform"
+sigmoid_stage = "before_interpolation"
+weighting_formula = "uniform_count"
+reproduces_existing_evaluator = true
+
+[variants.hann_probability]
+stage = "probability"
+weighting = "hann"
+sigmoid_stage = "before_interpolation"
+weighting_formula = "pixel_centred_separable_hann"
+reproduces_existing_evaluator = false
+
+[variants.uniform_score]
+stage = "score"
+weighting = "uniform"
+sigmoid_stage = "after_stitch"
+weighting_formula = "uniform_count"
+reproduces_existing_evaluator = false
+
+[variants.hann_score]
+stage = "score"
+weighting = "hann"
+sigmoid_stage = "after_stitch"
+weighting_formula = "pixel_centred_separable_hann"
+reproduces_existing_evaluator = false
+
+[hann]
+formula = "h_N(x) = 0.5 - 0.5*cos(2*pi*(x+0.5)/N) for x=0,...,N-1; W(y,x) = h_H(y) * h_W(x)"
+pixel_centred = true
+epsilon = 0.0
+strictly_positive_at_boundary = true
+
+[accumulation]
+numerator_dtype = "float32"
+denominator_dtype = "float32"
+in_place_source_mutation = false
+accumulator_storage_shared_between_variants = false
+restitching_method = "full_recompute_only"
+
+[metrics]
+metric_names = ["aAcc", "mIoU", "mAcc"]
+unit = "percent_0_100"
+precision_source = "full_precision_area_statistics_from_mmseg_pre_eval"
+class_count = 171
+paired_delta_reference_variant = "uniform_probability"
+paired_delta_field_prefix = "delta_mIoU_percentage_points_vs_uniform_probability"
+
+[run_modes]
+pilot20_image_count = 20
+pilot100_image_count = 100
+full5000_image_count = 5000
+pilot20_schema_name = "talk2dino-stitching-control-pilot20-result-v1"
+pilot100_schema_name = "talk2dino-stitching-control-pilot100-result-v1"
+full5000_schema_name = "talk2dino-stitching-control-full5000-result-v1"
+checkpoint_schema_name = "talk2dino-stitching-control-checkpoint-v1"
+per_image_stats_manifest_schema_name = "talk2dino-stitching-control-per-image-stats-v1"
+
+[execution_contract]
+model_calls_equal_windows = true
+graph_builds_equal_windows = true
+propagation_calls_equal_windows = true
+max_interpolations_per_window = 2
+checkpoint_granularity = "one_complete_image_all_variants"
+
+[prohibited]
+list = [
+    "t4_target_selection",
+    "consensus_labels",
+    "dcr",
+    "sur",
+    "cross_view_directed_edge_support",
+    "graph_pruning",
+    "sherman_morrison_counterfactuals",
+    "adjoint_gradients",
+    "structural_reachability",
+    "changed_k",
+    "changed_rwr_propagation",
+    "changed_crop_stride",
+    "pamr",
+    "learned_parameters",
+    "second_backbone_pass_per_variant",
+    "second_graph_build_per_variant",
+    "second_propagation_per_variant",
+    "sparse_delta_restitching",
+    "efficacy_pass_fail_claim_from_evaluator",
+    "full_run_before_pilot20_and_pilot100_pass",
+]
