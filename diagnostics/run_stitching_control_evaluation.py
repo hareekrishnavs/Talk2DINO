@@ -294,8 +294,10 @@ def _run_evaluation(args: argparse.Namespace) -> int:
             alpha=alpha, steps=steps, affinity_power=affinity_power,
         )
 
-        img_meta = {"img_shape": (h_img, w_img, 3), "ori_shape": (h_img, w_img, 3)}
-        predictions = {name: finalize_prediction(tensor, img_meta, align_corners=align_corners) for name, tensor in stitched.items()}
+        predictions = {
+            name: finalize_prediction(tensor, prepared.img_metas, align_corners=align_corners)
+            for name, tensor in stitched.items()
+        }
 
         if not hasattr(dataset, "pre_eval"):
             raise StitchingControlIdentityError("dataset must provide pre_eval() for sufficient-statistic extraction")

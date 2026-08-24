@@ -154,12 +154,70 @@ def _make_fake_dataset(seed=1234):
     return FakeDataset()
 
 
+def _make_fake_dataset_with_resize(seed=5678, ori_h=6, ori_w=5):
+    """Regression fixture for the real-dataset failure mode where the
+    processed/inference tensor shape (``img_shape``) differs from the
+    true original image shape (``ori_shape``) -- e.g. a resize transform
+    in the real mmseg pipeline. ``_make_fake_dataset`` above always uses
+    img_shape == ori_shape, which structurally cannot exercise this path;
+    a real pilot20 GPU run hit exactly this divergence and crashed inside
+    ``dataset.pre_eval`` because the evaluator fabricated ``img_meta``
+    from the processed shape for both fields instead of using the
+    dataset's real, independent ``ori_shape``."""
+    generator = torch.Generator().manual_seed(seed)
+    images = []
+    for i in range(NUM_IMAGES):
+        tensor = torch.rand(3, IMG_H, IMG_W, generator=generator)
+        gt = torch.randint(0, NUM_CLASSES, (ori_h, ori_w), generator=generator).numpy()
+        images.append({"filename": f"stitchctl_resize_{i:03d}.jpg", "tensor": tensor, "gt": gt})
+
+    class FakeResizedDataset:
+        def __init__(self):
+            self.images = images
+            self.img_infos = [{"filename": im["filename"], "ann": {"seg_map": "x"}} for im in images]
+            self.CLASSES = [f"c{i}" for i in range(NUM_CLASSES)]
+            self.ignore_index = 255
+            self.getitem_calls: list[int] = []
+
+        def __len__(self):
+            return len(self.images)
+
+        def __getitem__(self, index):
+            self.getitem_calls.append(index)
+            img = self.images[index]
+            h, w = img["tensor"].shape[-2:]
+            meta = {
+                "filename": img["filename"], "ori_filename": img["filename"],
+                "img_shape": (h, w, 3), "pad_shape": (h, w, 3), "ori_shape": (ori_h, ori_w, 3),
+                "scale_factor": 1.0, "flip": False, "flip_direction": "horizontal", "img_norm_cfg": {},
+            }
+            return {"img": [img["tensor"]], "img_metas": [meta]}
+
+        def pre_eval(self, preds, indices):
+            if not isinstance(indices, list):
+                indices = [indices]
+            if not isinstance(preds, list):
+                preds = [preds]
+            results = []
+            for pred, index in zip(preds, indices):
+                assert pred.shape[-2:] == (ori_h, ori_w), (
+                    f"prediction shape {pred.shape[-2:]} must be rescaled to ori_shape ({ori_h}, {ori_w}), "
+                    "not left at the processed img_shape"
+                )
+                gt = self.images[index]["gt"]
+                stats = _independent_intersect_and_union(pred, gt, NUM_CLASSES, self.ignore_index)
+                results.append(tuple(torch.from_numpy(x) for x in stats))
+            return results
+
+    return FakeResizedDataset()
+
+
 def _make_fake_inference(model):
     return types.SimpleNamespace(model=model, text_embedding=None, num_classes=NUM_CLASSES, align_corners=False)
 
 
-def run_synthetic_evaluation(*, checkpoint_path, result_path, stats_path, resume=False, seed=1234):
-    dataset = _make_fake_dataset(seed=seed)
+def run_synthetic_evaluation(*, checkpoint_path, result_path, stats_path, resume=False, seed=1234, dataset_factory=_make_fake_dataset):
+    dataset = dataset_factory(seed=seed)
     model = _CountingModel()
     inference = _make_fake_inference(model)
 
@@ -247,6 +305,22 @@ def test_full_synthetic_run_all_four_variants(scratch):
     assert result["operation_telemetry"]["probability_interpolation_calls"] <= result["windows_processed_total"]
     assert result["operation_telemetry"]["score_interpolation_calls"] <= result["windows_processed_total"]
     assert result["operation_telemetry"]["accumulator_finalizations"] == NUM_IMAGES * len(CANONICAL_VARIANT_NAMES)
+
+
+def test_ori_shape_differs_from_processed_shape_regression(scratch):
+    """Regression test for a real pilot20 GPU failure: finalize_prediction
+    must rescale to the dataset's real, independent ori_shape rather than
+    a fabricated img_meta built from the processed inference-canvas shape.
+    The fixture's pre_eval asserts the prediction is at (ori_h, ori_w)
+    before doing anything else, so this fails loudly if that regresses."""
+    exit_code, dataset, _ = run_synthetic_evaluation(
+        checkpoint_path=scratch / "checkpoint.json", result_path=scratch / "result.json", stats_path=scratch / "stats.json",
+        dataset_factory=_make_fake_dataset_with_resize,
+    )
+    assert exit_code == 0
+    result = json.loads((scratch / "result.json").read_text())
+    assert result["complete"] is True
+    assert result["image_count_processed"] == NUM_IMAGES
 
 
 def test_shared_GT_array_used_for_all_variants(scratch):
