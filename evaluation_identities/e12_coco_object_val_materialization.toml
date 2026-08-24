@@ -1,0 +1,91 @@
+format_version = "talk2dino-coco-object-val-materialization-identity-v1"
+
+[identity]
+name = "e12-coco-object-val-materialization"
+schema_version = "talk2dino-coco-object-val-materialization-identity-v1"
+description = "Sole-authority identity for materializing the 5000 COCO-Object val2017 '_instanceTrainIds.png' masks that the repository's existing COCOObjectDataset/coco.py protocol already expects but that do not yet exist on disk. Data-preparation only: no model inference, no scientific evaluation. NOTE: the canonical converter (convert_dataset/convert_coco_object.py) consumes the already-rasterized per-pixel COCO-Stuff category masks already present at annotations/{split}/*.png (excluding the *_labelTrainIds.png / *_instanceTrainIds.png suffixed files), NOT the raw COCO instances_{split}.json panoptic/instance annotation file -- there is no polygon/RLE rasterization step in this conversion, since the source masks are already flattened per-pixel semantic label maps. This is a same-data protocol confirmation on the existing COCO-Stuff imagery/annotations, not an independent dataset."
+required_ancestor_commit = "6a4bad909f9e1594d26aee0073621d0ef2f7b213"
+
+[protocol]
+label = "COCO-Object"
+statement = "Same-data protocol confirmation on the existing COCO-Stuff images/annotations; not an independent dataset. Materializes only the validation-split label masks this protocol's dataset class requires."
+split = "val2017"
+expected_image_count = 5000
+
+[source]
+description = "The canonical converter's real input is the raw (non-suffixed) per-pixel COCO-Stuff category-ID PNG masks already present under the source COCO-Stuff annotation root, not a COCO instances JSON file."
+raw_mask_relative_root = "annotations/val2017"
+raw_mask_glob_suffix = ".png"
+raw_mask_excluded_substrings = ["labelTrainIds", "instanceTrainIds"]
+canonical_images_relative_root = "images/val2017"
+image_suffix = ".jpg"
+coco_len_total = 123287
+train_mask_count_expected = 118287
+val_mask_count_expected = 5000
+
+[converter]
+canonical_converter_relative_path = "src/open_vocabulary_segmentation/convert_dataset/convert_coco_object.py"
+canonical_converter_sha256 = "f2b489c2a79cd69f2fc921ce33b4c233a10f72943f9f4f4b11c5602b78ae371e"
+dataset_class_relative_path = "src/open_vocabulary_segmentation/segmentation/datasets/coco_object.py"
+dataset_class_sha256 = "e8202764dd6a8168795b213e5e4b861025560598d4cac9cdb3c46b03d82b9757"
+dataset_config_relative_path = "src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/coco.py"
+dataset_config_sha256 = "1e49ec61220cd23a437efc868518333395dcad00df0c2cd49b5a1068d9d2600b"
+dataset_class_name = "COCOObjectDataset"
+output_mask_suffix = "_instanceTrainIds.png"
+
+[class_contract]
+class_count = 81
+background_class_index = 0
+foreground_class_count = 80
+class_names_digest = "ee62cadd4f729eac6c33517ae6eff9097c03deb9adfb0496e300043e5b2c2ea0"
+class_names_source = "COCOObjectDataset.CLASSES"
+
+[label_mapping]
+description = "The canonical clsID_to_trID table (imported verbatim from the converter file, never re-derived) already folds raw pixel value 255 and every raw category id greater than 90 into output class 0 (background). There is no separate 'ignore' output value in this converter's design -- this materializer preserves that exact behavior and does not invent an ignore-preserving alternative mapping."
+mapping_table_source = "convert_dataset.convert_coco_object.clsID_to_trID"
+mapping_table_sha256 = "04809009e1eeeb2d6b9d3ae6eca243fdba10db4fd4a6d4b4f32ad2f910ec242f"
+mapping_table_entry_count = 172
+raw_255_folds_to_background = true
+raw_domain_fully_covered_on_val2017 = true
+crowd_or_overlap_handling = "none -- source masks are already flattened per-pixel semantic labels; there is no per-instance polygon/RLE/overlap-order step in this conversion"
+
+[output]
+dtype = "uint8"
+directory_structure = ["images/val2017", "annotations/val2017", "manifests", "checkpoints"]
+images_relationship = "validated_symlink_to_canonical_source_images"
+
+[policy]
+train_conversion_prohibited = true
+writes_into_source_root_prohibited = true
+source_annotation_root_marker = "coco_stuff164k/annotations"
+cuda_required = false
+model_required = false
+deterministic_output = true
+atomic_write_required = true
+resume_prefix_validation_required = true
+
+[checkpoint]
+schema_name = "talk2dino-coco-object-val-materialization-checkpoint-v1"
+
+[manifest]
+schema_name = "talk2dino-coco-object-val-materialization-manifest-v1"
+
+[hashing]
+algorithm = "sha256"
+
+[validation]
+require_decoded_pixel_hash = true
+require_encoded_png_hash = true
+require_ordered_image_digest = true
+overwrite_incomplete_requires_explicit_flag = true
+
+[prohibited]
+list = [
+    "train2017 conversion",
+    "writing output under the source COCO-Stuff annotation root",
+    "inventing a new class mapping",
+    "inventing a new background threshold",
+    "inventing a new annotation conversion algorithm",
+    "silently trusting existing output files without hash verification",
+    "recursive directory deletion",
+]
