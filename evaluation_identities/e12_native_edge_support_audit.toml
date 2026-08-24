@@ -1,0 +1,191 @@
+format_version = "talk2dino-native-edge-support-audit-identity-v1"
+
+# Execution/schema identity for the native cross-view directed-edge support
+# audit. This identity is a structural REACHABILITY measurement, not an
+# intervention: it holds the existing matched k12 finite-step propagation
+# fixed (graph, alpha, steps, affinity -- inherited unmodified through the
+# parent chain below, never redeclared as an independent authority) and
+# adds a read-only cross-view comparison of the directed top-12 graph
+# already built per window. It never deletes, reweights, or edits an edge,
+# and never evaluates pruning efficacy -- see [prohibited].
+
+[identity]
+name = "e12-native-edge-support-audit"
+schema_version = "talk2dino-native-edge-support-audit-identity-v1"
+description = "Native cross-view directed-edge support audit: for every directed top-12 graph edge i->j built inside one sliding-window crop, measures how many OTHER windows of the same transformed image -- restricted to windows whose native (unrounded, unquantized) ViT patch grid contains an exact counterpart of both i and j -- independently reconstruct the same directed edge in their own top-12 graph. Topology-only support; never deletes, reweights, symmetrizes, or edits a graph edge; never selects a T4/T4-prime target; never builds crop-consensus semantic labels; never touches DCR/SUR; never votes; never prunes; never runs a counterfactual/adjoint/Sherman-Morrison solve; never introduces a learned threshold or confidence/entropy/margin gate. Measures reachability of a later decision only -- never renders a segmentation-accuracy or pruning-efficacy verdict."
+required_ancestor_commit = "140f06c486ca4715e3c81e977a48a0e21bdf6f28"
+
+[parent_identity]
+e3_identity_path = "evaluation_identities/e3_paired_soft_routing.toml"
+e3_identity_name = "e3-paired-soft-routing"
+e3_identity_sha256 = "db9cb8d407d6b5770d13c2b6546a33008206ae44ebcdc55f6b7384813eec477c"
+power_evaluation_identity_path = "evaluation_identities/e12_k11_k12_power_evaluation.toml"
+power_evaluation_identity_name = "e12-k11-k12-power-evaluation"
+power_evaluation_identity_sha256 = "f4ef0d7faa4401c694b70f2a91502ef01a3dcd05d49548178a6ca83a2270360f"
+matched_identity_path = "evaluation_identities/e12_matched_k11_k12_t320.toml"
+matched_identity_name = "e12-matched-k11-k12-t320"
+matched_identity_sha256 = "1f4eea731ae7b803a5e2d572d0a1f59b3275ec240d36061d03540706e3bbc259"
+stitching_control_identity_path = "evaluation_identities/e12_stitching_control_suite.toml"
+stitching_control_identity_name = "e12-stitching-control-suite"
+stitching_control_identity_sha256 = "b0ea38dd1aed473899add36558f6feb4e145340d0928b743946ffeebd77ff8fd"
+required_relationship = "native_edge_support_audit_reuses_matched_k12_scientific_values_verbatim_adds_only_readonly_cross_view_comparison"
+
+[propagation]
+shared_variant = "k12"
+k = 12
+alpha = 0.98
+steps = 320
+graph_mode = "directed_topk"
+directed = true
+affinity_function = "relu_cosine_power"
+affinity_power = 3.0
+self_edge_policy = "none_for_ordinary_rows"
+fallback_row_policy = "zero_affinity_rows_receive_self_loop_weight_one"
+propagation_required_for_diagnostics_only = true
+
+[dataset]
+name = "COCO-Stuff 164k validation"
+protocol = "coco_stuff_164k_val2017"
+images = 5000
+classes = 171
+background_class = false
+
+[geometry]
+crop = [448, 448]
+stride = [224, 224]
+patch_size = [14, 14]
+grid_size = [32, 32]
+crop_order = "row_major_flat_index"
+window_order_source = "sliding_window_geometry_slidingwindowplan_build_row_major_flat_index"
+interpolation_mode = "bilinear"
+align_corners = true
+
+[clamped_window_policy]
+aligned_if_origin_delta_divisible_by_patch_size = true
+unaligned_support_is_undefined = true
+never_round_or_interpolate = true
+never_quantize_or_nearest_patch = true
+never_bilinearly_transport_dino_tokens = true
+tolerance_radius_patches = 0
+
+[native_alignment]
+rule = "row_v = row + (y0-yv)/p; col_v = col + (x0-xv)/p; defined only when (y0-yv) and (x0-xv) are each exactly divisible by p and the mapped row/col fall inside the target window's grid_size"
+patch_size_source = "geometry.patch_size"
+grid_size_source = "geometry.grid_size"
+canonical_aligned_stride_offset_patches = 16
+
+[support_definition]
+observer_definition = "another window in the same transformed image whose native patch grid contains an exact counterpart of both edge endpoints"
+source_window_excluded_as_observer = true
+reverse_edge_counts_as_support = false
+weighting = "topology_only"
+weight_by_confidence = false
+weight_by_crop_position = false
+weight_by_distance = false
+weight_by_graph_weight = false
+observer_count_field = "observer_count"
+support_count_field = "support_count"
+support_fraction_field = "support_fraction"
+
+[undefined_reason]
+enum = ["single_window_image", "no_exactly_aligned_observer_covering_both_endpoints"]
+
+[ranking]
+applies_edit = false
+criteria_in_order = [
+    "defined_before_undefined",
+    "lower_support_fraction_first",
+    "lower_support_count_first",
+    "larger_observer_count_first",
+    "lower_source_graph_weight_first",
+    "larger_neighbor_rank_first",
+    "lower_destination_node_index_last_tiebreak",
+]
+
+[histograms]
+support_fraction_bucket_count = 11
+support_count_bucket_count = 13
+crop_edge_bands_patch_units = ["0", "1", "2", "3-4", "5-7", ">=8"]
+image_edge_bands_patch_units = ["0", "1", "2", "3-4", "5-7", ">=8"]
+displacement_bands_patch_units = ["0", "1", "2", "3-4", "5-7", ">=8"]
+affinity_rank_bucket_count = 12
+
+[decision]
+outcomes = ["REACHABLE", "STRUCTURALLY_UNREACHABLE", "ALIGNMENT_LIMITED", "INCONCLUSIVE"]
+minimum_misclassified_rows_for_conclusive = 20
+alignment_limited_min_undefined_edge_fraction = 0.5
+reachable_min_risk_ratio = 1.0
+rule = "INCONCLUSIVE if misclassified_rows < minimum_misclassified_rows_for_conclusive; else ALIGNMENT_LIMITED if undefined_edge_fraction >= alignment_limited_min_undefined_edge_fraction; else REACHABLE if risk_ratio(support-defined-given-wrong / support-defined-given-correct) > reachable_min_risk_ratio; else STRUCTURALLY_UNREACHABLE"
+
+[bounded_debug]
+enabled_by_default = false
+max_edges_per_image = 200
+identity_locked = true
+
+[gt_diagnostics]
+computed_after_support_frozen = true
+influences_support_or_ranking = false
+sampling_rule = "centre_row_col_equals_origin_plus_patch_size_times_index_plus_patch_size_floordiv_2"
+rescale_convention = "align_corners_true_linear_from_processed_to_ori_shape"
+respects_ignore_index = true
+source_row_class_rule = "argmax_of_own_propagated_score_row_no_interpolation"
+canonical_stitched_source = "uniform_probability_variant_finalize_prediction"
+
+[metrics]
+count_unit = "count"
+fraction_unit = "fraction_0_1"
+distance_unit = "patch_units"
+pixel_unit = "pixel_units"
+weight_unit = "dimensionless"
+
+[run_modes]
+mechanics20_image_count = 20
+mechanics20_schema_name = "talk2dino-native-edge-support-audit-mechanics20-result-v1"
+checkpoint_schema_name = "talk2dino-native-edge-support-audit-checkpoint-v1"
+per_image_stats_manifest_schema_name = "talk2dino-native-edge-support-audit-per-image-stats-v1"
+
+[execution_contract]
+sample_pulls_equal_images = true
+backbone_snapshot_calls_equal_windows = true
+graph_builds_equal_windows = true
+propagation_calls_at_most_windows = true
+cross_view_comparisons_never_invoke_model_or_graph_builder = true
+checkpoint_granularity = "one_complete_image"
+
+[prohibited]
+list = [
+    "t4_target_selection",
+    "t4_prime_target_selection",
+    "crop_consensus_semantic_labels",
+    "dcr",
+    "sur",
+    "majority_unanimity_voting",
+    "semantic_proxy_losses",
+    "edge_deletion",
+    "edge_reweighting",
+    "graph_symmetrization",
+    "k11_graph_construction_as_intervention",
+    "random_pruning",
+    "lowest_cosine_pruning",
+    "structural_pruning",
+    "sherman_morrison_counterfactuals",
+    "adjoint_gradients",
+    "counterfactual_solves",
+    "dense_inverses",
+    "learned_thresholds",
+    "confidence_gates",
+    "entropy_gates",
+    "margin_gates",
+    "nearest_neighbor_dino_transport",
+    "bilinear_dino_transport",
+    "graph_topology_interpolation",
+    "centrality_as_inference_time_filter",
+    "pamr",
+    "changed_k",
+    "changed_rwr_propagation",
+    "changed_crop_stride",
+    "second_backbone_pass_per_observer",
+    "second_graph_build_per_observer",
+    "efficacy_pass_fail_claim_from_evaluator",
+    "pruning_efficacy_evaluation",
+]
