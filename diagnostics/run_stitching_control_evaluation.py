@@ -302,7 +302,7 @@ def _run_evaluation(args: argparse.Namespace) -> int:
         if not hasattr(dataset, "pre_eval"):
             raise StitchingControlIdentityError("dataset must provide pre_eval() for sufficient-statistic extraction")
         pre_eval_per_variant = {
-            name: dataset.pre_eval(pred.cpu().numpy(), dataset_index) for name, pred in predictions.items()
+            name: dataset.pre_eval(pred[0].cpu().numpy(), dataset_index) for name, pred in predictions.items()
         }
 
         area_label = None

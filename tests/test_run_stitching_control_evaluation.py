@@ -68,8 +68,21 @@ NUM_IMAGES = 20  # pilot20's registered image count
 
 
 def _independent_intersect_and_union(pred, label, num_classes, ignore_index):
-    pred = np.asarray(pred).ravel()
-    label = np.asarray(label).ravel()
+    pred = np.asarray(pred)
+    label = np.asarray(label)
+    # Real mmseg's intersect_and_union applies the ignore-index boolean
+    # mask (built from label's own shape) directly to pred_label before
+    # any raveling, so a pred carrying a stray leading batch/channel dim
+    # raises IndexError there instead of silently broadcasting. Ravelling
+    # unconditionally here would hide exactly that class of bug (a real
+    # pilot20 GPU run crashed on this), so shape equality is enforced
+    # first, matching the real dataset's strictness.
+    assert pred.shape == label.shape, (
+        f"prediction shape {pred.shape} must exactly match label shape {label.shape} "
+        "(mmseg's real intersect_and_union does not tolerate a leading batch dim)"
+    )
+    pred = pred.ravel()
+    label = label.ravel()
     mask = label != ignore_index
     pred, label = pred[mask], label[mask]
     intersect = pred[pred == label]
