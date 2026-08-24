@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --account=rrg-yangw
+#SBATCH --account=def-yangw-ab
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
