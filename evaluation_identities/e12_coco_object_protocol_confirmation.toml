@@ -1,0 +1,124 @@
+format_version = "talk2dino-coco-object-protocol-confirmation-identity-v1"
+
+[identity]
+name = "e12-coco-object-protocol-confirmation"
+schema_version = "talk2dino-coco-object-protocol-confirmation-identity-v1"
+description = "Tests whether the COCO-Stuff k11-vs-k12 finite-step (T=320) local-connectivity finding (k11-k12 = -0.02145293 pp, 95% CI [-0.039102, -0.003700]) transfers to the COCO-Object protocol (object-only categories, explicit background handling, small foreground objects) on the SAME underlying COCO images/annotations. Same-data protocol confirmation, not an independent dataset. Reuses the matched k11/k12 T=320 propagation kernel and the E3 snapshot/graph machinery verbatim; adds only a canonical background channel (reused formula, not a new threshold) and an E3-vs-k11-vs-k12 comparison instead of k11-vs-k12 alone."
+required_ancestor_commit = "57990061ba83a7bb1b115ecd84a80be88ef4c0cb"
+
+[parent_identities]
+matched_identity_path = "evaluation_identities/e12_matched_k11_k12_t320.toml"
+matched_identity_name = "e12-matched-k11-k12-t320"
+matched_identity_sha256 = "1f4eea731ae7b803a5e2d572d0a1f59b3275ec240d36061d03540706e3bbc259"
+materialization_identity_path = "evaluation_identities/e12_coco_object_val_materialization.toml"
+materialization_identity_name = "e12-coco-object-val-materialization"
+materialization_identity_sha256 = "85bf97f285389b1083f8d1de04cd867a57ae63f684f12bf2c740666fc25d728d"
+required_relationship = "reuses_matched_k11_k12_propagation_kernel_and_e3_backbone_on_verified_coco_object_val_masks"
+
+[protocol]
+label = "COCO-Object"
+statement = "Same-data protocol confirmation on the existing COCO images/annotations already used for COCO-Stuff; not an independent dataset. Tests whether the local connectivity finding persists under object-only categories, explicit background handling, and small foreground objects."
+split = "val2017"
+expected_image_count = 5000
+
+[dataset]
+dataset_type = "COCOObjectDataset"
+dataset_class_relative_path = "src/open_vocabulary_segmentation/segmentation/datasets/coco_object.py"
+dataset_config_relative_path = "src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/coco.py"
+class_count = 81
+foreground_class_count = 80
+background_class_index = 0
+class_names_digest = "ee62cadd4f729eac6c33517ae6eff9097c03deb9adfb0496e300043e5b2c2ea0"
+class_names_digest_algorithm = "sha256_json_dumps_ensure_ascii_list"
+class_names_source = "COCOObjectDataset.CLASSES"
+annotation_suffix = "_instanceTrainIds.png"
+ignore_index = 255
+metric_includes_background = true
+
+[dataset_root_override]
+canonical_configured_root = "./data/coco_stuff164k"
+override_field = "data_root"
+override_policy = "data_root_only"
+description = "The evaluator may override ONLY the dataset config's data_root (to point at the verified materialized root instead of the canonical symlink target); dataset class, annotation suffix, class order, mapping, background rule, threshold, crop and stride are read unmodified from the canonical coco.py config and this identity, and are validated equal to it before every run."
+
+[e3_config]
+eval_config_relative_path = "src/open_vocabulary_segmentation/configs/coco_object/dinotext_coco_object_vitb_mlp_infonce.yml"
+eval_base_config_relative_path = "src/open_vocabulary_segmentation/configs/coco_object/eval_coco_object.yml"
+model_constructor_relative_path = "src/open_vocabulary_segmentation/models/dinotext/dinotext.py"
+constructor_class = "DINOText"
+projection_config_relative_path = "configs/vitb_mlp_infonce_paired_soft_routing_tau010.yaml"
+projection_checkpoint_relative_path = "weights/vitb_mlp_infonce_paired_soft_routing_tau010.pth"
+template = "sub_imagenet_template"
+pamr = false
+with_bg_clean = true
+with_bg_clean_note = "Registered for provenance only; INERT for this evaluator -- generate_patch_snapshot/masks_from_patch_scores never reference with_bg_clean or similarity_assignment_weighted, which exist solely in the separate non-RWR generate_masks path this evaluator never calls."
+
+[e3_config.resolved_configuration]
+encoding_version = "talk2dino-typed-configuration-v1"
+full_sha256 = "2c4f32a1ab4abe767ef4efe5de7fda0720d92efec6c5eab65dd76460f0bcc6fc"
+dataset_sha256 = "df455a7a99c1fdaf5b7c14fd12502924fade78f5d2b6ec8f2158f29fa351a63d"
+dataset_pipeline_sha256 = "8d908d833fc83d3f1aef2b3bec216567f6f06bb5a87ad8d5336d9805c2f1c08e"
+evaluation_sha256 = "6271e14647ea86c2b69e1eb48cfd6a4563c783a5bb6ebe1e665052fc9c38c207"
+model_projection_sha256 = "899d29ff81f57e599a71e4f6fe791d56fa34176aee1caf9dde75c4eb2fc4d18f"
+
+[background_protocol]
+mechanism = "canonical_constant_threshold_channel"
+bg_thresh = 0.55
+bg_strategy = "base"
+background_class_index = 0
+competes_in_argmax = true
+formula = "background_channel = torch.full([B,1,H,W], bg_thresh); masks = torch.cat([background_channel, foreground_masks], dim=1)"
+formula_source = "segmentation/evaluation/dinotext_seg.py::DINOTextSegInference.encode_decode"
+injection_stage = "post_stitch_pre_argmax"
+injection_stage_note = "The canonical formula injects background per-window before accumulation; injecting the identical constant channel once after stitching is mathematically identical (a uniform constant averaged over any positive coverage count equals itself), and is what this evaluator does -- see docs/coco_object_protocol_confirmation.md for the equivalence argument."
+ignore_pixels_excluded_from_argmax = true
+stuff_never_conflated_with_ignore = true
+
+[comparisons]
+variants = ["E3", "k11", "k12"]
+primary_delta_definition = "mIoU_k11_minus_mIoU_k12"
+secondary_deltas = ["k11_minus_E3", "k12_minus_E3"]
+metric_unit = "percentage_points"
+sufficient_statistic_schema = "per_image_per_class_intersection_union_pred_gt"
+
+[run_modes]
+pilot20_images = 20
+pilot20_schema_name = "talk2dino-coco-object-protocol-confirmation-pilot20-result-v1"
+pilot100_images = 100
+pilot100_schema_name = "talk2dino-coco-object-protocol-confirmation-pilot100-result-v1"
+full_images = 5000
+full_schema_name = "talk2dino-coco-object-protocol-confirmation-full-result-v1"
+
+[checkpoint]
+schema_name = "talk2dino-coco-object-protocol-confirmation-checkpoint-v1"
+
+[verification]
+require_verify_output_before_cuda = true
+materialization_manifest_schema_name = "talk2dino-coco-object-val-materialization-manifest-v1"
+required_manifest_complete = true
+required_manifest_final = true
+required_manifest_image_count = 5000
+
+[prohibited]
+list = [
+    "t4_semantic_crop_consensus",
+    "dcr",
+    "sur",
+    "hann_or_alternative_stitching",
+    "cross_view_edge_support",
+    "graph_pruning_beyond_matched_k11_prefix",
+    "learned_edge_weights",
+    "k_sweep",
+    "adaptive_alpha",
+    "class_specific_alpha",
+    "sherman_morrison",
+    "adjoint_gradients",
+    "cgls_dense_equilibrium_solve",
+    "approximate_alignment",
+    "new_training",
+    "annotation_generation",
+    "independent_dataset_claims",
+    "conversion_from_evaluator",
+    "modification_of_derived_masks_or_manifest",
+    "paired_bootstrap_inside_gpu_evaluator",
+]
