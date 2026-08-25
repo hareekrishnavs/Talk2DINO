@@ -1,0 +1,1072 @@
+{
+  "background_class_delta": {
+    "E3_background_iou_percent": 67.87250800405911,
+    "delta_k11_minus_E3_background_iou_percentage_points": 3.051419115248663,
+    "delta_k11_minus_k12_background_iou_percentage_points": -0.09669474126833677,
+    "delta_k12_minus_E3_background_iou_percentage_points": 3.148113856517,
+    "k11_background_iou_percent": 70.92392711930778,
+    "k12_background_iou_percent": 71.02062186057611
+  },
+  "bootstrap": {
+    "comparisons": {
+      "k11_minus_E3": {
+        "bootstrap_mean_delta_percentage_points": 1.7521844861585196,
+        "bootstrap_standard_error_percentage_points": 0.11690843341999964,
+        "chunk_size": 200,
+        "ci_95_percentile_high": 1.9889311074983906,
+        "ci_95_percentile_low": 1.5255793490256078,
+        "ci_method": "percentile",
+        "observed_delta_percentage_points_full_precision": 1.7416707377957295,
+        "probability_delta_gt_0": 1.0,
+        "probability_delta_lt_0": 0.0,
+        "replicate_count": 10000,
+        "seed": 20345886,
+        "variant_a": "k11",
+        "variant_b": "E3"
+      },
+      "k11_minus_k12": {
+        "bootstrap_mean_delta_percentage_points": -0.03212546740509784,
+        "bootstrap_standard_error_percentage_points": 0.01309775957820479,
+        "chunk_size": 200,
+        "ci_95_percentile_high": -0.006612743237162281,
+        "ci_95_percentile_low": -0.057721760482583304,
+        "ci_method": "percentile",
+        "observed_delta_percentage_points_full_precision": -0.031871555437369636,
+        "probability_delta_gt_0": 0.0078,
+        "probability_delta_lt_0": 0.9922,
+        "replicate_count": 10000,
+        "seed": 20345886,
+        "variant_a": "k11",
+        "variant_b": "k12"
+      },
+      "k12_minus_E3": {
+        "bootstrap_mean_delta_percentage_points": 1.7843099535636175,
+        "bootstrap_standard_error_percentage_points": 0.12188304591167871,
+        "chunk_size": 200,
+        "ci_95_percentile_high": 2.0288708080290285,
+        "ci_95_percentile_low": 1.5495449721855028,
+        "ci_method": "percentile",
+        "observed_delta_percentage_points_full_precision": 1.773542293233099,
+        "probability_delta_gt_0": 1.0,
+        "probability_delta_lt_0": 0.0,
+        "replicate_count": 10000,
+        "seed": 20345886,
+        "variant_a": "k12",
+        "variant_b": "E3"
+      }
+    },
+    "method": "paired image resampling with replacement; per-replicate weight vector shared across both compared variants (paired sampling); dataset-level mIoU recomputed from resampled class-sum intersections/unions, never from averaged per-image mIoUs"
+  },
+  "class_count": 81,
+  "class_names_source": "COCOObjectDataset.CLASSES (AST-discovered)",
+  "diffusion_gains_full_precision": {
+    "k11_minus_E3_percentage_points": 1.7416707377957152,
+    "k12_minus_E3_percentage_points": 1.773542293233092,
+    "note": "both positive: graph diffusion (k11/k12) substantially outperforms the raw E3 unary snapshot with zero propagation"
+  },
+  "foreground_only_descriptive_delta": {
+    "E3_foreground_only_mIoU_percent": 37.34286765530111,
+    "delta_k11_minus_E3_foreground_only_percentage_points": 1.7252988830775564,
+    "delta_k11_minus_k12_foreground_only_percentage_points": -0.031061265614496847,
+    "delta_k12_minus_E3_foreground_only_percentage_points": 1.7563601486920533,
+    "k11_foreground_only_mIoU_percent": 39.06816653837867,
+    "k12_foreground_only_mIoU_percent": 39.099227803993166
+  },
+  "generated_at_utc": "2026-08-25T16:09:31.001746+00:00",
+  "image_count": 5000,
+  "per_class_gains_losses": [
+    {
+      "E3_iou_percent": 67.87250800405911,
+      "class_id": 0,
+      "class_name": "background",
+      "delta_k11_minus_E3_iou_percent": 3.051419115248663,
+      "delta_k11_minus_k12_iou_percent": -0.09669474126833677,
+      "delta_k12_minus_E3_iou_percent": 3.148113856517,
+      "is_background": true,
+      "k11_iou_percent": 70.92392711930778,
+      "k12_iou_percent": 71.02062186057611
+    },
+    {
+      "E3_iou_percent": 14.84840770284362,
+      "class_id": 1,
+      "class_name": "person",
+      "delta_k11_minus_E3_iou_percent": -2.365299503403083,
+      "delta_k11_minus_k12_iou_percent": 0.17514163979146957,
+      "delta_k12_minus_E3_iou_percent": -2.5404411431945526,
+      "is_background": false,
+      "k11_iou_percent": 12.483108199440537,
+      "k12_iou_percent": 12.307966559649067
+    },
+    {
+      "E3_iou_percent": 44.40730052095832,
+      "class_id": 2,
+      "class_name": "bicycle",
+      "delta_k11_minus_E3_iou_percent": 1.8953304984698889,
+      "delta_k11_minus_k12_iou_percent": 0.025957471466725224,
+      "delta_k12_minus_E3_iou_percent": 1.8693730270031637,
+      "is_background": false,
+      "k11_iou_percent": 46.30263101942821,
+      "k12_iou_percent": 46.27667354796149
+    },
+    {
+      "E3_iou_percent": 47.80355937260877,
+      "class_id": 3,
+      "class_name": "car",
+      "delta_k11_minus_E3_iou_percent": 1.300523437237807,
+      "delta_k11_minus_k12_iou_percent": 0.1140776069429279,
+      "delta_k12_minus_E3_iou_percent": 1.186445830294879,
+      "is_background": false,
+      "k11_iou_percent": 49.104082809846574,
+      "k12_iou_percent": 48.990005202903646
+    },
+    {
+      "E3_iou_percent": 65.93122788696714,
+      "class_id": 4,
+      "class_name": "motorcycle",
+      "delta_k11_minus_E3_iou_percent": -0.35466399629933676,
+      "delta_k11_minus_k12_iou_percent": 0.07137457492935084,
+      "delta_k12_minus_E3_iou_percent": -0.4260385712286876,
+      "is_background": false,
+      "k11_iou_percent": 65.5765638906678,
+      "k12_iou_percent": 65.50518931573845
+    },
+    {
+      "E3_iou_percent": 45.56739076736802,
+      "class_id": 5,
+      "class_name": "airplane",
+      "delta_k11_minus_E3_iou_percent": 3.586867515638545,
+      "delta_k11_minus_k12_iou_percent": -0.24035245282721718,
+      "delta_k12_minus_E3_iou_percent": 3.827219968465762,
+      "is_background": false,
+      "k11_iou_percent": 49.15425828300656,
+      "k12_iou_percent": 49.39461073583378
+    },
+    {
+      "E3_iou_percent": 60.765992920596524,
+      "class_id": 6,
+      "class_name": "bus",
+      "delta_k11_minus_E3_iou_percent": 6.114943864198942,
+      "delta_k11_minus_k12_iou_percent": -0.21255321071940614,
+      "delta_k12_minus_E3_iou_percent": 6.327497074918348,
+      "is_background": false,
+      "k11_iou_percent": 66.88093678479547,
+      "k12_iou_percent": 67.09348999551487
+    },
+    {
+      "E3_iou_percent": 62.593408782043056,
+      "class_id": 7,
+      "class_name": "train",
+      "delta_k11_minus_E3_iou_percent": 5.199604183059037,
+      "delta_k11_minus_k12_iou_percent": -0.14115210608862583,
+      "delta_k12_minus_E3_iou_percent": 5.340756289147663,
+      "is_background": false,
+      "k11_iou_percent": 67.7930129651021,
+      "k12_iou_percent": 67.93416507119072
+    },
+    {
+      "E3_iou_percent": 39.147438584983234,
+      "class_id": 8,
+      "class_name": "truck",
+      "delta_k11_minus_E3_iou_percent": 5.941281064970553,
+      "delta_k11_minus_k12_iou_percent": -0.11621941683850423,
+      "delta_k12_minus_E3_iou_percent": 6.057500481809058,
+      "is_background": false,
+      "k11_iou_percent": 45.08871964995379,
+      "k12_iou_percent": 45.20493906679229
+    },
+    {
+      "E3_iou_percent": 39.910707801298884,
+      "class_id": 9,
+      "class_name": "boat",
+      "delta_k11_minus_E3_iou_percent": 4.095164561839262,
+      "delta_k11_minus_k12_iou_percent": -0.16310759990179946,
+      "delta_k12_minus_E3_iou_percent": 4.258272161741061,
+      "is_background": false,
+      "k11_iou_percent": 44.005872363138145,
+      "k12_iou_percent": 44.168979963039945
+    },
+    {
+      "E3_iou_percent": 11.736748751608875,
+      "class_id": 10,
+      "class_name": "traffic light",
+      "delta_k11_minus_E3_iou_percent": 2.236303988209521,
+      "delta_k11_minus_k12_iou_percent": -0.12517992370962538,
+      "delta_k12_minus_E3_iou_percent": 2.361483911919146,
+      "is_background": false,
+      "k11_iou_percent": 13.973052739818396,
+      "k12_iou_percent": 14.098232663528021
+    },
+    {
+      "E3_iou_percent": 47.89863021900885,
+      "class_id": 11,
+      "class_name": "fire hydrant",
+      "delta_k11_minus_E3_iou_percent": 1.5637147619192504,
+      "delta_k11_minus_k12_iou_percent": -0.2858930433671105,
+      "delta_k12_minus_E3_iou_percent": 1.849607805286361,
+      "is_background": false,
+      "k11_iou_percent": 49.4623449809281,
+      "k12_iou_percent": 49.74823802429521
+    },
+    {
+      "E3_iou_percent": 26.786068162625266,
+      "class_id": 12,
+      "class_name": "stop sign",
+      "delta_k11_minus_E3_iou_percent": 1.5234122739693525,
+      "delta_k11_minus_k12_iou_percent": -0.04180485909127185,
+      "delta_k12_minus_E3_iou_percent": 1.5652171330606244,
+      "is_background": false,
+      "k11_iou_percent": 28.30948043659462,
+      "k12_iou_percent": 28.35128529568589
+    },
+    {
+      "E3_iou_percent": 19.878884834925728,
+      "class_id": 13,
+      "class_name": "parking meter",
+      "delta_k11_minus_E3_iou_percent": -0.39448379646171716,
+      "delta_k11_minus_k12_iou_percent": 0.015783283352480026,
+      "delta_k12_minus_E3_iou_percent": -0.4102670798141972,
+      "is_background": false,
+      "k11_iou_percent": 19.48440103846401,
+      "k12_iou_percent": 19.46861775511153
+    },
+    {
+      "E3_iou_percent": 39.25784804526622,
+      "class_id": 14,
+      "class_name": "bench",
+      "delta_k11_minus_E3_iou_percent": 2.1333499559496687,
+      "delta_k11_minus_k12_iou_percent": 0.085206243899286,
+      "delta_k12_minus_E3_iou_percent": 2.0481437120503827,
+      "is_background": false,
+      "k11_iou_percent": 41.39119800121589,
+      "k12_iou_percent": 41.305991757316605
+    },
+    {
+      "E3_iou_percent": 52.25945749845937,
+      "class_id": 15,
+      "class_name": "bird",
+      "delta_k11_minus_E3_iou_percent": 3.591712498019973,
+      "delta_k11_minus_k12_iou_percent": -0.08489434346567037,
+      "delta_k12_minus_E3_iou_percent": 3.6766068414856434,
+      "is_background": false,
+      "k11_iou_percent": 55.85116999647934,
+      "k12_iou_percent": 55.93606433994501
+    },
+    {
+      "E3_iou_percent": 72.84256867388278,
+      "class_id": 16,
+      "class_name": "cat",
+      "delta_k11_minus_E3_iou_percent": 2.9197511228626922,
+      "delta_k11_minus_k12_iou_percent": -0.10361664647270175,
+      "delta_k12_minus_E3_iou_percent": 3.023367769335394,
+      "is_background": false,
+      "k11_iou_percent": 75.76231979674547,
+      "k12_iou_percent": 75.86593644321817
+    },
+    {
+      "E3_iou_percent": 63.07913801995203,
+      "class_id": 17,
+      "class_name": "dog",
+      "delta_k11_minus_E3_iou_percent": 1.5875859309933205,
+      "delta_k11_minus_k12_iou_percent": 0.2390162065066761,
+      "delta_k12_minus_E3_iou_percent": 1.3485697244866444,
+      "is_background": false,
+      "k11_iou_percent": 64.66672395094535,
+      "k12_iou_percent": 64.42770774443868
+    },
+    {
+      "E3_iou_percent": 57.18421247595875,
+      "class_id": 18,
+      "class_name": "horse",
+      "delta_k11_minus_E3_iou_percent": 0.3669615237125612,
+      "delta_k11_minus_k12_iou_percent": 0.6233278151939388,
+      "delta_k12_minus_E3_iou_percent": -0.2563662914813776,
+      "is_background": false,
+      "k11_iou_percent": 57.55117399967131,
+      "k12_iou_percent": 56.927846184477374
+    },
+    {
+      "E3_iou_percent": 69.66922194657693,
+      "class_id": 19,
+      "class_name": "sheep",
+      "delta_k11_minus_E3_iou_percent": 2.3779531958109743,
+      "delta_k11_minus_k12_iou_percent": -0.05736204007324375,
+      "delta_k12_minus_E3_iou_percent": 2.435315235884218,
+      "is_background": false,
+      "k11_iou_percent": 72.0471751423879,
+      "k12_iou_percent": 72.10453718246114
+    },
+    {
+      "E3_iou_percent": 69.45392408302011,
+      "class_id": 20,
+      "class_name": "cow",
+      "delta_k11_minus_E3_iou_percent": 3.4758619508909163,
+      "delta_k11_minus_k12_iou_percent": -0.056170267772046145,
+      "delta_k12_minus_E3_iou_percent": 3.5320322186629625,
+      "is_background": false,
+      "k11_iou_percent": 72.92978603391103,
+      "k12_iou_percent": 72.98595630168307
+    },
+    {
+      "E3_iou_percent": 76.51151032138937,
+      "class_id": 21,
+      "class_name": "elephant",
+      "delta_k11_minus_E3_iou_percent": 1.9683897296069262,
+      "delta_k11_minus_k12_iou_percent": 0.025831164770806936,
+      "delta_k12_minus_E3_iou_percent": 1.9425585648361192,
+      "is_background": false,
+      "k11_iou_percent": 78.47990005099629,
+      "k12_iou_percent": 78.45406888622549
+    },
+    {
+      "E3_iou_percent": 78.60490685529328,
+      "class_id": 22,
+      "class_name": "bear",
+      "delta_k11_minus_E3_iou_percent": 2.7826335394162243,
+      "delta_k11_minus_k12_iou_percent": 0.0948590787477599,
+      "delta_k12_minus_E3_iou_percent": 2.6877744606684644,
+      "is_background": false,
+      "k11_iou_percent": 81.3875403947095,
+      "k12_iou_percent": 81.29268131596174
+    },
+    {
+      "E3_iou_percent": 72.5174268895987,
+      "class_id": 23,
+      "class_name": "zebra",
+      "delta_k11_minus_E3_iou_percent": 5.1656543980434435,
+      "delta_k11_minus_k12_iou_percent": 0.05716643722423953,
+      "delta_k12_minus_E3_iou_percent": 5.108487960819204,
+      "is_background": false,
+      "k11_iou_percent": 77.68308128764214,
+      "k12_iou_percent": 77.6259148504179
+    },
+    {
+      "E3_iou_percent": 60.47860566059219,
+      "class_id": 24,
+      "class_name": "giraffe",
+      "delta_k11_minus_E3_iou_percent": 5.115971146799545,
+      "delta_k11_minus_k12_iou_percent": -0.06757342454311299,
+      "delta_k12_minus_E3_iou_percent": 5.183544571342658,
+      "is_background": false,
+      "k11_iou_percent": 65.59457680739173,
+      "k12_iou_percent": 65.66215023193485
+    },
+    {
+      "E3_iou_percent": 12.845434894493051,
+      "class_id": 25,
+      "class_name": "backpack",
+      "delta_k11_minus_E3_iou_percent": 1.721163106140553,
+      "delta_k11_minus_k12_iou_percent": -0.07771396196278246,
+      "delta_k12_minus_E3_iou_percent": 1.7988770681033355,
+      "is_background": false,
+      "k11_iou_percent": 14.566598000633604,
+      "k12_iou_percent": 14.644311962596387
+    },
+    {
+      "E3_iou_percent": 61.730891243036,
+      "class_id": 26,
+      "class_name": "umbrella",
+      "delta_k11_minus_E3_iou_percent": 0.20559281051883005,
+      "delta_k11_minus_k12_iou_percent": -0.0018062584998830289,
+      "delta_k12_minus_E3_iou_percent": 0.20739906901871308,
+      "is_background": false,
+      "k11_iou_percent": 61.93648405355483,
+      "k12_iou_percent": 61.93829031205471
+    },
+    {
+      "E3_iou_percent": 10.799739635814436,
+      "class_id": 27,
+      "class_name": "handbag",
+      "delta_k11_minus_E3_iou_percent": -0.11345226078561588,
+      "delta_k11_minus_k12_iou_percent": 0.10284829305624754,
+      "delta_k12_minus_E3_iou_percent": -0.21630055384186342,
+      "is_background": false,
+      "k11_iou_percent": 10.68628737502882,
+      "k12_iou_percent": 10.583439081972573
+    },
+    {
+      "E3_iou_percent": 3.829438246061635,
+      "class_id": 28,
+      "class_name": "tie",
+      "delta_k11_minus_E3_iou_percent": 0.36847180414394165,
+      "delta_k11_minus_k12_iou_percent": 0.06724590070239866,
+      "delta_k12_minus_E3_iou_percent": 0.301225903441543,
+      "is_background": false,
+      "k11_iou_percent": 4.197910050205577,
+      "k12_iou_percent": 4.130664149503178
+    },
+    {
+      "E3_iou_percent": 47.38322606937831,
+      "class_id": 29,
+      "class_name": "suitcase",
+      "delta_k11_minus_E3_iou_percent": 4.231806449502123,
+      "delta_k11_minus_k12_iou_percent": -0.09398285440369847,
+      "delta_k12_minus_E3_iou_percent": 4.325789303905822,
+      "is_background": false,
+      "k11_iou_percent": 51.61503251888043,
+      "k12_iou_percent": 51.70901537328413
+    },
+    {
+      "E3_iou_percent": 18.55957777842682,
+      "class_id": 30,
+      "class_name": "frisbee",
+      "delta_k11_minus_E3_iou_percent": 3.2767550958913816,
+      "delta_k11_minus_k12_iou_percent": -0.3646573637174413,
+      "delta_k12_minus_E3_iou_percent": 3.641412459608823,
+      "is_background": false,
+      "k11_iou_percent": 21.836332874318202,
+      "k12_iou_percent": 22.200990238035644
+    },
+    {
+      "E3_iou_percent": 8.561352607560915,
+      "class_id": 31,
+      "class_name": "skis",
+      "delta_k11_minus_E3_iou_percent": 1.7609270427990733,
+      "delta_k11_minus_k12_iou_percent": -0.04821698793356788,
+      "delta_k12_minus_E3_iou_percent": 1.8091440307326412,
+      "is_background": false,
+      "k11_iou_percent": 10.322279650359988,
+      "k12_iou_percent": 10.370496638293556
+    },
+    {
+      "E3_iou_percent": 2.230923000774954,
+      "class_id": 32,
+      "class_name": "snowboard",
+      "delta_k11_minus_E3_iou_percent": 0.6500626207000568,
+      "delta_k11_minus_k12_iou_percent": 0.018941329607740087,
+      "delta_k12_minus_E3_iou_percent": 0.6311212910923167,
+      "is_background": false,
+      "k11_iou_percent": 2.880985621475011,
+      "k12_iou_percent": 2.862044291867271
+    },
+    {
+      "E3_iou_percent": 14.321743743645445,
+      "class_id": 33,
+      "class_name": "sports ball",
+      "delta_k11_minus_E3_iou_percent": 5.608291952427987,
+      "delta_k11_minus_k12_iou_percent": -0.17687279732798444,
+      "delta_k12_minus_E3_iou_percent": 5.785164749755971,
+      "is_background": false,
+      "k11_iou_percent": 19.930035696073432,
+      "k12_iou_percent": 20.106908493401416
+    },
+    {
+      "E3_iou_percent": 7.0788581453628,
+      "class_id": 34,
+      "class_name": "kite",
+      "delta_k11_minus_E3_iou_percent": 1.765951993437004,
+      "delta_k11_minus_k12_iou_percent": -0.06370208579024883,
+      "delta_k12_minus_E3_iou_percent": 1.8296540792272529,
+      "is_background": false,
+      "k11_iou_percent": 8.844810138799804,
+      "k12_iou_percent": 8.908512224590053
+    },
+    {
+      "E3_iou_percent": 5.214114784044194,
+      "class_id": 35,
+      "class_name": "baseball bat",
+      "delta_k11_minus_E3_iou_percent": 0.42862912644477813,
+      "delta_k11_minus_k12_iou_percent": -0.07142759078152316,
+      "delta_k12_minus_E3_iou_percent": 0.5000567172263013,
+      "is_background": false,
+      "k11_iou_percent": 5.6427439104889725,
+      "k12_iou_percent": 5.714171501270496
+    },
+    {
+      "E3_iou_percent": 6.804411314779752,
+      "class_id": 36,
+      "class_name": "baseball glove",
+      "delta_k11_minus_E3_iou_percent": -0.09503822849051602,
+      "delta_k11_minus_k12_iou_percent": 0.004345292026101788,
+      "delta_k12_minus_E3_iou_percent": -0.09938352051661781,
+      "is_background": false,
+      "k11_iou_percent": 6.709373086289236,
+      "k12_iou_percent": 6.705027794263134
+    },
+    {
+      "E3_iou_percent": 15.192035146595876,
+      "class_id": 37,
+      "class_name": "skateboard",
+      "delta_k11_minus_E3_iou_percent": -0.519523738879716,
+      "delta_k11_minus_k12_iou_percent": 0.08567281309079533,
+      "delta_k12_minus_E3_iou_percent": -0.6051965519705114,
+      "is_background": false,
+      "k11_iou_percent": 14.67251140771616,
+      "k12_iou_percent": 14.586838594625364
+    },
+    {
+      "E3_iou_percent": 45.7200063365846,
+      "class_id": 38,
+      "class_name": "surfboard",
+      "delta_k11_minus_E3_iou_percent": 6.166395662171645,
+      "delta_k11_minus_k12_iou_percent": -0.2936880488098126,
+      "delta_k12_minus_E3_iou_percent": 6.460083710981458,
+      "is_background": false,
+      "k11_iou_percent": 51.88640199875625,
+      "k12_iou_percent": 52.18009004756606
+    },
+    {
+      "E3_iou_percent": 25.977857220186912,
+      "class_id": 39,
+      "class_name": "tennis racket",
+      "delta_k11_minus_E3_iou_percent": 0.8847019599418502,
+      "delta_k11_minus_k12_iou_percent": -0.14163749343362397,
+      "delta_k12_minus_E3_iou_percent": 1.0263394533754742,
+      "is_background": false,
+      "k11_iou_percent": 26.862559180128763,
+      "k12_iou_percent": 27.004196673562387
+    },
+    {
+      "E3_iou_percent": 36.425420597391,
+      "class_id": 40,
+      "class_name": "bottle",
+      "delta_k11_minus_E3_iou_percent": 0.36340467648626174,
+      "delta_k11_minus_k12_iou_percent": 0.1671166035686653,
+      "delta_k12_minus_E3_iou_percent": 0.19628807291759642,
+      "is_background": false,
+      "k11_iou_percent": 36.788825273877265,
+      "k12_iou_percent": 36.6217086703086
+    },
+    {
+      "E3_iou_percent": 30.115658308906042,
+      "class_id": 41,
+      "class_name": "wine glass",
+      "delta_k11_minus_E3_iou_percent": 1.3566136784547247,
+      "delta_k11_minus_k12_iou_percent": -0.12002608531512848,
+      "delta_k12_minus_E3_iou_percent": 1.4766397637698532,
+      "is_background": false,
+      "k11_iou_percent": 31.472271987360767,
+      "k12_iou_percent": 31.592298072675895
+    },
+    {
+      "E3_iou_percent": 24.84921690568177,
+      "class_id": 42,
+      "class_name": "cup",
+      "delta_k11_minus_E3_iou_percent": 1.519761816432613,
+      "delta_k11_minus_k12_iou_percent": 0.0013051478806822558,
+      "delta_k12_minus_E3_iou_percent": 1.5184566685519307,
+      "is_background": false,
+      "k11_iou_percent": 26.368978722114385,
+      "k12_iou_percent": 26.367673574233702
+    },
+    {
+      "E3_iou_percent": 6.008995338318594,
+      "class_id": 43,
+      "class_name": "fork",
+      "delta_k11_minus_E3_iou_percent": 2.388978247204208,
+      "delta_k11_minus_k12_iou_percent": -0.054765958060043474,
+      "delta_k12_minus_E3_iou_percent": 2.4437442052642515,
+      "is_background": false,
+      "k11_iou_percent": 8.397973585522802,
+      "k12_iou_percent": 8.452739543582846
+    },
+    {
+      "E3_iou_percent": 10.816109220703822,
+      "class_id": 44,
+      "class_name": "knife",
+      "delta_k11_minus_E3_iou_percent": -0.6475464330784675,
+      "delta_k11_minus_k12_iou_percent": 0.15402115623181523,
+      "delta_k12_minus_E3_iou_percent": -0.8015675893102827,
+      "is_background": false,
+      "k11_iou_percent": 10.168562787625355,
+      "k12_iou_percent": 10.01454163139354
+    },
+    {
+      "E3_iou_percent": 13.7784203612769,
+      "class_id": 45,
+      "class_name": "spoon",
+      "delta_k11_minus_E3_iou_percent": 0.9157135976017798,
+      "delta_k11_minus_k12_iou_percent": -0.19604815069978443,
+      "delta_k12_minus_E3_iou_percent": 1.1117617483015643,
+      "is_background": false,
+      "k11_iou_percent": 14.69413395887868,
+      "k12_iou_percent": 14.890182109578465
+    },
+    {
+      "E3_iou_percent": 18.718266268989368,
+      "class_id": 46,
+      "class_name": "bowl",
+      "delta_k11_minus_E3_iou_percent": -0.2807906538788423,
+      "delta_k11_minus_k12_iou_percent": 0.039652209561907625,
+      "delta_k12_minus_E3_iou_percent": -0.3204428634407499,
+      "is_background": false,
+      "k11_iou_percent": 18.437475615110525,
+      "k12_iou_percent": 18.397823405548618
+    },
+    {
+      "E3_iou_percent": 55.88333544892209,
+      "class_id": 47,
+      "class_name": "banana",
+      "delta_k11_minus_E3_iou_percent": -4.456609048608932,
+      "delta_k11_minus_k12_iou_percent": 0.16009761088881902,
+      "delta_k12_minus_E3_iou_percent": -4.616706659497751,
+      "is_background": false,
+      "k11_iou_percent": 51.42672640031316,
+      "k12_iou_percent": 51.26662878942434
+    },
+    {
+      "E3_iou_percent": 42.242156228231345,
+      "class_id": 48,
+      "class_name": "apple",
+      "delta_k11_minus_E3_iou_percent": 0.18177132036944244,
+      "delta_k11_minus_k12_iou_percent": 0.10153333545247278,
+      "delta_k12_minus_E3_iou_percent": 0.08023798491696965,
+      "is_background": false,
+      "k11_iou_percent": 42.42392754860079,
+      "k12_iou_percent": 42.322394213148314
+    },
+    {
+      "E3_iou_percent": 41.235226719821696,
+      "class_id": 49,
+      "class_name": "sandwich",
+      "delta_k11_minus_E3_iou_percent": 4.025044561308512,
+      "delta_k11_minus_k12_iou_percent": -0.18382520964757987,
+      "delta_k12_minus_E3_iou_percent": 4.208869770956092,
+      "is_background": false,
+      "k11_iou_percent": 45.26027128113021,
+      "k12_iou_percent": 45.44409649077779
+    },
+    {
+      "E3_iou_percent": 59.92774811302597,
+      "class_id": 50,
+      "class_name": "orange",
+      "delta_k11_minus_E3_iou_percent": -0.5010918680225416,
+      "delta_k11_minus_k12_iou_percent": -0.106015401734318,
+      "delta_k12_minus_E3_iou_percent": -0.39507646628822357,
+      "is_background": false,
+      "k11_iou_percent": 59.42665624500343,
+      "k12_iou_percent": 59.53267164673775
+    },
+    {
+      "E3_iou_percent": 41.77135609191468,
+      "class_id": 51,
+      "class_name": "broccoli",
+      "delta_k11_minus_E3_iou_percent": -1.5108756113092667,
+      "delta_k11_minus_k12_iou_percent": 0.09213476746440818,
+      "delta_k12_minus_E3_iou_percent": -1.603010378773675,
+      "is_background": false,
+      "k11_iou_percent": 40.260480480605416,
+      "k12_iou_percent": 40.16834571314101
+    },
+    {
+      "E3_iou_percent": 40.42380140957882,
+      "class_id": 52,
+      "class_name": "carrot",
+      "delta_k11_minus_E3_iou_percent": -3.4820632867831876,
+      "delta_k11_minus_k12_iou_percent": -0.019002882906697494,
+      "delta_k12_minus_E3_iou_percent": -3.46306040387649,
+      "is_background": false,
+      "k11_iou_percent": 36.941738122795634,
+      "k12_iou_percent": 36.96074100570233
+    },
+    {
+      "E3_iou_percent": 40.67761625557145,
+      "class_id": 53,
+      "class_name": "hot dog",
+      "delta_k11_minus_E3_iou_percent": -1.0411907826811628,
+      "delta_k11_minus_k12_iou_percent": -0.13704903927514067,
+      "delta_k12_minus_E3_iou_percent": -0.9041417434060222,
+      "is_background": false,
+      "k11_iou_percent": 39.63642547289029,
+      "k12_iou_percent": 39.77347451216543
+    },
+    {
+      "E3_iou_percent": 61.20765310100874,
+      "class_id": 54,
+      "class_name": "pizza",
+      "delta_k11_minus_E3_iou_percent": 0.04720467338635359,
+      "delta_k11_minus_k12_iou_percent": 0.08229733354959023,
+      "delta_k12_minus_E3_iou_percent": -0.035092660163236644,
+      "is_background": false,
+      "k11_iou_percent": 61.25485777439509,
+      "k12_iou_percent": 61.1725604408455
+    },
+    {
+      "E3_iou_percent": 50.151820986265136,
+      "class_id": 55,
+      "class_name": "donut",
+      "delta_k11_minus_E3_iou_percent": 2.028039491223346,
+      "delta_k11_minus_k12_iou_percent": 0.10870585099791441,
+      "delta_k12_minus_E3_iou_percent": 1.9193336402254317,
+      "is_background": false,
+      "k11_iou_percent": 52.17986047748848,
+      "k12_iou_percent": 52.07115462649057
+    },
+    {
+      "E3_iou_percent": 46.74324997202599,
+      "class_id": 56,
+      "class_name": "cake",
+      "delta_k11_minus_E3_iou_percent": 2.493402203281647,
+      "delta_k11_minus_k12_iou_percent": 0.061015470857171294,
+      "delta_k12_minus_E3_iou_percent": 2.432386732424476,
+      "is_background": false,
+      "k11_iou_percent": 49.23665217530764,
+      "k12_iou_percent": 49.17563670445047
+    },
+    {
+      "E3_iou_percent": 35.39615960252957,
+      "class_id": 57,
+      "class_name": "chair",
+      "delta_k11_minus_E3_iou_percent": 1.7235089084715938,
+      "delta_k11_minus_k12_iou_percent": -0.006242138139086251,
+      "delta_k12_minus_E3_iou_percent": 1.72975104661068,
+      "is_background": false,
+      "k11_iou_percent": 37.119668511001166,
+      "k12_iou_percent": 37.12591064914025
+    },
+    {
+      "E3_iou_percent": 48.92899965149498,
+      "class_id": 58,
+      "class_name": "couch",
+      "delta_k11_minus_E3_iou_percent": 1.2506248422527122,
+      "delta_k11_minus_k12_iou_percent": 0.01896641477078731,
+      "delta_k12_minus_E3_iou_percent": 1.231658427481925,
+      "is_background": false,
+      "k11_iou_percent": 50.179624493747696,
+      "k12_iou_percent": 50.16065807897691
+    },
+    {
+      "E3_iou_percent": 13.765913162228468,
+      "class_id": 59,
+      "class_name": "potted plant",
+      "delta_k11_minus_E3_iou_percent": 0.5977417165054728,
+      "delta_k11_minus_k12_iou_percent": 0.1346354853592402,
+      "delta_k12_minus_E3_iou_percent": 0.4631062311462326,
+      "is_background": false,
+      "k11_iou_percent": 14.363654878733941,
+      "k12_iou_percent": 14.229019393374701
+    },
+    {
+      "E3_iou_percent": 49.46448082308211,
+      "class_id": 60,
+      "class_name": "bed",
+      "delta_k11_minus_E3_iou_percent": 3.6965452045228844,
+      "delta_k11_minus_k12_iou_percent": -0.08739763929732902,
+      "delta_k12_minus_E3_iou_percent": 3.7839428438202134,
+      "is_background": false,
+      "k11_iou_percent": 53.161026027605,
+      "k12_iou_percent": 53.248423666902326
+    },
+    {
+      "E3_iou_percent": 25.0968172573227,
+      "class_id": 61,
+      "class_name": "dining table",
+      "delta_k11_minus_E3_iou_percent": 3.361074408170804,
+      "delta_k11_minus_k12_iou_percent": -0.11466839246596194,
+      "delta_k12_minus_E3_iou_percent": 3.475742800636766,
+      "is_background": false,
+      "k11_iou_percent": 28.457891665493506,
+      "k12_iou_percent": 28.572560057959468
+    },
+    {
+      "E3_iou_percent": 41.00534868179715,
+      "class_id": 62,
+      "class_name": "toilet",
+      "delta_k11_minus_E3_iou_percent": -0.8605577905519652,
+      "delta_k11_minus_k12_iou_percent": 0.12753941881704378,
+      "delta_k12_minus_E3_iou_percent": -0.988097209369009,
+      "is_background": false,
+      "k11_iou_percent": 40.14479089124519,
+      "k12_iou_percent": 40.01725147242814
+    },
+    {
+      "E3_iou_percent": 30.090802832275575,
+      "class_id": 63,
+      "class_name": "tv",
+      "delta_k11_minus_E3_iou_percent": 2.618186695689044,
+      "delta_k11_minus_k12_iou_percent": -0.0775764420029077,
+      "delta_k12_minus_E3_iou_percent": 2.6957631376919515,
+      "is_background": false,
+      "k11_iou_percent": 32.70898952796462,
+      "k12_iou_percent": 32.786565969967526
+    },
+    {
+      "E3_iou_percent": 54.019211721406315,
+      "class_id": 64,
+      "class_name": "laptop",
+      "delta_k11_minus_E3_iou_percent": 2.599577330702971,
+      "delta_k11_minus_k12_iou_percent": 0.024079601924640315,
+      "delta_k12_minus_E3_iou_percent": 2.5754977287783305,
+      "is_background": false,
+      "k11_iou_percent": 56.618789052109285,
+      "k12_iou_percent": 56.594709450184645
+    },
+    {
+      "E3_iou_percent": 53.9626867144182,
+      "class_id": 65,
+      "class_name": "mouse",
+      "delta_k11_minus_E3_iou_percent": -4.897396685732268,
+      "delta_k11_minus_k12_iou_percent": 0.1472967481457701,
+      "delta_k12_minus_E3_iou_percent": -5.044693433878038,
+      "is_background": false,
+      "k11_iou_percent": 49.06529002868593,
+      "k12_iou_percent": 48.91799328054016
+    },
+    {
+      "E3_iou_percent": 26.770550342390152,
+      "class_id": 66,
+      "class_name": "remote",
+      "delta_k11_minus_E3_iou_percent": 6.734439677569924,
+      "delta_k11_minus_k12_iou_percent": -0.5341697224601774,
+      "delta_k12_minus_E3_iou_percent": 7.268609400030101,
+      "is_background": false,
+      "k11_iou_percent": 33.504990019960076,
+      "k12_iou_percent": 34.03915974242025
+    },
+    {
+      "E3_iou_percent": 45.265866692626545,
+      "class_id": 67,
+      "class_name": "keyboard",
+      "delta_k11_minus_E3_iou_percent": 0.26900245423317415,
+      "delta_k11_minus_k12_iou_percent": 0.051477229580925155,
+      "delta_k12_minus_E3_iou_percent": 0.217525224652249,
+      "is_background": false,
+      "k11_iou_percent": 45.53486914685972,
+      "k12_iou_percent": 45.483391917278794
+    },
+    {
+      "E3_iou_percent": 39.85386827586125,
+      "class_id": 68,
+      "class_name": "cell phone",
+      "delta_k11_minus_E3_iou_percent": 4.510374151532538,
+      "delta_k11_minus_k12_iou_percent": -0.21114511056056529,
+      "delta_k12_minus_E3_iou_percent": 4.7215192620931035,
+      "is_background": false,
+      "k11_iou_percent": 44.36424242739379,
+      "k12_iou_percent": 44.575387537954356
+    },
+    {
+      "E3_iou_percent": 43.198290735886495,
+      "class_id": 69,
+      "class_name": "microwave",
+      "delta_k11_minus_E3_iou_percent": 3.348642297089505,
+      "delta_k11_minus_k12_iou_percent": -0.18683115038725617,
+      "delta_k12_minus_E3_iou_percent": 3.535473447476761,
+      "is_background": false,
+      "k11_iou_percent": 46.546933032976,
+      "k12_iou_percent": 46.733764183363256
+    },
+    {
+      "E3_iou_percent": 37.59791972091248,
+      "class_id": 70,
+      "class_name": "oven",
+      "delta_k11_minus_E3_iou_percent": -0.9009605825190334,
+      "delta_k11_minus_k12_iou_percent": 0.10504660272000876,
+      "delta_k12_minus_E3_iou_percent": -1.0060071852390422,
+      "is_background": false,
+      "k11_iou_percent": 36.696959138393446,
+      "k12_iou_percent": 36.59191253567344
+    },
+    {
+      "E3_iou_percent": 8.715930849472446,
+      "class_id": 71,
+      "class_name": "toaster",
+      "delta_k11_minus_E3_iou_percent": 1.60319988290264,
+      "delta_k11_minus_k12_iou_percent": -0.1712364169609284,
+      "delta_k12_minus_E3_iou_percent": 1.7744362998635683,
+      "is_background": false,
+      "k11_iou_percent": 10.319130732375086,
+      "k12_iou_percent": 10.490367149336015
+    },
+    {
+      "E3_iou_percent": 22.699324408236258,
+      "class_id": 72,
+      "class_name": "sink",
+      "delta_k11_minus_E3_iou_percent": 0.64709649625647,
+      "delta_k11_minus_k12_iou_percent": 0.06471321882801107,
+      "delta_k12_minus_E3_iou_percent": 0.582383277428459,
+      "is_background": false,
+      "k11_iou_percent": 23.346420904492728,
+      "k12_iou_percent": 23.281707685664717
+    },
+    {
+      "E3_iou_percent": 38.224827719481596,
+      "class_id": 73,
+      "class_name": "refrigerator",
+      "delta_k11_minus_E3_iou_percent": 1.6508928847818751,
+      "delta_k11_minus_k12_iou_percent": -0.0677716701682769,
+      "delta_k12_minus_E3_iou_percent": 1.718664554950152,
+      "is_background": false,
+      "k11_iou_percent": 39.87572060426347,
+      "k12_iou_percent": 39.94349227443175
+    },
+    {
+      "E3_iou_percent": 14.878964438206285,
+      "class_id": 74,
+      "class_name": "book",
+      "delta_k11_minus_E3_iou_percent": 4.210129798284562,
+      "delta_k11_minus_k12_iou_percent": -0.1500003464197981,
+      "delta_k12_minus_E3_iou_percent": 4.36013014470436,
+      "is_background": false,
+      "k11_iou_percent": 19.089094236490848,
+      "k12_iou_percent": 19.239094582910646
+    },
+    {
+      "E3_iou_percent": 53.72470328279284,
+      "class_id": 75,
+      "class_name": "clock",
+      "delta_k11_minus_E3_iou_percent": 0.9979561031710773,
+      "delta_k11_minus_k12_iou_percent": 0.04266636178979155,
+      "delta_k12_minus_E3_iou_percent": 0.9552897413812858,
+      "is_background": false,
+      "k11_iou_percent": 54.722659385963915,
+      "k12_iou_percent": 54.679993024174124
+    },
+    {
+      "E3_iou_percent": 30.70324850606782,
+      "class_id": 76,
+      "class_name": "vase",
+      "delta_k11_minus_E3_iou_percent": 3.5987785774408714,
+      "delta_k11_minus_k12_iou_percent": -0.08703363149775356,
+      "delta_k12_minus_E3_iou_percent": 3.685812208938625,
+      "is_background": false,
+      "k11_iou_percent": 34.30202708350869,
+      "k12_iou_percent": 34.389060715006444
+    },
+    {
+      "E3_iou_percent": 57.551053172360646,
+      "class_id": 77,
+      "class_name": "scissors",
+      "delta_k11_minus_E3_iou_percent": 4.8549945850196465,
+      "delta_k11_minus_k12_iou_percent": -0.03513078901787736,
+      "delta_k12_minus_E3_iou_percent": 4.890125374037524,
+      "is_background": false,
+      "k11_iou_percent": 62.40604775738029,
+      "k12_iou_percent": 62.44117854639817
+    },
+    {
+      "E3_iou_percent": 63.78945229944482,
+      "class_id": 78,
+      "class_name": "teddy bear",
+      "delta_k11_minus_E3_iou_percent": 1.216344742379448,
+      "delta_k11_minus_k12_iou_percent": -0.08988616287528828,
+      "delta_k12_minus_E3_iou_percent": 1.3062309052547363,
+      "is_background": false,
+      "k11_iou_percent": 65.00579704182427,
+      "k12_iou_percent": 65.09568320469955
+    },
+    {
+      "E3_iou_percent": 2.1078532145765503,
+      "class_id": 79,
+      "class_name": "hair drier",
+      "delta_k11_minus_E3_iou_percent": 3.345507219697162,
+      "delta_k11_minus_k12_iou_percent": -0.3045444239322235,
+      "delta_k12_minus_E3_iou_percent": 3.6500516436293853,
+      "is_background": false,
+      "k11_iou_percent": 5.453360434273712,
+      "k12_iou_percent": 5.757904858205936
+    },
+    {
+      "E3_iou_percent": 4.256890047012536,
+      "class_id": 80,
+      "class_name": "toothbrush",
+      "delta_k11_minus_E3_iou_percent": 0.2791819055294038,
+      "delta_k11_minus_k12_iou_percent": -0.006045427502646916,
+      "delta_k12_minus_E3_iou_percent": 0.2852273330320507,
+      "is_background": false,
+      "k11_iou_percent": 4.53607195254194,
+      "k12_iou_percent": 4.542117380044587
+    }
+  ],
+  "pilot_direction_reversal_warning": {
+    "full_delta_k11_minus_k12_percentage_points": -0.03187155543737674,
+    "pilot100_delta_k11_minus_k12_percentage_points": 0.27539052081402815,
+    "pilot20_delta_k11_minus_k12_percentage_points": 0.8160866156971416,
+    "warning": "pilot20 (+0.816 pp) and pilot100 (+0.275 pp) both showed k11 > k12 (opposite sign from the full 5000-image result). 20-100 images is not an adequate sample size for this class-balanced, small-object, 81-class metric -- neither pilot's sign or magnitude should be treated as indicative of the full-dataset result. No conclusion should ever be drawn from pilot20/pilot100 alone, exactly as the protocol's own interpretation contract states."
+  },
+  "pilot_prefix_reproduction": {
+    "pilot100": {
+      "image_ids_match": true,
+      "mismatches": [],
+      "prefix_length": 100,
+      "reproduces_exactly": true,
+      "run_mode": "pilot100",
+      "variant_metrics": {
+        "E3": {
+          "reconstructed_from_full_prefix_mIoU_percent": 31.25175844030006,
+          "reported_by_pilot_run_mIoU_percent": 31.25175844030006
+        },
+        "k11": {
+          "reconstructed_from_full_prefix_mIoU_percent": 32.5262609414533,
+          "reported_by_pilot_run_mIoU_percent": 32.5262609414533
+        },
+        "k12": {
+          "reconstructed_from_full_prefix_mIoU_percent": 32.250870420639274,
+          "reported_by_pilot_run_mIoU_percent": 32.250870420639274
+        }
+      }
+    },
+    "pilot20": {
+      "image_ids_match": true,
+      "mismatches": [],
+      "prefix_length": 20,
+      "reproduces_exactly": true,
+      "run_mode": "pilot20",
+      "variant_metrics": {
+        "E3": {
+          "reconstructed_from_full_prefix_mIoU_percent": 23.164000319063884,
+          "reported_by_pilot_run_mIoU_percent": 23.16400031906389
+        },
+        "k11": {
+          "reconstructed_from_full_prefix_mIoU_percent": 29.167871744163637,
+          "reported_by_pilot_run_mIoU_percent": 29.167871744163637
+        },
+        "k12": {
+          "reconstructed_from_full_prefix_mIoU_percent": 28.3517851284665,
+          "reported_by_pilot_run_mIoU_percent": 28.351785128466496
+        }
+      }
+    }
+  },
+  "primary_transfer_question": {
+    "classification": "CI_BELOW_ZERO",
+    "classification_rule": "CI_BELOW_ZERO: 12th edge useful on average in both protocols. CI_INCLUDES_ZERO: effect does not clearly transfer. CI_ABOVE_ZERO: true COCO-Object reversal.",
+    "comparison": "k11_minus_k12",
+    "interpretation": "the 12th edge is useful on average in both COCO protocols (transfers from COCO-Stuff to COCO-Object)"
+  },
+  "reconciliation_tolerance_percentage_points": 1e-06,
+  "reconstructed_metrics_from_npz": {
+    "E3": {
+      "aAcc_percent": 70.44065997033655,
+      "mAcc_percent": 76.70666004681034,
+      "mIoU_percent": 37.71977679540923
+    },
+    "k11": {
+      "aAcc_percent": 73.27653934615105,
+      "mAcc_percent": 77.76861685832952,
+      "mIoU_percent": 39.46144753320496
+    },
+    "k12": {
+      "aAcc_percent": 73.35531034531354,
+      "mAcc_percent": 77.6088136932673,
+      "mIoU_percent": 39.49331908864233
+    }
+  },
+  "reported_deltas_full_precision": {
+    "k11_minus_E3": 1.7416707377957152,
+    "k11_minus_k12": -0.03187155543737674,
+    "k12_minus_E3": 1.773542293233092
+  },
+  "reported_metrics": {
+    "E3": {
+      "aAcc": 70.44065997033655,
+      "mAcc": 76.70666004681034,
+      "mIoU": 37.71977679540924
+    },
+    "k11": {
+      "aAcc": 73.27653934615105,
+      "mAcc": 77.76861685832952,
+      "mIoU": 39.461447533204954
+    },
+    "k12": {
+      "aAcc": 73.35531034531354,
+      "mAcc": 77.6088136932673,
+      "mIoU": 39.49331908864233
+    }
+  },
+  "run_mode": "full",
+  "schema": "talk2dino-coco-object-full-result-analysis-v1",
+  "source_git_commit": "d99d064343ceaca17115cc02511693342edb9017",
+  "source_result_identity": "e12-coco-object-protocol-confirmation",
+  "source_result_identity_sha256": "79366e602d4d5e29aa9412224b577c871cb2649e9580cd7415ba9f5a3b5de2bf",
+  "tool_version": "1.0.0"
+}
