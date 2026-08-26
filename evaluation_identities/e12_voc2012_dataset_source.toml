@@ -1,0 +1,105 @@
+format_version = "talk2dino-voc2012-dataset-source-identity-v1"
+
+[identity]
+name = "e12-voc2012-dataset-source"
+schema_version = "talk2dino-voc2012-dataset-source-identity-v1"
+description = "Sole authority for the shared PASCAL VOC 2012 segmentation-validation source used by Talk2DINO's V20 (no-background, 20-class) and V21 (with-background, 21-class) protocols. Dataset-source contract only -- no GPU evaluator, no feature extraction, no model. V20 and V21 read the exact same downloaded JPEGImages/SegmentationClass files and the exact same val.txt split; the sole difference is the runtime label transform each protocol's dataset class applies (see [label_policy]), never a different file set."
+required_ancestor_commit = "15609bfbcc7699f5d9071f44aa49182dfc062b37"
+
+[upstream]
+dataset_name = "PASCAL VOC 2012"
+dataset_version = "2012"
+source_url = "http://host.robots.ox.ac.uk/pascal/VOC/voc2012/"
+source_reference = "Everingham, Van Gool, Williams, Winn, Zisserman -- The PASCAL Visual Object Classes Challenge 2012 (VOC2012) Results"
+archive_top_level_directory = "VOCdevkit"
+
+[protocol]
+label = "VOC2012"
+statement = "Same-source shared validation contract for V20 (background excluded from evaluation) and V21 (background is class 0). Not two datasets -- one downloaded archive, two runtime label interpretations of the same SegmentationClass masks."
+split = "val"
+expected_image_count = 1449
+
+[expected_root_structure]
+description = "The archive must extract to VOCdevkit/VOC2012 containing these four entries at minimum; the runtime data_root used by both dataset configs is a symlink or direct path to this VOC2012 directory."
+voc2012_relative_root = "VOC2012"
+required_subpaths = ["JPEGImages", "SegmentationClass", "ImageSets/Segmentation/train.txt", "ImageSets/Segmentation/val.txt", "ImageSets/Segmentation/trainval.txt"]
+
+[source]
+image_relative_root = "JPEGImages"
+annotation_relative_root = "SegmentationClass"
+split_relative_path = "ImageSets/Segmentation/val.txt"
+image_suffix = ".jpg"
+annotation_suffix = ".png"
+split_order_authority = "ImageSets/Segmentation/val.txt line order, each line stripped of leading/trailing whitespace -- exactly mmcv.list_from_file + CustomDataset.load_annotations' own split-driven ordering (mmseg.datasets.custom.CustomDataset.load_annotations); never re-sorted, never derived from a directory listing."
+
+[dataset_loader]
+v21_dataset_config_relative_path = "src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/pascal_voc12.py"
+v21_dataset_config_sha256 = "3fd59e801b68404f3ff1f060599cd918b0e52fdb8ed078228a5e8c0c8d375459"
+v20_dataset_config_relative_path = "src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/pascal_voc12_20.py"
+v20_dataset_config_sha256 = "c6e61b346ef9235f08f76774a6fee0ac7f59b38f36781a96357cce2ce2c12e22"
+v20_dataset_class_relative_path = "src/open_vocabulary_segmentation/segmentation/datasets/pascal_voc.py"
+v20_dataset_class_sha256 = "2241674e9f8cce3708f0e1992da6ebc9c82baf0419e2ab285ecaad8738ac73f1"
+v20_dataset_class_name = "PascalVOCDataset20"
+v21_dataset_class_name = "PascalVOCDataset"
+v21_dataset_class_source = "mmseg.datasets.PascalVOCDataset (installed mmsegmentation package, unmodified stock class -- not vendored in this repository, so it is verified by live import + exact value comparison, not a git blob hash)"
+mmsegmentation_required_version = "0.30.0"
+data_root_relative_path = "data/VOCdevkit/VOC2012"
+
+[class_contract]
+v21_class_count = 21
+v20_class_count = 20
+background_class_index = 0
+v21_class_names_digest = "fd55ca4d47c05e3b8bbf653f614a6ab9caebf68ce72108efcc23101926f06e27"
+v20_class_names_digest = "ce42b86533b1c85e1fe217f2500055a7263e015f54041b27d6afb3747a2065e0"
+class_names_digest_algorithm = "sha256_json_dumps_ensure_ascii_list"
+class_names_relationship = "v21_classes[1:] == v20_classes -- v21 is exactly ('background',) prepended to v20's 20-tuple, same order"
+
+[label_policy]
+raw_ignore_value = 255
+ignore_index = 255
+v21_uses_raw_labels_directly = true
+v21_reduce_zero_label = false
+v20_reduce_zero_label = true
+v20_transform_description = "raw pixel 0 (background) -> 255 (ignore, excluded from evaluation); raw pixel 1..20 -> 0..19 (shifted down by one to match the 20-class, no-background CLASSES order); raw pixel 255 (void/boundary) stays 255. Authoritative source: mmseg.datasets.pipelines.LoadAnnotations.__call__'s reduce_zero_label branch, invoked because PascalVOCDataset20.__init__ passes reduce_zero_label=True to CustomDataset.__init__. Never a redesigned or re-derived mapping."
+v21_transform_description = "no transform: raw pixel values 0..20 are used directly as the 21 evaluated classes (0=background), raw pixel 255 (void/boundary) is excluded via ignore_index=255. Authoritative source: mmseg.datasets.PascalVOCDataset.__init__ omits reduce_zero_label, so CustomDataset's own default (false) applies."
+
+[evaluation_pipeline]
+description = "Crop/stride shared by both V20 and V21's _base_ dataset configs; recorded here as the only evaluation-pipeline facts already fixed at the dataset-config level. No GPU evaluator, template, background-threshold, or model binding is defined by this identity -- that is a later stage."
+mode = "slide"
+crop_size = [448, 448]
+stride = [224, 224]
+
+[provenance_policy]
+v20_v21_share_same_source_files = true
+conversion_required = false
+no_bridge_training_or_feature_extraction_allowed = true
+statement = "This identity governs dataset-source verification only. No DINO/CLIP feature extraction, no model loading, no CUDA initialization, and no per-target-dataset bridge training occur under this identity. The existing COCO-2017-trained bridge (Talk2DINO projection head) remains frozen and is out of scope for this stage."
+
+[manifest]
+schema_name = "talk2dino-voc2012-dataset-manifest-v1"
+
+[hashing]
+algorithm = "sha256"
+
+[validation]
+require_decoded_pixel_hash = true
+require_encoded_png_hash = true
+require_ordered_image_digest = true
+require_dimension_reconciliation = true
+require_label_set_reconciliation = true
+overwrite_incomplete_requires_explicit_flag = true
+
+[prohibited]
+list = [
+    "dino_or_clip_feature_extraction",
+    "model_loading",
+    "cuda_initialization",
+    "gpu_evaluator_implementation",
+    "vocaug_installation",
+    "duplicate_mask_generation",
+    "mask_conversion_without_proof_of_necessity",
+    "dataset_copy_into_repository",
+    "target_specific_bridge_training",
+    "writes_into_source_dataset_root",
+    "manifest_source_root_as_private_absolute_path",
+]
