@@ -1,0 +1,90 @@
+format_version = "talk2dino-ade20k-dataset-source-identity-v1"
+
+[identity]
+name = "e12-ade20k-dataset-source"
+schema_version = "talk2dino-ade20k-dataset-source-identity-v1"
+description = "Immutable source identity for the ADE20K (ADEChallengeData2016) challenge-format validation split: 2,000 images/masks under the standard images/validation and annotations/validation layout, used unmodified (no conversion) by Talk2DINO's live ade20k.py dataset config and the installed mmsegmentation ADE20KDataset class."
+required_ancestor_commit = "14dd20c1ff5d4ab040bcb5d1d773a49bdc9a24c8"
+
+[upstream]
+dataset_name = "ADE20K (ADEChallengeData2016)"
+dataset_version = "2016 MIT Scene Parsing Benchmark challenge release"
+source_url = "https://groups.csail.mit.edu/vision/datasets/ADE20K/"
+source_reference = "Zhou et al., Scene Parsing through ADE20K Dataset, CVPR 2017"
+archive_top_level_directory = "ADEChallengeData2016"
+
+[protocol]
+label = "ADE20K-C150"
+statement = "Standard 150-class ADE20K semantic-segmentation validation protocol: raw label 0 (unlabeled/background) is ignored, raw labels 1..150 map to evaluation classes 0..149 via mmseg's reduce_zero_label mechanism. No background-inclusive C151 variant."
+split = "validation"
+expected_image_count = 2000
+
+[expected_root_structure]
+description = "Either the ADEChallengeData2016 directory itself, or an unambiguous parent containing exactly one ADEChallengeData2016 subdirectory."
+ade_relative_root = "ADEChallengeData2016"
+required_subpaths = ["images/training", "images/validation", "annotations/training", "annotations/validation"]
+
+[source]
+image_relative_root = "images/validation"
+annotation_relative_root = "annotations/validation"
+training_image_relative_root = "images/training"
+training_annotation_relative_root = "annotations/training"
+image_suffix = ".jpg"
+annotation_suffix = ".png"
+split_order_authority = "sorted validation image filenames (no split file is configured; matches mmseg CustomDataset.load_annotations' own default directory-listing sort when split=None)"
+
+[dataset_loader]
+dataset_config_relative_path = "src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/ade20k.py"
+dataset_config_sha256 = "8a30bf7e2c1db3f000a99d9107fadf0931472147f13664dcf8b8b08ae84425d9"
+dataset_class_name = "ADE20KDataset"
+dataset_class_source = "mmseg.datasets.ade.ADE20KDataset (installed package, not vendored in this repository)"
+mmsegmentation_required_version = "0.30.0"
+data_root_relative_path = "data/ade"
+
+[class_contract]
+class_count = 150
+class_names_digest = "848bc88a8c2227b2c2cb61eb2ed6ca109de31775c80c21697765c020a86fb224"
+class_names_digest_algorithm = "sha256_json_dumps_ensure_ascii_list"
+
+[label_policy]
+raw_ignore_value = 0
+ignore_index = 255
+reduce_zero_label = true
+transform_description = "mmseg reduce_zero_label semantics, fixed by ADE20KDataset.__init__: raw pixel 0 -> ignore_index 255; raw pixel k in [1,150] -> evaluation label k-1. Raw 255, if present, remains 255 (ignored) both before and after the transform. No background class is evaluated; no background channel is synthesized."
+background_class_evaluated = false
+
+[evaluation_pipeline]
+description = "Same slide-mode geometry as VOC2012/COCO-Object/PASCAL-Context: MultiScaleFlipAug img_scale=(2048,448) with keep_ratio Resize, then slide-mode crop/stride."
+mode = "slide"
+crop_size = [448, 448]
+stride = [224, 224]
+
+[provenance_policy]
+conversion_required = false
+no_bridge_training_or_feature_extraction_allowed = true
+statement = "ADEChallengeData2016 ships challenge-format semantic PNG masks directly; no annotation conversion is performed or required by this identity. The frozen COCO-2017-trained Talk2DINO bridge is evaluated zero-shot against ADE20K; it is never trained, fine-tuned, or used to pre-extract ADE-specific features."
+
+[manifest]
+schema_name = "talk2dino-ade20k-dataset-manifest-v1"
+
+[hashing]
+algorithm = "sha256"
+
+[validation]
+require_decoded_pixel_hash = true
+require_encoded_png_hash = true
+require_ordered_image_digest = true
+require_dimension_reconciliation = true
+require_label_set_reconciliation = true
+require_train_val_disjointness_when_training_present = true
+overwrite_incomplete_requires_explicit_flag = true
+
+[prohibited]
+list = [
+    "ADE C151 background-inclusive protocol",
+    "background threshold or synthesized background channel",
+    "training, fine-tuning, or feature extraction on ADE20K",
+    "annotation conversion or regeneration",
+    "mean-of-per-image mIoU",
+    "any dataset-source path embedded in the manifest",
+]

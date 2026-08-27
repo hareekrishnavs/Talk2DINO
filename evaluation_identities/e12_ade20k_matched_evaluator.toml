@@ -1,0 +1,110 @@
+format_version = "talk2dino-ade20k-matched-evaluator-identity-v1"
+
+[identity]
+name = "e12-ade20k-matched-evaluator"
+schema_version = "talk2dino-ade20k-matched-evaluator-identity-v1"
+description = "Cross-dataset ADE20K C150 E3-vs-matched-k11-vs-k12 finite-step (T=320) evaluation from the SAME frozen COCO-2017-trained Talk2DINO bridge used by the COCO-Object protocol confirmation. Standard 150-class ADE20K protocol: no background class evaluated, no synthesized background channel, no C151 variant. Reuses the matched k11/k12 T=320 propagation kernel and the E3 snapshot/graph machinery verbatim (models.dinotext.cover_dr.coco_object_evaluator.stitch_one_image_with_e3/process_one_window_with_e3, imported unmodified) with the background-channel step never invoked, and models.dinotext.cover_dr.matched_power_evaluator.finalize_prediction (the plain, background-free 150-class argmax finalizer) in place of the background-injecting finalizer."
+required_ancestor_commit = "14dd20c1ff5d4ab040bcb5d1d773a49bdc9a24c8"
+
+[parent_identities]
+matched_identity_path = "evaluation_identities/e12_matched_k11_k12_t320.toml"
+matched_identity_name = "e12-matched-k11-k12-t320"
+matched_identity_sha256 = "1f4eea731ae7b803a5e2d572d0a1f59b3275ec240d36061d03540706e3bbc259"
+ade20k_source_identity_path = "evaluation_identities/e12_ade20k_dataset_source.toml"
+ade20k_source_identity_name = "e12-ade20k-dataset-source"
+ade20k_source_identity_sha256 = "7d66a555fff1e697434e76012bfd63ec6116f03f5a9f0185de96c86805fc6f6a"
+required_relationship = "reuses_matched_k11_k12_propagation_kernel_and_e3_backbone_on_unconverted_ade20k_challenge_masks"
+
+[protocol]
+label = "ADE20K-C150"
+statement = "Cross-dataset evaluation of the frozen COCO-2017 Talk2DINO bridge against the standard 150-class ADE20K validation protocol. Not a same-data protocol confirmation (unlike COCO-Object) -- ADE20K images/annotations are never used in training this bridge."
+split = "validation"
+expected_image_count = 2000
+
+[dataset]
+dataset_type = "ADE20KDataset"
+dataset_class_source = "mmseg.datasets.ade.ADE20KDataset (installed package)"
+dataset_config_relative_path = "src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/ade20k.py"
+dataset_config_sha256 = "8a30bf7e2c1db3f000a99d9107fadf0931472147f13664dcf8b8b08ae84425d9"
+class_count = 150
+class_names_digest = "848bc88a8c2227b2c2cb61eb2ed6ca109de31775c80c21697765c020a86fb224"
+class_names_digest_algorithm = "sha256_json_dumps_ensure_ascii_list"
+class_names_source = "mmseg.datasets.ade.ADE20KDataset.CLASSES"
+annotation_suffix = ".png"
+ignore_index = 255
+background_class_evaluated = false
+
+[dataset_root_override]
+canonical_configured_root = "./data/ade"
+override_field = "data_root"
+override_policy = "data_root_only"
+description = "The evaluator may override ONLY the dataset config's data_root (to point at the real ADE20K root instead of the canonical ./data/ade symlink target); dataset class, annotation suffix, class order, crop and stride are read unmodified from the canonical ade20k.py config and this identity, and are validated equal to it before every run."
+
+[e3_config]
+eval_config_relative_path = "src/open_vocabulary_segmentation/configs/ade/dinotext_ade_vitb_mlp_infonce.yml"
+eval_config_sha256 = "20175b4df052788c2d9b60f1e423e2a9cbf84bca3539af66167797cabdfc2697"
+eval_base_config_relative_path = "src/open_vocabulary_segmentation/configs/ade/eval_ade.yml"
+eval_base_config_sha256 = "0bc667bb19309ef31df5a4fc84c832f4da5a9a8d0d2354ff9df09f9c61e45cfe"
+model_constructor_relative_path = "src/open_vocabulary_segmentation/models/dinotext/dinotext.py"
+constructor_class = "DINOText"
+projection_config_relative_path = "configs/vitb_mlp_infonce_paired_soft_routing_tau010.yaml"
+projection_checkpoint_relative_path = "weights/vitb_mlp_infonce_paired_soft_routing_tau010.pth"
+projection_checkpoint_sha256 = "9632117c18613674eeddcb35f86193d37da203a9cbd837cf500c4121b5fa9942"
+template = "sub_imagenet_template"
+pamr = false
+checkpoint_choice_note = "Same frozen bridge checkpoint used by the COCO-Object protocol confirmation (e12-coco-object-protocol-confirmation), the most recently established cross-dataset convention in this repository. VOC2012's matched evaluator instead uses the older weights/vitb_mlp_infonce.pth; this identity deliberately follows the newer COCO-Object convention, not VOC2012's."
+
+[background_protocol]
+mechanism = "none"
+background_class_evaluated = false
+finalizer_source = "models.dinotext.cover_dr.matched_power_evaluator.finalize_prediction"
+finalizer_note = "Plain per-pixel argmax over exactly class_count=150 stitched foreground channels -- no background channel is prepended, no threshold is applied. This is the SAME finalizer already verified for VOC2012's V20 (no-background) protocol; it is reused unmodified, never a new background rule invented for ADE20K."
+
+[comparisons]
+variants = ["E3", "k11", "k12"]
+primary_delta_definition = "mIoU_k11_minus_mIoU_k12"
+secondary_deltas = ["k11_minus_E3", "k12_minus_E3"]
+metric_unit = "percentage_points"
+sufficient_statistic_schema = "per_image_per_class_intersection_union_pred_gt"
+
+[run_modes]
+pilot20_images = 20
+pilot20_schema_name = "talk2dino-ade20k-matched-evaluator-pilot20-result-v1"
+pilot100_images = 100
+pilot100_schema_name = "talk2dino-ade20k-matched-evaluator-pilot100-result-v1"
+full_images = 2000
+full_schema_name = "talk2dino-ade20k-matched-evaluator-full-result-v1"
+
+[checkpoint]
+schema_name = "talk2dino-ade20k-matched-evaluator-checkpoint-v1"
+
+[verification]
+require_source_manifest_verified_before_cuda = true
+source_manifest_schema_name = "talk2dino-ade20k-dataset-manifest-v1"
+required_manifest_image_count = 2000
+
+[prohibited]
+list = [
+    "c151_background_inclusive_protocol",
+    "synthesized_background_channel",
+    "background_threshold",
+    "t4_semantic_crop_consensus",
+    "dcr",
+    "sur",
+    "hann_or_alternative_stitching",
+    "cross_view_edge_support",
+    "graph_pruning_beyond_matched_k11_prefix",
+    "learned_edge_weights",
+    "k_sweep",
+    "adaptive_alpha",
+    "class_specific_alpha",
+    "sherman_morrison",
+    "adjoint_gradients",
+    "cgls_dense_equilibrium_solve",
+    "approximate_alignment",
+    "ade20k_training_or_fine_tuning",
+    "ade20k_feature_extraction",
+    "annotation_generation_or_conversion",
+    "mean_of_per_image_miou",
+    "paired_bootstrap_inside_gpu_evaluator",
+]
