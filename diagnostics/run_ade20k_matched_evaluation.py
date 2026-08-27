@@ -52,6 +52,8 @@ from src.ade20k_matched_evaluator_identity import (
     validate_static_configuration,
 )
 from src.ade20k_matched_evaluator_report import verify_record
+from src.ade20k_dataset_identity import load_identity as load_ade20k_source_identity
+from src.ade20k_dataset_manifest import resolve_dataset_root as resolve_ade20k_dataset_root
 from src.k11_k12_stability_report import write_checkpoint_atomically
 from src.matched_k11_k12_identity import MatchedK11K12Error
 from src.matched_k11_k12_identity import load_identity as load_matched_identity
@@ -168,7 +170,17 @@ def _run_evaluation(args: argparse.Namespace) -> int:
             "ade20k.py's own data_root disagrees with the identity's registered canonical_configured_root -- "
             "refusing to override a config that no longer matches the bound canonical authority"
         )
-    dataset_cfg.data.test.data_root = str(args.data_root)
+    # ade20k.py's own img_dir/ann_dir already embed the 'ADEChallengeData2016/'
+    # prefix, so the config's data_root override must be the PARENT of that
+    # directory -- resolve --data-root through the exact same acceptance
+    # logic verify_ade20k_dataset.py's preflight/verify-manifest already
+    # applied (either the ADEChallengeData2016 directory itself or its
+    # unambiguous parent), so the two never disagree on which form is
+    # required.
+    ade_source_identity_path = root / identity["parent_identities"]["ade20k_source_identity_path"]
+    ade_source_identity = load_ade20k_source_identity(ade_source_identity_path, repo_root=root)
+    resolved_ade_root = resolve_ade20k_dataset_root(args.data_root, ade_source_identity)
+    dataset_cfg.data.test.data_root = str(resolved_ade_root.parent)
     dataset = build_dataset(dataset_cfg.data.test)
 
     live_class_names_digest = validate_live_class_order(dataset, identity)
