@@ -1,0 +1,219 @@
+format_version = "talk2dino-voc2012-matched-evaluator-identity-v1"
+
+# Shared VOC2012 V20 (no-background, 20-class) vs V21 (background, 21-class)
+# matched E3/k11/k12 evaluator. Processes the shared validation images
+# EXACTLY ONCE per window (one snapshot, one top-12 graph, one matched-
+# prefix k11 construction, one k11 propagation, one k12 propagation),
+# reusing models.dinotext.cover_dr.matched_power_evaluator and
+# models.dinotext.cover_dr.coco_object_evaluator verbatim -- never a
+# reimplementation of the graph/propagation/stitching primitives. V20 and
+# V21 diverge ONLY at finalization: V20 argmaxes the shared 20-channel
+# foreground-only stitched scores directly (matched_power_evaluator's own
+# finalize_prediction, no background channel); V21 prepends the canonical
+# constant background channel first (coco_object_evaluator's own
+# apply_background_channel/finalize_prediction, bg_thresh sourced below).
+# Never a second backbone pass, never independently-selected V20/V21
+# scores. This identity intentionally does NOT redeclare alpha, steps,
+# crop, stride, affinity_power, or the VOC2012 dataset-source contract --
+# those are read at runtime from the two parent identities below.
+
+[identity]
+name = "e12-voc2012-matched-evaluator"
+schema_version = "talk2dino-voc2012-matched-evaluator-identity-v1"
+description = "Shared VOC2012 V20/V21 matched E3-vs-k11-vs-k12 finite-step (T=320) evaluator: one shared canonical E3 snapshot and top-12 graph per window feeds both the no-background V20 protocol (20 foreground classes) and the background-inclusive V21 protocol (21 classes), producing all six result variants (V20/V21 x E3/k11/k12) from ONE model/graph/propagation pass per window. Uses the existing frozen COCO-2017-trained Talk2DINO bridge checkpoint (vitb_mlp_infonce) -- never trains, fine-tunes, or pre-extracts target-dataset features."
+required_ancestor_commit = "9a01f1a410bf8418d72c47058f964c5d9e443310"
+
+[parent_identities]
+voc2012_source_identity_path = "evaluation_identities/e12_voc2012_dataset_source.toml"
+voc2012_source_identity_name = "e12-voc2012-dataset-source"
+voc2012_source_identity_sha256 = "0880a903fc37882f7861caf2d1f04d6902fba22c620ee294adc48af447c95d7f"
+matched_identity_path = "evaluation_identities/e12_matched_k11_k12_t320.toml"
+matched_identity_name = "e12-matched-k11-k12-t320"
+matched_identity_sha256 = "1f4eea731ae7b803a5e2d572d0a1f59b3275ec240d36061d03540706e3bbc259"
+required_relationship = "voc2012_matched_evaluator_reuses_voc2012_source_split_and_matched_k11_k12_propagation_kernel_verbatim"
+
+[protocol]
+label = "VOC2012-matched-V20-V21"
+statement = "Shared-source dual-protocol matched E3/k11/k12 evaluation on the single VOC2012 validation split (1449 images) governed by e12-voc2012-dataset-source. Not two evaluations of two datasets -- one shared model/graph/propagation pass per image, two label-transform finalizations (V20 excludes background from evaluation; V21 evaluates it as class 0)."
+split = "val"
+expected_image_count = 1449
+
+[v20_protocol]
+dataset_type = "PascalVOCDataset20"
+dataset_class_relative_path = "src/open_vocabulary_segmentation/segmentation/datasets/pascal_voc.py"
+dataset_config_relative_path = "src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/pascal_voc12_20.py"
+class_count = 20
+background_included = false
+ignore_index = 255
+class_names_source = "PascalVOCDataset20.CLASSES"
+
+[v21_protocol]
+dataset_type = "PascalVOCDataset"
+dataset_class_relative_path = "mmseg.datasets.PascalVOCDataset (installed mmsegmentation package, unmodified stock class)"
+dataset_config_relative_path = "src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/pascal_voc12.py"
+class_count = 21
+background_included = true
+background_class_index = 0
+ignore_index = 255
+class_names_source = "mmseg.datasets.PascalVOCDataset.CLASSES"
+
+[shared_scores]
+statement = "V20 and V21 issue the identical 20-class text query (models.dinotext.dinotext_builder.build_dinotext_seg_inference derives classnames as dataset.CLASSES[1:] whenever CLASSES[0]=='background', i.e. V21's own foreground classnames are always V20's CLASSES verbatim -- see dataset_loader relationship in the VOC2012 source identity: v21_classes[1:] == v20_classes). Background is NEVER text-encoded or learned: it is injected post-hoc as a spatially-uniform constant channel (background_protocol below), which never alters the 20 foreground scores. Therefore one shared backbone/snapshot/graph/propagation pass per window produces foreground scores usable, unmodified, by both protocols."
+text_query_source = "v20_protocol.class_names_source (dataset.CLASSES[1:] under V21, dataset.CLASSES verbatim under V20 -- textually identical 20-tuple either way)"
+foreground_score_sharing = "identical_tensor_no_recompute"
+second_backbone_pass_permitted = false
+
+[model_and_checkpoint]
+model_constructor_relative_path = "src/open_vocabulary_segmentation/models/dinotext/dinotext.py"
+constructor_class = "DINOText"
+backbone_name = "dinov2_vitb14_reg"
+clip_model_name = "ViT-B/16"
+projection_class = "vitb_mlp_infonce"
+projection_config_relative_path = "configs/vitb_mlp_infonce.yaml"
+projection_checkpoint_relative_path = "weights/vitb_mlp_infonce.pth"
+projection_checkpoint_sha256 = "8360deb743b8226ce558efb327f5da3fbee385fc2e0c84a7ff91fceba8920294"
+checkpoint_frozen = true
+target_dataset_training_or_feature_pre_extraction_permitted = false
+template = "sub_imagenet_template"
+pamr = false
+
+[model_and_checkpoint.v20_eval_config]
+eval_config_relative_path = "src/open_vocabulary_segmentation/configs/voc/dinotext_voc_vitb_mlp_infonce.yml"
+eval_config_sha256 = "20175b4df052788c2d9b60f1e423e2a9cbf84bca3539af66167797cabdfc2697"
+eval_base_config_relative_path = "src/open_vocabulary_segmentation/configs/voc/eval_voc.yml"
+eval_base_config_sha256 = "40e7188a402f097947a88d7c164042edd8c5f7d8240fd4273b66a37548bb15b3"
+
+[model_and_checkpoint.v21_eval_config]
+eval_config_relative_path = "src/open_vocabulary_segmentation/configs/voc_bg/dinotext_voc_bg_vitb_mlp_infonce.yml"
+eval_config_sha256 = "61c39546f0b2cb9e52f8c2a3478269c30d50d06da6303f64c53b8d28c3078bde"
+eval_base_config_relative_path = "src/open_vocabulary_segmentation/configs/voc_bg/eval_voc_bg.yml"
+eval_base_config_sha256 = "5e7bdd1bd9c80c8e950c933b1c32b321f1f3531ed7053bde13b585cae5084ae4"
+
+[model_and_checkpoint.provenance]
+description = "Direct SHA256 file-hash pinning (matching e12-voc2012-dataset-source's own dataset_loader convention), never the heavier typed-configuration resolution machinery -- these are plain YAML/Python leaf files, no mmcv _base_ inheritance chain to resolve, so a raw file hash is the exact, sufficient, dependency-free authority. Verified at preflight time via hashlib.sha256(path.read_bytes()), CPU-only, no mmcv/mmseg import required."
+projection_config_sha256 = "b1db6b3847ecd9cb7c77a8a4988bd9423f50cfbedaba24a7a9aa1f97b2e1558e"
+model_constructor_sha256 = "94d920e7f9153e97c8c4948013beffd7533902c7d307fe15607a6b03508873ed"
+dataset_seg_inference_relative_path = "src/open_vocabulary_segmentation/segmentation/evaluation/dinotext_seg.py"
+dataset_seg_inference_sha256 = "e5a4dc40aefe866156c9ca397d77a31cd243fc05d79f5e6cd1905e8d983265f4"
+dinotext_builder_relative_path = "src/open_vocabulary_segmentation/segmentation/evaluation/dinotext_builder.py"
+dinotext_builder_sha256 = "99c76fa195325406a1cf987f0016e5a75f08ad1d6c2abfe287ec870a9f53a00c"
+
+[reused_evaluator_modules]
+description = "These primitives are imported unmodified from the sibling COCO-Object/matched-k11-k12 evaluator machinery -- never reimplemented -- and are hash-pinned here so this identity fails closed if any of them ever changes underneath it."
+coco_object_evaluator_relative_path = "src/open_vocabulary_segmentation/models/dinotext/cover_dr/coco_object_evaluator.py"
+coco_object_evaluator_sha256 = "398b76f5004a91ad2f095d10245467ad0aeed96e2f6b1d0f4ff55e86274b7e08"
+matched_power_evaluator_relative_path = "src/open_vocabulary_segmentation/models/dinotext/cover_dr/matched_power_evaluator.py"
+matched_power_evaluator_sha256 = "13371fd697ef5fae41f2a0b7e99f8c5a65d679a337de734e539a8fdf7e95acf4"
+graph_relative_path = "src/open_vocabulary_segmentation/models/dinotext/cover_dr/graph.py"
+graph_sha256 = "b7d4eec053dc204db869590a5ff3763b630084a65f0abd3101190b1e77f33ac5"
+finite_step_regime_relative_path = "src/open_vocabulary_segmentation/models/dinotext/cover_dr/finite_step_regime.py"
+finite_step_regime_sha256 = "79ce8ed0e5462131cf148a1615aa60048b4a05782de7d5279ddee45856de6108"
+sliding_window_geometry_relative_path = "src/open_vocabulary_segmentation/segmentation/evaluation/sliding_window_geometry.py"
+sliding_window_geometry_sha256 = "082a812907581444ed6ed87b232c82105a0071ca24cd802aceec81fa0ec3c25b"
+
+[background_protocol]
+mechanism = "canonical_constant_threshold_channel"
+bg_thresh = 0.55
+bg_strategy = "base"
+background_class_index = 0
+competes_in_argmax = true
+formula = "background_channel = torch.full([B,1,H,W], bg_thresh); masks = torch.cat([background_channel, foreground_masks], dim=1)"
+formula_source = "segmentation/evaluation/dinotext_seg.py::DINOTextSegInference.encode_decode"
+reused_implementation = "models.dinotext.cover_dr.coco_object_evaluator.apply_background_channel (imported unmodified, never a new threshold implementation)"
+injection_stage = "post_stitch_pre_argmax"
+provenance_note = "bg_thresh=0.55 is independently sourced from this evaluator's own authoritative eval config (src/open_vocabulary_segmentation/configs/voc_bg/eval_voc_bg.yml, the V21 'evaluation_override' config-chain leaf selected via model_and_checkpoint.v21_eval_config), not copied from the COCO-Object identity. It happens to equal COCO-Object's own bg_thresh (also 0.55, from configs/coco_object/eval_coco_object.yml) for the same ViT-B/dinov2_vitb14_reg/vitb_mlp_infonce model family used by every e12 evaluator in this repository -- a verified coincidence of the shared model family, not an assumption. Other bg_thresh values present elsewhere in src/open_vocabulary_segmentation/configs/voc_bg/ (e.g. 0.01 in the generic voc_bg/eval.yml, 0.54 in the ViT-L variants) are NOT used by this identity's config chain and are explicitly not authoritative here."
+v20_applies = false
+v21_applies = true
+ignore_pixels_excluded_from_argmax = true
+
+[graph_and_propagation]
+statement = "Reads alpha/steps/affinity_power/maximum_rank/geometry directly from parent_identities.matched_identity at load time -- never redeclared here. k11 = literal first-11 prefix of the same canonical top-12 selection used for k12 (models.dinotext.cover_dr.finite_step_regime.build_matched_k11_from_k12), each independently row-renormalized. Exactly 320 finite power-iteration updates for both k11 and k12, no early stopping, no CGLS, no dense solve/inverse, no fallback solver. E3 is the raw pre-propagation snapshot (zero graph/propagation calls)."
+maximum_rank_source = "matched_identity.graph.maximum_rank"
+alpha_source = "matched_identity.propagation.alpha"
+steps_source = "matched_identity.propagation.steps"
+affinity_power_source = "matched_identity.graph.affinity_power"
+crop_source = "matched_identity.geometry.crop"
+stride_source = "matched_identity.geometry.stride"
+window_enumeration_source = "matched_identity.geometry.window_enumeration"
+
+[execution]
+shared_backbone_pass = true
+shared_scores = true
+shared_features = true
+shared_affinity = true
+shared_top12_selection = true
+snapshot_calls_per_window = 1
+topk_graph_calls_per_window = 1
+k11_prefix_calls_per_window = 1
+graph_normalizations_per_window = 2
+k11_propagations_per_window = 1
+k12_propagations_per_window = 1
+k11_updates_per_window = 320
+k12_updates_per_window = 320
+e3_propagations_per_window = 0
+second_model_pass_for_v20_v21 = false
+variant_order = ["v20_e3", "v20_k11", "v20_k12", "v21_e3", "v21_k11", "v21_k12"]
+
+[run_modes]
+pilot20_image_count = 20
+pilot100_image_count = 100
+full_image_count = 1449
+pilot20_schema_name = "talk2dino-voc2012-matched-evaluator-pilot20-result-v1"
+pilot100_schema_name = "talk2dino-voc2012-matched-evaluator-pilot100-result-v1"
+full_schema_name = "talk2dino-voc2012-matched-evaluator-full-result-v1"
+checkpoint_schema_name = "talk2dino-voc2012-matched-evaluator-checkpoint-v1"
+image_order_source = "voc2012_source_identity_canonical_validation_split_order"
+pilot_prefix_policy = "exact_prefix_of_canonical_order_first_n_images"
+
+[metrics]
+metric_names = ["aAcc", "mIoU", "mAcc"]
+unit = "percent_0_100"
+delta_unit = "percentage_points"
+precision_source = "full_precision_area_statistics_from_mmseg_pre_eval"
+sufficient_statistic_schema = "per_image_per_class_intersection_union_pred_gt_v20_and_v21"
+rounded_prettytable_forbidden = true
+minimum_metric_decimal_places = 6
+delta_fields = [
+    "delta_mIoU_v20_k11_minus_k12_percentage_points", "delta_mIoU_v20_k11_minus_e3_percentage_points",
+    "delta_mIoU_v20_k12_minus_e3_percentage_points", "delta_mIoU_v21_k11_minus_k12_percentage_points",
+    "delta_mIoU_v21_k11_minus_e3_percentage_points", "delta_mIoU_v21_k12_minus_e3_percentage_points",
+]
+
+[checkpoint]
+schema_name = "talk2dino-voc2012-matched-evaluator-checkpoint-v1"
+granularity = "one_complete_image_all_six_variants"
+serializes_gpu_tensors = false
+atomic_write_pattern = "temp_sibling_write_then_os_replace"
+corruption_detected_before_model_load = true
+
+[artifacts]
+per_image_stats_manifest_schema_name = "talk2dino-voc2012-matched-evaluator-per-image-stats-v1"
+per_image_stats_array_format = "npz_allow_pickle_false_int64"
+
+[verification]
+require_source_manifest_verified_before_cuda = true
+require_checkpoint_bytes_verified_before_cuda = true
+
+[prohibited]
+list = [
+    "target_dataset_training_or_finetuning",
+    "target_dataset_feature_pre_extraction",
+    "second_backbone_pass_for_v20_or_v21",
+    "independently_selected_k11_graph",
+    "independently_computed_v20_v21_foreground_scores",
+    "text_encoded_or_learned_background_class",
+    "cgls",
+    "dense_solve_or_inverse",
+    "solver_fallback",
+    "early_termination",
+    "arbitrary_max_images_for_authoritative_runs",
+    "pilot_result_accepted_as_full_result",
+    "hann_stitching",
+    "majority_vote_stitching",
+    "center_selection_stitching",
+    "sparse_delta_restitching",
+    "pamr",
+    "generic_main_eval_path_without_verified_adapter",
+    "mean_of_per_image_miou",
+    "coco_object_threshold_reused_without_independent_verification",
+]
