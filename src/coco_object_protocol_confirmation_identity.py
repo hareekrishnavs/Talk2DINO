@@ -10,6 +10,7 @@ materialization identity and cross-checked against the real manifest.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import subprocess
 import tomllib
@@ -68,7 +69,8 @@ IDENTITY_SECTION_KEYS = {
         {
             "eval_config_relative_path", "eval_base_config_relative_path", "model_constructor_relative_path",
             "constructor_class", "projection_config_relative_path", "projection_checkpoint_relative_path",
-            "template", "pamr", "with_bg_clean", "with_bg_clean_note", "resolved_configuration",
+            "projection_checkpoint_sha256", "template", "pamr", "with_bg_clean", "with_bg_clean_note",
+            "resolved_configuration",
         }
     ),
     "background_protocol": frozenset(
@@ -268,6 +270,7 @@ def load_identity(path: Path | None = None, *, repo_root: Path | None = None) ->
         )
     _require_relative_path(e3_config["projection_config_relative_path"], "e3_config.projection_config_relative_path")
     _require_relative_path(e3_config["projection_checkpoint_relative_path"], "e3_config.projection_checkpoint_relative_path")
+    _require_sha256(e3_config["projection_checkpoint_sha256"], "e3_config.projection_checkpoint_sha256")
     _require_exact_string(e3_config["template"], "e3_config.template")
     if _require_exact_bool(e3_config["pamr"], "e3_config.pamr") is not False:
         raise CocoObjectProtocolConfirmationIdentityError("e3_config.pamr must be false")
@@ -487,6 +490,30 @@ def validate_e3_configuration_binding(root: Path, identity: Mapping[str, Any]) -
     return resolved
 
 
+def validate_bridge_checkpoint_binding(root: Path, identity: Mapping[str, Any]) -> str:
+    """Hash the actual bridge/projection checkpoint FILE BYTES on disk and
+    require them to equal e3_config.projection_checkpoint_sha256. The
+    existing typed-configuration hash chain (validate_e3_configuration_
+    binding) only pins the checkpoint's PATH/config references, never its
+    content -- swapping the .pth file's bytes at the same path would pass
+    that check silently. This is the direct byte-level pin closing that
+    gap, mirroring the VOC2012 matched-evaluator identity's
+    model_and_checkpoint.projection_checkpoint_sha256 binding. CPU-only,
+    safe before any CUDA/model work."""
+    e3_config = identity["e3_config"]
+    checkpoint_path = root / e3_config["projection_checkpoint_relative_path"]
+    try:
+        observed = hashlib.sha256(checkpoint_path.read_bytes()).hexdigest()
+    except OSError as error:
+        raise CocoObjectProtocolConfirmationIdentityError(f"cannot read bridge checkpoint {checkpoint_path}: {error}") from error
+    expected = e3_config["projection_checkpoint_sha256"]
+    if observed != expected:
+        raise CocoObjectProtocolConfirmationIdentityError(
+            f"bridge checkpoint {checkpoint_path} SHA256 mismatch: identity declares {expected}, observed {observed}"
+        )
+    return observed
+
+
 def validate_live_class_order(dataset: Any, identity: Mapping[str, Any]) -> str:
     """Validate the LIVE dataset's CLASSES against the identity's declared
     class count/background position/digest, before any model inference and
@@ -565,6 +592,7 @@ def validate_static_configuration(
     matched_identity = _validate_matched_parent(root, identity)
     materialization_identity = _validate_materialization_parent(root, identity)
     validate_e3_configuration_binding(root, identity)
+    validate_bridge_checkpoint_binding(root, identity)
 
     return {
         "identity_name": identity["identity"]["name"],
@@ -594,6 +622,7 @@ __all__ = [
     "SUPPORTED_VARIANTS",
     "load_identity",
     "repository_root",
+    "validate_bridge_checkpoint_binding",
     "validate_e3_configuration_binding",
     "validate_live_class_order",
     "validate_static_configuration",

@@ -6,8 +6,6 @@
 #SBATCH --mem=8G
 #SBATCH --time=01:00:00
 #SBATCH --job-name=e12-coco-object-val-materialization
-#SBATCH --output=/scratch/haree/coco_object_protocol/slurm-materialize-%j.out
-#SBATCH --error=/scratch/haree/coco_object_protocol/slurm-materialize-%j.err
 #
 # CPU-only materialization of the 5000 COCO-Object val2017
 # '_instanceTrainIds.png' masks. Reuses the repository's own
@@ -19,11 +17,33 @@
 # this only prepares a prerequisite data artifact the existing
 # COCOObjectDataset/coco.py protocol already expects.
 #
-# Submission directory (/scratch/haree/coco_object_protocol) must already
-# exist before `sbatch` is invoked -- this script does not create it, and
-# never submits itself or any other job.
+# --account is overridable at submission time: sbatch --account=<acct> ...
+# --output/--error are intentionally left to SLURM's own default
+# (slurm-<jobid>.out in the submission directory) so this tracked script
+# never hardcodes a private filesystem path; override with
+# sbatch --output=... --error=... if a different location is wanted.
+#
+# Required environment variables (no defaults inside this script, and no
+# hardcoded private path anywhere in it):
+#   COCO_OBJECT_REPO_ROOT           -- path to this repository checkout
+#   TALK2DINO_VENV                  -- path to the project virtual environment
+#   COCO_OBJECT_REAL_DATA_ROOT      -- raw COCO-Stuff164k root (containing
+#                                       annotations/val2017 and images/val2017)
+#   COCO_OBJECT_MATERIALIZED_ROOT   -- writable root for the materialized
+#                                       masks/manifests/checkpoints this
+#                                       script produces
+#
+# The submission directory must already exist before `sbatch` is invoked.
+# This script creates only COCO_OBJECT_MATERIALIZED_ROOT (and its
+# checkpoints/manifests subdirectories) via mkdir -p, never assumes either
+# directory is pre-populated with prior job output.
 
 set -euo pipefail
+
+: "${COCO_OBJECT_REPO_ROOT:?set COCO_OBJECT_REPO_ROOT to the repository root before submitting}"
+: "${TALK2DINO_VENV:?set TALK2DINO_VENV to the project virtual environment before submitting}"
+: "${COCO_OBJECT_REAL_DATA_ROOT:?set COCO_OBJECT_REAL_DATA_ROOT to the raw COCO-Stuff164k root before submitting}"
+: "${COCO_OBJECT_MATERIALIZED_ROOT:?set COCO_OBJECT_MATERIALIZED_ROOT to a writable materialized-output root before submitting}"
 
 echo "=== e12 COCO-Object val2017 mask materialization ==="
 echo "Job ID:        ${SLURM_JOB_ID:-unknown}"
@@ -31,13 +51,12 @@ echo "Hostname:      $(hostname)"
 echo "Submit dir:    ${SLURM_SUBMIT_DIR:-unknown}"
 date -u +"Start (UTC): %Y-%m-%dT%H:%M:%SZ"
 
-REPO_ROOT="/project/6114407/haree/Talk2DINO"
+REPO_ROOT="${COCO_OBJECT_REPO_ROOT}"
 EXPECTED_BRANCH="e12-connectivity-analysis"
-VENV="/scratch/haree/venv/talk2dino-a100"
-SOURCE_JSON_UNUSED="/scratch/haree/coco_stuff164k/annotations_og/instances_val2017.json"  # NOT used by the canonical converter -- see docs/coco_object_val_materialization.md
-SOURCE_MASKS="/scratch/haree/coco_stuff164k/annotations/val2017"
-SOURCE_IMAGES="/scratch/haree/coco_stuff164k/images/val2017"
-OUTPUT_ROOT="/scratch/haree/coco_object_protocol"
+VENV="${TALK2DINO_VENV}"
+SOURCE_MASKS="${COCO_OBJECT_REAL_DATA_ROOT}/annotations/val2017"
+SOURCE_IMAGES="${COCO_OBJECT_REAL_DATA_ROOT}/images/val2017"
+OUTPUT_ROOT="${COCO_OBJECT_MATERIALIZED_ROOT}"
 CHECKPOINT="${OUTPUT_ROOT}/checkpoints/checkpoint-${SLURM_JOB_ID:-manual}.json"
 MANIFEST="${OUTPUT_ROOT}/manifests/manifest-${SLURM_JOB_ID:-manual}.json"
 

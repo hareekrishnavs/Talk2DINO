@@ -48,6 +48,7 @@ model_constructor_relative_path = "src/open_vocabulary_segmentation/models/dinot
 constructor_class = "DINOText"
 projection_config_relative_path = "configs/vitb_mlp_infonce_paired_soft_routing_tau010.yaml"
 projection_checkpoint_relative_path = "weights/vitb_mlp_infonce_paired_soft_routing_tau010.pth"
+projection_checkpoint_sha256 = "9632117c18613674eeddcb35f86193d37da203a9cbd837cf500c4121b5fa9942"
 template = "sub_imagenet_template"
 pamr = false
 with_bg_clean = true

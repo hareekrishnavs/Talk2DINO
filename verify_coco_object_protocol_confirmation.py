@@ -56,7 +56,7 @@ def _cmd_preflight(args: argparse.Namespace) -> int:
     identity = load_identity(args.identity, repo_root=root)
     result = validate_static_configuration(repo_root=root, identity_path=args.identity, check_git=True)
 
-    checks = ["configuration", "matched_parent", "materialization_parent"]
+    checks = ["configuration", "matched_parent", "materialization_parent", "bridge_checkpoint_binding"]
     if args.materialization_manifest is not None and args.data_root is not None and args.source_masks is not None and args.source_images is not None:
         manifest = parse_strict_json_document(args.materialization_manifest, label="materialization manifest")
         verification = identity["verification"]

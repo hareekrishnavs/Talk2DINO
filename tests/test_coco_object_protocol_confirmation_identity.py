@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT))
 from src.coco_object_protocol_confirmation_identity import (  # noqa: E402
     CocoObjectProtocolConfirmationIdentityError,
     load_identity,
+    validate_bridge_checkpoint_binding,
     validate_e3_configuration_binding,
     validate_static_configuration,
 )
@@ -497,4 +498,73 @@ def test_materialization_identity_name_alias_rejected(tmp_path):
     path = tmp_path / "identity.toml"
     path.write_text(_manual_toml_dump(document))
     with pytest.raises(CocoObjectProtocolConfirmationIdentityError):
+        validate_static_configuration(repo_root=ROOT, identity_path=path, check_git=False)
+
+
+# ---------------------------------------------------------------------
+# Bridge/projection checkpoint byte-level hash pin (validate_bridge_
+# checkpoint_binding): closes the gap where the pre-existing typed-
+# configuration hash chain only pins the checkpoint's PATH/config
+# references, never its actual file content.
+# ---------------------------------------------------------------------
+
+
+def test_projection_checkpoint_sha256_field_present_and_well_formed():
+    document = _load_raw()
+    value = document["e3_config"]["projection_checkpoint_sha256"]
+    assert isinstance(value, str)
+    assert len(value) == 64
+    assert all(c in "0123456789abcdef" for c in value)
+
+
+def test_projection_checkpoint_sha256_missing_field_rejected(tmp_path):
+    document = _load_raw()
+    del document["e3_config"]["projection_checkpoint_sha256"]
+    with pytest.raises(CocoObjectProtocolConfirmationIdentityError):
+        _write_and_load(tmp_path, document)
+
+
+def test_projection_checkpoint_sha256_wrong_format_rejected(tmp_path):
+    document = _load_raw()
+    document["e3_config"]["projection_checkpoint_sha256"] = "not-a-valid-sha256"
+    with pytest.raises(CocoObjectProtocolConfirmationIdentityError):
+        _write_and_load(tmp_path, document)
+
+
+def test_projection_checkpoint_sha256_uppercase_rejected(tmp_path):
+    document = _load_raw()
+    document["e3_config"]["projection_checkpoint_sha256"] = document["e3_config"]["projection_checkpoint_sha256"].upper()
+    with pytest.raises(CocoObjectProtocolConfirmationIdentityError):
+        _write_and_load(tmp_path, document)
+
+
+def test_validate_bridge_checkpoint_binding_accepts_real_checkpoint():
+    identity = load_identity(IDENTITY_PATH, repo_root=ROOT)
+    observed = validate_bridge_checkpoint_binding(ROOT, identity)
+    assert observed == identity["e3_config"]["projection_checkpoint_sha256"]
+
+
+def test_validate_bridge_checkpoint_binding_rejects_wrong_hash():
+    identity = load_identity(IDENTITY_PATH, repo_root=ROOT)
+    tampered = copy.deepcopy(identity)
+    tampered["e3_config"]["projection_checkpoint_sha256"] = "f" * 64
+    with pytest.raises(CocoObjectProtocolConfirmationIdentityError, match="SHA256 mismatch"):
+        validate_bridge_checkpoint_binding(ROOT, tampered)
+
+
+def test_validate_bridge_checkpoint_binding_rejects_missing_file(tmp_path):
+    identity = load_identity(IDENTITY_PATH, repo_root=ROOT)
+    with pytest.raises(CocoObjectProtocolConfirmationIdentityError, match="cannot read"):
+        validate_bridge_checkpoint_binding(tmp_path, identity)
+
+
+def test_validate_static_configuration_calls_bridge_checkpoint_binding(tmp_path):
+    """A checkpoint-content mismatch (identity hash tampered, everything
+    else genuine) must fail validate_static_configuration end-to-end --
+    not just the standalone validator function."""
+    document = _load_raw()
+    document["e3_config"]["projection_checkpoint_sha256"] = "e" * 64
+    path = tmp_path / "identity.toml"
+    path.write_text(_manual_toml_dump(document))
+    with pytest.raises(CocoObjectProtocolConfirmationIdentityError, match="SHA256 mismatch"):
         validate_static_configuration(repo_root=ROOT, identity_path=path, check_git=False)
