@@ -32,6 +32,7 @@ read-only.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import datetime
 import hashlib
 import json
@@ -189,6 +190,56 @@ def _per_image_stats_npz_path(manifest_path: Path) -> Path:
 def _image_order_digest(image_ids: list[str]) -> str:
     payload = json.dumps(image_ids, ensure_ascii=True).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _voc_physical_relative_image_filename(logical_voc_image_id: str, *, image_suffix: str) -> str:
+    """Construct the physical JPEGImages-relative filename for a VOC2012
+    image from its bare logical/checkpoint image ID and the source
+    identity's own authoritative image suffix (source_identity["source"]
+    ["image_suffix"], already validated equal to SUPPORTED_IMAGE_SUFFIX
+    by src.voc2012_dataset_identity.load_identity) -- never derived from
+    dataset.img_infos, the pipeline-resolved filename, or any other
+    value under check, which would make the physical-path reconciliation
+    circular. Rejects a malformed logical ID or suffix rather than
+    normalizing or silently repairing them."""
+    if type(logical_voc_image_id) is not str or not logical_voc_image_id or logical_voc_image_id != logical_voc_image_id.strip():
+        raise Voc2012MatchedEvaluatorIdentityError(
+            f"logical VOC image ID must be a non-empty, non-whitespace-padded string, got {logical_voc_image_id!r}"
+        )
+    if logical_voc_image_id.startswith("/"):
+        raise Voc2012MatchedEvaluatorIdentityError(f"logical VOC image ID must not be an absolute path, got {logical_voc_image_id!r}")
+    if "/" in logical_voc_image_id or "\\" in logical_voc_image_id:
+        raise Voc2012MatchedEvaluatorIdentityError(f"logical VOC image ID must not contain path separators, got {logical_voc_image_id!r}")
+    if logical_voc_image_id in (".", "..") or ".." in logical_voc_image_id:
+        raise Voc2012MatchedEvaluatorIdentityError(f"logical VOC image ID must not contain '..' traversal, got {logical_voc_image_id!r}")
+    if type(image_suffix) is not str or not image_suffix:
+        raise Voc2012MatchedEvaluatorIdentityError(f"VOC image suffix must be a non-empty string, got {image_suffix!r}")
+    if logical_voc_image_id.endswith(image_suffix):
+        raise Voc2012MatchedEvaluatorIdentityError(
+            f"logical VOC image ID {logical_voc_image_id!r} must not already end with the image suffix {image_suffix!r}"
+        )
+    return f"{logical_voc_image_id}{image_suffix}"
+
+
+def _extract_prepared_voc_image(
+    dataset: Any, dataset_index: int, *, logical_voc_image_id: str, image_suffix: str, extract_prepared_image_fn: Any,
+) -> Any:
+    """VOC-specific adapter over the shared
+    diagnostics.run_k11_k12_stability._extract_prepared_image: passes the
+    PHYSICAL (suffixed) relative filename for filename reconciliation,
+    then returns a PreparedDiagnosticImage whose image_id is the
+    original bare LOGICAL id -- the shared helper's own
+    reconcile_canonical_image_id call always echoes back exactly
+    whatever canonical_relative_id it was given, so without this it
+    would surface the suffixed filename to every downstream
+    checkpoint/result/per-image-stats consumer, which must stay
+    bare-ID-only. extract_prepared_image_fn is injected by the caller
+    (already lazily imported, torch-adjacent) rather than imported here,
+    so this function itself stays import-light and independently
+    testable."""
+    physical_relative_image_filename = _voc_physical_relative_image_filename(logical_voc_image_id, image_suffix=image_suffix)
+    prepared = extract_prepared_image_fn(dataset, dataset_index, canonical_image_id=physical_relative_image_filename)
+    return dataclasses.replace(prepared, image_id=logical_voc_image_id)
 
 
 def _verify_source_manifest_before_cuda(root: Path, manifest_path: Path, data_root: Path) -> Mapping[str, Any]:
@@ -458,7 +509,12 @@ def _run_evaluation(args: argparse.Namespace) -> int:
 
     while next_dataset_index < image_count:
         dataset_index = next_dataset_index
-        prepared = _extract_prepared_image(dataset_v21, dataset_index, canonical_image_id=expected_image_ids[dataset_index])
+        prepared = _extract_prepared_voc_image(
+            dataset_v21, dataset_index,
+            logical_voc_image_id=expected_image_ids[dataset_index],
+            image_suffix=source_identity["source"]["image_suffix"],
+            extract_prepared_image_fn=_extract_prepared_image,
+        )
         if prepared.image_id != expected_image_ids[dataset_index]:
             raise Voc2012MatchedEvaluatorIdentityError(
                 f"dataset[{dataset_index}] image_id {prepared.image_id!r} disagrees with the canonical order {expected_image_ids[dataset_index]!r}"
