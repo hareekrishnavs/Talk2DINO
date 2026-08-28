@@ -1,0 +1,313 @@
+format_version = "talk2dino-dfp-phase1a-protocol-identity-v1"
+
+# DFP ("Directed Finite-step Propagation") Phase 1A is a diagnostic
+# pre-registration, not a method implementation. It defines what will be
+# measured about the T=0 -> T=320 stitched-prediction dispute set on two
+# already-frozen, already-verified evaluation protocols (COCO-Stuff via
+# e12-matched-k11-k12-t320, ADE20K via e12-ade20k-matched-evaluator) --
+# never a new graph, propagation, model, or dataset. Phase 1A produces no
+# predictions, no subset manifests, no result artifacts, and selects no
+# Gate-3 method. See docs/dfp_phase1a_protocol.md for the full narrative.
+#
+# The [rwr].solver = "cgls" field cited from e3-canonical-directed-rwr
+# below is a HISTORICAL reproduction-target solver (E10), reused here
+# only to cross-validate alpha/top_k/affinity_power/checkpoint facts --
+# DFP's own recurrence is finite-step power iteration only (see
+# [propagation]), and CGLS/dense-solve/GMRES/fallback are explicitly
+# prohibited for DFP itself (see [prohibited]).
+
+[identity]
+name = "e13-dfp-phase1a-protocol"
+schema_version = "talk2dino-dfp-phase1a-protocol-identity-v1"
+description = "DFP Phase 1A pre-registration: freezes the T=0-vs-T=320 stitched-dispute diagnostic protocol (categories, oracle definitions, metrics, gates, structural-component preregistration, query/compute projection, numerical-validation policy) over the already-frozen COCO-Stuff (e12-matched-k11-k12-t320) and ADE20K (e12-ade20k-matched-evaluator) evaluation protocols. Implements no evaluator, no subset manifest, no result schema, and selects no inference method."
+required_ancestor_commit = "00392527937253f93b9f3fe36b76347b4a6f1eb0"
+working_branch = "dfp-phase1a-diagnostics"
+
+[parent_identities]
+matched_k11_k12_identity_path = "evaluation_identities/e12_matched_k11_k12_t320.toml"
+matched_k11_k12_identity_name = "e12-matched-k11-k12-t320"
+matched_k11_k12_identity_sha256 = "1f4eea731ae7b803a5e2d572d0a1f59b3275ec240d36061d03540706e3bbc259"
+e3_identity_path = "evaluation_identities/e3_paired_soft_routing.toml"
+e3_identity_name = "e3-paired-soft-routing"
+e3_identity_sha256 = "db9cb8d407d6b5770d13c2b6546a33008206ae44ebcdc55f6b7384813eec477c"
+rwr_identity_path = "evaluation_identities/e3_canonical_directed_rwr.toml"
+rwr_identity_name = "e3-canonical-directed-rwr"
+rwr_identity_sha256 = "da0eb69de586328b53aeea83a9a48cd089dd53666522e5d1d3d5237742dbd365"
+ade20k_source_identity_path = "evaluation_identities/e12_ade20k_dataset_source.toml"
+ade20k_source_identity_name = "e12-ade20k-dataset-source"
+ade20k_source_identity_sha256 = "7d66a555fff1e697434e76012bfd63ec6116f03f5a9f0185de96c86805fc6f6a"
+ade20k_evaluator_identity_path = "evaluation_identities/e12_ade20k_matched_evaluator.toml"
+ade20k_evaluator_identity_name = "e12-ade20k-matched-evaluator"
+ade20k_evaluator_identity_sha256 = "4b69435caf045026dc9edbbea8f26f4ba2394f4f28e3664c30cafa524808b5b0"
+required_relationship = "freezes_a_diagnostic_over_the_unmodified_matched_k11_k12_and_ade20k_matched_evaluator_protocols"
+
+[bridge_checkpoint]
+projection_class = "vitb_mlp_infonce_paired_soft_routing_tau010"
+relative_path = "weights/vitb_mlp_infonce_paired_soft_routing_tau010.pth"
+sha256 = "9632117c18613674eeddcb35f86193d37da203a9cbd837cf500c4121b5fa9942"
+bound_via = "e3-canonical-directed-rwr [checkpoint].sha256, cross-checked against e12-ade20k-matched-evaluator [e3_config].projection_checkpoint_sha256"
+frozen = true
+
+[coco_stuff_dataset]
+name = "COCO-Stuff 164k validation"
+source_authority = "e12-matched-k11-k12-t320 [dataset] (no separate coco-stuff source-identity file exists in this repository)"
+split = "val2017"
+images = 5000
+class_count = 171
+class_names_digest = "0d1caff40f22c2f8de07c9d3016f2521dea096ae8b51889a12d3511bc33a18e7"
+class_names_digest_algorithm = "sha256_json_dumps_ensure_ascii_list"
+class_names_source = "mmseg.datasets.COCOStuffDataset.CLASSES"
+dataset_type = "COCOStuffDataset"
+image_suffix = ".jpg"
+annotation_suffix = "_labelTrainIds.png"
+ignore_index = 255
+background_class_evaluated = false
+reduce_zero_label = false
+
+[ade20k_dataset]
+name = "ADE20K (ADEChallengeData2016) validation"
+source_authority = "e12-ade20k-dataset-source"
+split = "validation"
+images = 2000
+class_count = 150
+class_names_digest = "848bc88a8c2227b2c2cb61eb2ed6ca109de31775c80c21697765c020a86fb224"
+class_names_digest_algorithm = "sha256_json_dumps_ensure_ascii_list"
+class_names_source = "mmseg.datasets.ade.ADE20KDataset.CLASSES"
+dataset_type = "ADE20KDataset"
+image_suffix = ".jpg"
+annotation_suffix = ".png"
+ignore_index = 255
+background_class_evaluated = false
+reduce_zero_label = true
+
+[graph]
+directed = true
+row_stochastic = true
+maximum_rank = 12
+affinity_function = "relu_cosine_power"
+affinity_power = 3.0
+tie_break_rule = "stable_descending_argsort_lower_patch_index_wins"
+self_edge_policy = "none_for_ordinary_rows"
+fallback_row_policy = "zero_affinity_rows_receive_self_loop_weight_one_invariant_to_k"
+graph_symmetrization = false
+artificial_tie_perturbation = false
+canonical_k_variant = 12
+canonical_k_variant_note = "DFP's propagated baseline P uses the unmodified canonical top-12 directed graph (k12) -- the prior, unablated graph from which k11 is itself derived as a matched prefix per e12-matched-k11-k12-t320's own [identity] description. k11 remains available only as the existing connectivity-sensitivity comparator; it is never DFP's primary propagated field."
+
+[propagation]
+method = "finite_power_iteration"
+alpha = 0.98
+steps = 320
+initial_iterate = "S0"
+recurrence = "P_next = alpha * A_k12 @ P + (1 - alpha) * S0"
+early_stopping = false
+convergence_tolerance = "not_applicable"
+fallback_solver = "none"
+horizons = [0, 16, 32, 64, 320]
+horizon_note = "T=16, T=32, T=64 are snapshots captured from ONE continuous 320-step finite_step_propagate recurrence (via its existing snapshot_steps mechanism), never separate propagations restarted from S0. T=0 is the unpropagated unary snapshot (E3); T=320 is the final horizon already frozen by e12-matched-k11-k12-t320."
+primary_sensitivity_horizon = 32
+secondary_sensitivity_horizons = [16, 64]
+
+[score_interpolation_stitching]
+raw_score_stage = "pre_sigmoid_pre_upsample_pre_stitch"
+crop = [448, 448]
+stride = [224, 224]
+align_corners = true
+averaging = "uniform"
+window_enumeration = "sliding_window_geometry.SlidingWindowPlan.build (legacy clamped slide_inference grid, row-major flat index order)"
+clamping_policy = "back_shifted_clamp_to_image_bounds"
+hann = false
+majority_vote = false
+center_selection = false
+sparse_delta_restitching = false
+identical_across_horizons = true
+
+[dispute_protocol]
+decision_stage = "post_canonical_interpolation_and_stitching"
+a_definition = "lowest_index_argmax_of_S0_stitched_prediction"
+b_definition = "lowest_index_argmax_of_S320_stitched_prediction"
+tie_rule = "exact_argmax_ties_select_lowest_class_index"
+random_tie_break_allowed = false
+numpy_torch_tie_parity_required = true
+dispute_set_definition = "D = {x : a(x) != b(x)}, restricted to non-ignore evaluation pixels"
+
+[dispute_categories]
+harmful_washout = "GT(x) == a(x) and GT(x) != b(x)"
+beneficial_correction = "GT(x) == b(x) and GT(x) != a(x)"
+third_label_transition = "GT(x) not in {a(x), b(x)}"
+ignore = "GT(x) equals the dataset's authoritative ignore value"
+auroc_auprc_population = "GT(x) in {a(x), b(x)}"
+third_label_and_ignore_excluded_from_negative_class = true
+
+[oracle_definitions]
+propagated_baseline_P = "stitched final label map at T=320"
+unary_U = "stitched label map at T=0"
+oracle_O_P_rule = "begin with P; wherever U(x) == GT(x) and P(x) != GT(x), replace P(x) with U(x); retain P(x) everywhere else, including third-label-transition pixels"
+g_recover_definition = "G_recover = metric(O_P) - metric(P)"
+g_oracle_unary_definition = "G_oracle_unary = metric(O_P) - metric(U)"
+relational_identity = "G_oracle_unary = G_recover + (metric(P) - metric(U))"
+third_label_diagnostic_rule = "begin with P; only where GT(x) is neither a(x) nor b(x), replace b(x) with a(x); retain P(x) elsewhere"
+third_label_diagnostic_label = "GT-dependent diagnostic map, never a deployable method"
+
+[horizon_persistence]
+applies_to_horizons = [16, 32, 64]
+rule = "for a T=320 dispute a->b: retain b if the stitched T=t winner is also b, otherwise use unary a; outside T=320 disputes, retain the T=320 prediction unchanged"
+primary_horizon = 32
+sensitivity_horizons = [16, 64]
+
+[metric_contract]
+required_statistics = ["intersection", "union", "predicted_pixels", "ground_truth_pixels"]
+required_metrics = ["aAcc", "mAcc", "mIoU", "boundary_iou"]
+reported_metric_unit = "percent_0_100"
+difference_unit = "percentage_points"
+aggregation_rule = "dataset_level_sum_then_divide_full_precision_integer_sufficient_statistics"
+per_class_statistics_required = true
+prohibited_reductions = [
+    "mean_of_per_image_miou",
+    "summed_per_pixel_miou_contributions",
+    "union_weighted_proxy_gains",
+    "rounded_value_labeled_full_precision",
+]
+
+[boundary_iou]
+definition = "Cheng et al. 2021 Boundary IoU: IoU restricted to a normalized-width boundary band around the ground-truth/predicted region contours, computed via symmetric erosion of each mask by a pixel radius derived from a fraction of the region's diagonal (dilation-free erosion-based boundary extraction)."
+primary_width_convention = "normalized_boundary_width_fraction_of_object_diagonal"
+sensitivity_pixel_widths = [1, 2, 4]
+implementation_source_status = "not_yet_bound"
+implementation_source_note = "No Boundary IoU implementation exists anywhere in this repository or its installed mmseg/mmcv dependencies as of the required_ancestor_commit (independently searched, zero hits). Per this identity's own no-guessing policy, Phase 1A freezes only the mathematical convention above; binding a concrete authoritative implementation (repository-local or a vetted external one) is an explicit Step-2 decision, exactly like the 500-image subset manifests below -- never invented or locally reimplemented in this step."
+
+[gate_contract]
+oracle_unary_gate_threshold_percentage_points = 2.0
+recover_gate_threshold_percentage_points = 1.0
+gate_relation = "both thresholds evaluated on the SAME dataset d: G_oracle_unary(d) >= 2.0pp AND G_recover(d) >= 1.0pp"
+outcome_neither_dataset_passes_both = "stop DFP as an inference-method project"
+outcome_exactly_one_dataset_passes_both = "continue only with a regime-scoped claim restricted to that dataset"
+outcome_both_datasets_pass_both = "a cross-dataset method claim remains possible"
+cross_dataset_pass_requires_independent_evaluation = true
+
+[gate_expectations]
+expected_dispute_fraction_low = 0.05
+expected_dispute_fraction_high = 0.25
+dispute_fraction_too_small_threshold = 0.02
+dispute_fraction_too_small_consequence = "addressable set too small, stop"
+dispute_fraction_too_large_threshold = 0.40
+dispute_fraction_too_large_consequence = "reframe beyond rare flips"
+gt_in_ab_coverage_expected_minimum = 0.40
+t32_persistence_recovery_expected_maximum_fraction = 0.60
+t32_persistence_high_recovery_consequence = "if T=32 persistence reaches >=60% of oracle G_recover, provenance-based Phase 1B must beat it decisively to justify additional complexity"
+boundary_mass_reframe_threshold = 0.70
+boundary_mass_reframe_consequence = "if >70% of harmful-washout mass lies in the primary boundary band, Boundary IoU becomes the primary improvement metric and mIoU becomes secondary/preservation"
+expectations_are_soft_not_hard_validity_checks = true
+
+[run_modes]
+coco_stuff_500_source_authority = "coco_stuff_dataset"
+coco_stuff_500_required_unique_count = 500
+ade20k_500_source_authority = "ade20k_dataset"
+ade20k_500_required_unique_count = 500
+run_mode_names = ["coco_stuff_500", "ade20k_500"]
+
+[subset_selection_policy]
+selection_method = "deterministic_multilabel_stratification"
+input_domain = "canonical_validation_ids_in_source_order"
+tie_break_method = "sha256_based_deterministic"
+required_unique_count = 500
+manifest_must_contain = [
+    "ordered_id_digest",
+    "dataset_source_identity_sha256",
+    "class_presence_summary",
+]
+manifest_private_paths_forbidden = true
+manifest_must_be_immutably_committed_before_predictions = true
+concrete_manifest_ids_bound_in_this_identity = false
+concrete_manifest_binding_stage = "step_2"
+
+[structural_components]
+component_source = "canonical_stitched_unary_(T=0)_field"
+primary_connectivity = 8
+sensitivity_connectivity = 4
+tie_rule = "lowest_class_index"
+component_scope = "global_across_the_full_stitched_image_never_per_sliding_window"
+soft_membership_formula = "M[r,w,j] = (sum over x in component r of A[w,x,j]) / (sum over all x of A[w,x,j])"
+membership_operator = "existing_canonical_interpolation_and_stitching_operator_A"
+membership_dense_matrix_forbidden = true
+adjoint_identity_required = true
+membership_nonnegative_required = true
+membership_sums_to_one_per_window_patch_source_required = true
+flush_edge_windows_included = true
+a_transpose_ones_cached_invariant = "geometry_only"
+
+[structural_component_area]
+formula = "area_patch_equivalent = component_pixel_area / projected_patch_pitch_area"
+projected_pitch_source = "exact_production_geometry"
+primary_microcomponent_threshold_patch_equivalents = 4.0
+sensitivity_thresholds_patch_equivalents = [1.0, 2.0, 4.0, 8.0]
+source_copy_mass_is_diagnostic_only = true
+source_copy_mass_is_not_physical_component_area = true
+phase1a_propagates_component_masks = false
+
+[query_compute_projection]
+q_w_definition = "Q_w = { a(x), b(x) : x is a stitched T=320 dispute and window w contributes to x }"
+required_statistics = ["mean", "median", "p90", "p95", "p99", "maximum"]
+required_statistics_subject = "|Q_w|_per_window"
+components_with_nonzero_soft_membership_per_window_required = true
+projected_width_formula = "R_w * |Q_w|"
+total_and_worst_window_projected_width_required = true
+projected_peak_memory_for_phase1b_required = true
+adjoint_or_masked_forward_router_defined_in_this_task = false
+
+[numerical_validation_policy]
+canonical_and_decomposed_same_device_and_precision_required = true
+conservation_summary_accumulation_dtype = "float64"
+validation_levels = ["seed", "window", "stitched_field", "margin"]
+residual_kinds_required = ["absolute", "relative"]
+tolerance_source = "separate_frozen_200_window_numerical_calibration_artifact"
+tolerance_invented_in_this_identity = false
+calibration_artifact_created_in_this_task = false
+calibration_metadata_and_tolerance_must_be_versioned_before_full_diagnostic_execution = true
+
+[prohibited]
+list = [
+    "training_or_fine_tuning",
+    "optimizer_or_gradient_use",
+    "target_feature_extraction_as_separate_preprocessing_stage",
+    "label_derived_prediction_construction",
+    "masked_component_propagation",
+    "semantic_supercohort_propagation",
+    "phase1b_provenance_computation",
+    "gate3_selection",
+    "learned_gates",
+    "morphology",
+    "tuned_confidence_thresholds",
+    "model_or_checkpoint_creation",
+    "changing_graph_or_recurrence_mathematics",
+    "cgls",
+    "gmres",
+    "dense_inverse_or_solve",
+    "solver_fallback",
+    "pamr",
+    "creating_500_image_subsets",
+    "implementing_phase1a_execution",
+    "implementing_masked_propagation",
+    "inference",
+    "cuda_initialization",
+    "dataset_access_or_modification",
+]
+ground_truth_permitted_uses = [
+    "evaluation",
+    "stratification_or_class_presence_metadata",
+    "oracle_diagnostics",
+    "preregistered_analysis",
+]
+
+[future_step_bindings]
+description = "Fields explicitly deferred to later DFP steps, never guessed or invented here."
+step2_items = [
+    "coco_stuff_500 concrete manifest (ordered IDs, ordered-ID digest)",
+    "ade20k_500 concrete manifest (ordered IDs, ordered-ID digest)",
+    "boundary_iou concrete implementation source binding",
+    "200-window numerical-calibration artifact and its derived tolerance",
+]
+step1b_items = [
+    "adjoint/masked-forward router",
+    "Phase 1B provenance computation",
+]
