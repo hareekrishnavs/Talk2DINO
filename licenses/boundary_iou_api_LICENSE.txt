@@ -1,0 +1,46 @@
+This file reproduces the copyright notice and BSD-2-Clause license terms
+that apply to the `mask_to_boundary` function reproduced (translated
+line-for-line, unmodified in behavior) in
+`src/dfp_phase1a_analysis.py::_official_mask_to_boundary`, as required by
+those terms for any redistribution of the source code.
+
+Source: https://github.com/bowenc0221/boundary-iou-api
+Pinned commit: 37d25586a677b043ed585f10e5c42d4e80176ea9
+Upstream license file: license.txt
+Upstream license file SHA-256: 6da6c74bb714b3f7fe7eb6b817e42dd59ebfca15f292f54a9a7ad33a6a872863
+
+This excerpt reproduces only the top-level license block that covers
+`boundary_iou/utils/boundary_utils.py` (the file `mask_to_boundary` is
+defined in). The upstream `license.txt` additionally bundles separate,
+unrelated license blocks for COCOAPI, LVISAPI, PANOPTICAPI, and the
+Cityscapes Dataset -- none of that code is used, copied, or translated
+anywhere in this repository, so those blocks are not reproduced here.
+
+---------------------------------------------------------------------
+
+Copyright (c) 2021, Bowen Cheng
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+The views and conclusions contained in the software and documentation are those
+of the authors and should not be interpreted as representing official policies,
+either expressed or implied, of the FreeBSD Project.

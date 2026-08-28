@@ -1,0 +1,68 @@
+format_version = "talk2dino-dfp-phase1a-boundary-iou-identity-v1"
+
+# Additive Boundary IoU authority supplement. Never rewrites or
+# re-binds evaluation_identities/e13_dfp_phase1a_protocol.toml (both
+# frozen Step-2 subset manifests pin that file's exact SHA-256; changing
+# even one byte of it would break their already-committed bindings).
+# This file exists solely to resolve the protocol's own, explicitly
+# deferred [boundary_iou].implementation_source_status = "not_yet_bound"
+# -- it is refused by src.dfp_phase1a_boundary_iou_identity.load_identity
+# unless the live protocol identity still states exactly that deferred
+# status, proving this supplement resolves a deliberate gap rather than
+# silently overriding an authority that was already bound differently.
+
+[identity]
+name = "e13-dfp-phase1a-boundary-iou"
+schema_version = "talk2dino-dfp-phase1a-boundary-iou-identity-v1"
+description = "Additive Boundary IoU authority supplement for DFP Phase 1A: binds the pinned Cheng et al. 2021 boundary-iou-api mask_to_boundary primitive (exact source commit, function, and SHA-256) plus a repository-defined classwise semantic aggregation on top of it, resolving the frozen e13-dfp-phase1a-protocol identity's own deferred [boundary_iou].implementation_source_status = \"not_yet_bound\"."
+resolves_deferred_authority = "e13-dfp-phase1a-protocol [boundary_iou].implementation_source_status == not_yet_bound"
+
+[protocol_binding]
+protocol_identity_relative_path = "evaluation_identities/e13_dfp_phase1a_protocol.toml"
+protocol_identity_sha256 = "d53cfe6b9632b0fb24a90ed1c1482a00b83dd64255aaa595b0af141cab7febe7"
+required_deferred_status = "not_yet_bound"
+
+[paper]
+title = "Boundary IoU: Improving Object-Centric Image Segmentation Evaluation"
+authors = "Bowen Cheng et al."
+venue = "CVPR 2021"
+arxiv_id = "2103.16562"
+doi = "10.1109/CVPR46437.2021.01508"
+
+[official_source]
+repository_url = "https://github.com/bowenc0221/boundary-iou-api"
+repository_commit = "37d25586a677b043ed585f10e5c42d4e80176ea9"
+source_relative_path = "boundary_iou/utils/boundary_utils.py"
+source_function_name = "mask_to_boundary"
+source_sha256 = "a495cc15fdbded38681edef30b29c62014e81e864f0e68ca6062ce42db51fd9c"
+license_relative_path = "license.txt"
+license_sha256 = "6da6c74bb714b3f7fe7eb6b817e42dd59ebfca15f292f54a9a7ad33a6a872863"
+
+[primitive]
+dilation_ratio_primary = 0.02
+padding_value = 0
+padding_width = 1
+kernel_height = 3
+kernel_width = 3
+kernel_dtype = "uint8"
+erosion_backend = "cv2.erode"
+round_convention = "python_builtin_round_half_to_even_then_int_cast"
+minimum_dilation_iterations = 1
+fixed_sensitivity_widths = [1, 2, 4]
+mask_dtype = "uint8"
+boundary_formula = "boundary = mask - eroded_mask"
+
+[local_reproduction]
+license_notice_relative_path = "licenses/boundary_iou_api_LICENSE.txt"
+reproduction_kind = "line_for_line_translation_no_behavior_change"
+reproduced_function_relative_path = "src/dfp_phase1a_analysis.py"
+reproduced_function_name = "_official_mask_to_boundary"
+
+[semantic_extension]
+label = "classwise_semantic_boundary_iou_using_cheng_et_al_boundary_primitive"
+is_official_semantic_definition = false
+statement = "This classwise, ignore-aware, dataset-level-aggregated semantic Boundary IoU is a repository-defined extension built on top of the pinned official mask_to_boundary primitive. The upstream boundary-iou-api package itself defines only the binary mask-to-boundary primitive, never a classwise semantic-segmentation aggregation; this identity's own statement is the sole authority for that aggregation and must never be attributed to the upstream paper or repository."
+ignore_policy = "GT and predicted class masks are both forced false at ignored pixels before boundary extraction; the resulting boundary masks are additionally masked by validity after extraction; predicted values inside ignored pixels never affect any statistic"
+zero_union_policy = "class boundary IoU is undefined when its total accumulated boundary_union equals zero; mean boundary IoU averages only classes with nonzero total boundary_union; if every class has zero total boundary_union after aggregation, metric computation is rejected with a named error rather than returning a misleading value"
+metric_unit = "percent_0_100"
+aggregation_rule = "dataset_level_sum_then_divide_full_precision_integer_sufficient_statistics"
