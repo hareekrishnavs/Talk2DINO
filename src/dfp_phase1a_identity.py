@@ -674,6 +674,18 @@ def _validate_score_interpolation_stitching_block(block: Mapping[str, Any]) -> N
         raise DfpPhase1aIdentityError("score_interpolation_stitching.identical_across_horizons must be true")
 
 
+def validate_score_interpolation_stitching_block(block: Mapping[str, Any]) -> None:
+    """Public delegate to the canonical [score_interpolation_stitching]
+    block validator, so other modules (e.g. a DFP-specific horizon
+    stitching binding layer) can independently re-validate a
+    caller-supplied stitching block -- crop, stride, align_corners,
+    averaging/hann/majority_vote/center_selection/sparse_delta_restitching,
+    window_enumeration, raw_score_stage, identical_across_horizons --
+    against this single authority without duplicating any of its pinned
+    values."""
+    _validate_score_interpolation_stitching_block(block)
+
+
 def _validate_dispute_protocol_block(block: Mapping[str, Any]) -> None:
     _require_canonical_string(block["decision_stage"], "dispute_protocol", "decision_stage")
     _require_canonical_string(block["a_definition"], "dispute_protocol", "a_definition")
@@ -1069,4 +1081,5 @@ __all__ = [
     "validate_static_configuration",
     "validate_graph_block",
     "validate_propagation_block",
+    "validate_score_interpolation_stitching_block",
 ]
