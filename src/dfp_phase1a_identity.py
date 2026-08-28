@@ -614,6 +614,15 @@ def _validate_graph_block(block: Mapping[str, Any]) -> None:
     _require_canonical_string(block["canonical_k_variant_note"], "graph", "canonical_k_variant_note")
 
 
+def validate_graph_block(block: Mapping[str, Any]) -> None:
+    """Public delegate to the canonical [graph] block validator, so other
+    modules (e.g. a DFP-specific recurrence binding layer) can
+    independently re-validate a caller-supplied graph block -- including
+    ``canonical_k_variant`` -- against this single authority without
+    duplicating any of its pinned values."""
+    _validate_graph_block(block)
+
+
 def _validate_propagation_block(block: Mapping[str, Any]) -> None:
     _require_canonical_string(block["method"], "propagation", "method")
     if _require_exact_float(block["alpha"], "propagation.alpha") != 0.98:
@@ -635,6 +644,16 @@ def _validate_propagation_block(block: Mapping[str, Any]) -> None:
     secondary = _require_exact_int_list(block["secondary_sensitivity_horizons"], "propagation.secondary_sensitivity_horizons")
     if secondary != (16, 64):
         raise DfpPhase1aIdentityError(f"propagation.secondary_sensitivity_horizons must be exactly [16, 64], observed {list(secondary)}")
+
+
+def validate_propagation_block(block: Mapping[str, Any]) -> None:
+    """Public delegate to the canonical [propagation] block validator, so
+    other modules (e.g. a DFP-specific recurrence binding layer) can
+    independently re-validate a caller-supplied propagation block --
+    alpha, steps, horizons, early_stopping, fallback_solver, and the rest
+    -- against this single authority without duplicating any of its
+    pinned values."""
+    _validate_propagation_block(block)
 
 
 def _validate_score_interpolation_stitching_block(block: Mapping[str, Any]) -> None:
@@ -1048,4 +1067,6 @@ __all__ = [
     "repository_root",
     "validate_bridge_checkpoint_binding",
     "validate_static_configuration",
+    "validate_graph_block",
+    "validate_propagation_block",
 ]
