@@ -698,6 +698,16 @@ def _validate_dispute_protocol_block(block: Mapping[str, Any]) -> None:
     _require_canonical_string(block["dispute_set_definition"], "dispute_protocol", "dispute_set_definition")
 
 
+def validate_dispute_protocol_block(block: Mapping[str, Any]) -> None:
+    """Public delegate to the canonical [dispute_protocol] block
+    validator, so other modules (e.g. a DFP-specific compute-projection
+    estimator) can independently re-validate a caller-supplied dispute
+    block -- decision_stage, a/b definitions, tie_rule,
+    dispute_set_definition, and the rest -- against this single
+    authority without duplicating any of its pinned values."""
+    _validate_dispute_protocol_block(block)
+
+
 def _validate_dispute_categories_block(block: Mapping[str, Any]) -> None:
     for field in ("harmful_washout", "beneficial_correction", "third_label_transition", "ignore", "auroc_auprc_population"):
         _require_canonical_string(block[field], "dispute_categories", field)
@@ -919,6 +929,16 @@ def _validate_query_compute_projection_block(block: Mapping[str, Any]) -> None:
         raise DfpPhase1aIdentityError("query_compute_projection.adjoint_or_masked_forward_router_defined_in_this_task must be false")
 
 
+def validate_query_compute_projection_block(block: Mapping[str, Any]) -> None:
+    """Public delegate to the canonical [query_compute_projection] block
+    validator, so other modules (e.g. a DFP-specific compute-projection
+    estimator) can independently re-validate a caller-supplied
+    query_compute_projection block -- q_w_definition, required_
+    statistics, projected_width_formula, and the rest -- against this
+    single authority without duplicating any of its pinned values."""
+    _validate_query_compute_projection_block(block)
+
+
 def _validate_numerical_validation_policy_block(block: Mapping[str, Any]) -> None:
     if _require_exact_bool(
         block["canonical_and_decomposed_same_device_and_precision_required"], "numerical_validation_policy.canonical_and_decomposed_same_device_and_precision_required"
@@ -1106,4 +1126,6 @@ __all__ = [
     "validate_score_interpolation_stitching_block",
     "validate_structural_components_block",
     "validate_structural_component_area_block",
+    "validate_dispute_protocol_block",
+    "validate_query_compute_projection_block",
 ]
