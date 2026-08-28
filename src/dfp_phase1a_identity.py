@@ -852,6 +852,17 @@ def _validate_structural_components_block(block: Mapping[str, Any]) -> None:
     _require_canonical_string(block["a_transpose_ones_cached_invariant"], "structural_components", "a_transpose_ones_cached_invariant")
 
 
+def validate_structural_components_block(block: Mapping[str, Any]) -> None:
+    """Public delegate to the canonical [structural_components] block
+    validator, so other modules (e.g. a DFP-specific global unary
+    component binding layer) can independently re-validate a
+    caller-supplied structural_components block -- component_source,
+    primary_connectivity, tie_rule, component_scope, and the rest --
+    against this single authority without duplicating any of its pinned
+    values."""
+    _validate_structural_components_block(block)
+
+
 def _validate_structural_component_area_block(block: Mapping[str, Any]) -> None:
     _require_canonical_string(block["formula"], "structural_component_area", "formula")
     _require_canonical_string(block["projected_pitch_source"], "structural_component_area", "projected_pitch_source")
@@ -870,6 +881,17 @@ def _validate_structural_component_area_block(block: Mapping[str, Any]) -> None:
         raise DfpPhase1aIdentityError("structural_component_area.source_copy_mass_is_not_physical_component_area must be true")
     if _require_exact_bool(block["phase1a_propagates_component_masks"], "structural_component_area.phase1a_propagates_component_masks") is not False:
         raise DfpPhase1aIdentityError("structural_component_area.phase1a_propagates_component_masks must be false")
+
+
+def validate_structural_component_area_block(block: Mapping[str, Any]) -> None:
+    """Public delegate to the canonical [structural_component_area] block
+    validator, so other modules (e.g. a DFP-specific global unary
+    component binding layer) can independently re-validate a
+    caller-supplied structural_component_area block -- formula,
+    projected_pitch_source, primary_microcomponent_threshold_patch_
+    equivalents, and the rest -- against this single authority without
+    duplicating any of its pinned values."""
+    _validate_structural_component_area_block(block)
 
 
 def _validate_query_compute_projection_block(block: Mapping[str, Any]) -> None:
@@ -1082,4 +1104,6 @@ __all__ = [
     "validate_graph_block",
     "validate_propagation_block",
     "validate_score_interpolation_stitching_block",
+    "validate_structural_components_block",
+    "validate_structural_component_area_block",
 ]
