@@ -1,0 +1,112 @@
+format_version = "talk2dino-dfp-phase1a-artifacts-identity-v1"
+
+# Storage-only artifact-schema authority for DFP Phase 1A Step 10. This
+# identity defines representation and validation only: checkpoint/result
+# document schemas, NPZ container member schemas, path policy, and atomic
+# install policy. It never rewrites or re-binds
+# evaluation_identities/e13_dfp_phase1a_protocol.toml (both frozen Step-2
+# subset manifests pin that file's exact SHA-256), and it defines no
+# scientific quantity: D, Q_w, R_w, horizons, recurrence, components,
+# memberships, compute formulas, oracle definitions, gates, and metrics
+# all remain exactly as already frozen by the protocol and by Steps 3-9.
+# The per-image statistics this identity's checkpoint schema persists are
+# exactly the aggregate query/compute-projection quantities the protocol's
+# own [query_compute_projection] section already requires to be reported
+# (|Q_w| statistics, R_w-with-nonzero-membership, projected width, total
+# and worst-window projected width, projected peak memory) plus the
+# dispute-set size Step 3 already defines -- nothing here is invented.
+
+[identity]
+name = "e13-dfp-phase1a-artifacts"
+schema_version = "talk2dino-dfp-phase1a-artifacts-identity-v1"
+description = "Storage-only artifact-schema authority for DFP Phase 1A: binds the frozen scientific protocol, both frozen 500-image subset manifests, and the relevant parent/model identities, then defines the checkpoint document schema, the per-image compute-projection-statistics NPZ schema, the final-result document schema, path policy, and atomic generation/install policy for future Phase 1A diagnostic runs. Implements no evaluator, no inference, and no scientific quantity."
+storage_representation_only = true
+
+[protocol_binding]
+protocol_identity_relative_path = "evaluation_identities/e13_dfp_phase1a_protocol.toml"
+protocol_identity_sha256 = "d53cfe6b9632b0fb24a90ed1c1482a00b83dd64255aaa595b0af141cab7febe7"
+
+[subset_manifest_binding]
+coco_stuff_manifest_relative_path = "evaluation_subsets/dfp_phase1a_coco_stuff_500.json"
+coco_stuff_manifest_sha256 = "092a0af90bee1d2f3e407ac0b6ebfafae5a83d251bb0e234cbc7d933d91e5ee0"
+ade20k_manifest_relative_path = "evaluation_subsets/dfp_phase1a_ade20k_500.json"
+ade20k_manifest_sha256 = "eaf9923b906a22cc89882967359ac1a1764bdb34dfcdbad074ecb5450b8c7328"
+
+[parent_identity_binding]
+matched_k11_k12_identity_sha256 = "1f4eea731ae7b803a5e2d572d0a1f59b3275ec240d36061d03540706e3bbc259"
+rwr_identity_sha256 = "da0eb69de586328b53aeea83a9a48cd089dd53666522e5d1d3d5237742dbd365"
+ade20k_source_identity_sha256 = "7d66a555fff1e697434e76012bfd63ec6116f03f5a9f0185de96c86805fc6f6a"
+ade20k_evaluator_identity_sha256 = "4b69435caf045026dc9edbbea8f26f4ba2394f4f28e3664c30cafa524808b5b0"
+bridge_checkpoint_relative_path = "weights/vitb_mlp_infonce_paired_soft_routing_tau010.pth"
+bridge_checkpoint_sha256 = "9632117c18613674eeddcb35f86193d37da203a9cbd837cf500c4121b5fa9942"
+required_ancestor_commit = "00392527937253f93b9f3fe36b76347b4a6f1eb0"
+
+[dataset_binding]
+coco_stuff_class_count = 171
+coco_stuff_class_names_digest = "0d1caff40f22c2f8de07c9d3016f2521dea096ae8b51889a12d3511bc33a18e7"
+ade20k_class_count = 150
+ade20k_class_names_digest = "848bc88a8c2227b2c2cb61eb2ed6ca109de31775c80c21697765c020a86fb224"
+horizon_order = [0, 16, 32, 64, 320]
+run_mode_names = ["coco_stuff_500", "ade20k_500"]
+
+[checkpoint_schema]
+schema_name = "talk2dino-dfp-phase1a-checkpoint-v1"
+schema_version = 1
+top_level_key_count = 25
+resume_prefix_rule = "completed_image_ids == selected_ids[:next_dataset_index]"
+progress_invariant = "next_dataset_index == len(completed_image_ids)"
+zero_row_representation = "valid; every per-image NPZ array has shape (0,) at next_dataset_index == 0, never constructed via np.stack([])"
+state_transitions = [
+    "incomplete: next_dataset_index < image_count_expected, complete = false, final_result_produced = false",
+    "complete: next_dataset_index == image_count_expected, complete = true, final_result_produced = false",
+    "finalized: complete = true, final_result_produced = true (only settable after the final result installs and self-verifies)",
+]
+completion_forbids_further_resume = true
+
+[per_image_stats_schema]
+schema_name = "talk2dino-dfp-phase1a-per-image-stats-v1"
+schema_version = 1
+row_axis = "image_index_0_based_matching_the_checkpoints_completed_image_ids_prefix_exactly"
+int64_member_names = [
+    "dataset_indices", "dispute_pixel_count", "evaluated_pixel_count", "window_count",
+    "zero_dispute_window_count", "total_node_count", "total_nonzero_count",
+    "total_baseline_recurrence_flops", "total_projected_recurrence_flops",
+    "total_chunk_invocations", "total_projected_width", "maximum_projected_width",
+    "maximum_peak_planned_bytes",
+]
+float64_member_names = ["q_w_mean", "q_w_median", "q_w_p90", "q_w_p95", "q_w_p99", "q_w_maximum"]
+excluded_by_design = [
+    "full_stitched_score_maps", "component_id_masks", "soft_membership_dense_matrices",
+    "per_window_variable_length_arrays",
+]
+excluded_by_design_reason = "the protocol requires only aggregate/statistical persistence of query-compute-projection quantities (mean/median/p90/p95/p99/maximum of |Q_w|, total and worst-window projected width, projected peak memory) and explicitly marks phase1a_propagates_component_masks = false; per-window arrays would additionally have a variable length across images (window count depends on each image's real height/width) and cannot form a fixed-shape NPZ column"
+
+[result_schema]
+schema_name = "talk2dino-dfp-phase1a-result-v1"
+schema_version = 1
+final_requires = [
+    "checkpoint.complete == true at the exact expected image count",
+    "checkpoint.completed_image_ids equals the complete frozen selected_ids list",
+    "every referenced artifact (per-image-stats manifest + NPZ) is present and hash-verified",
+    "checkpoint/result/artifact hashes reconcile relationally",
+    "no unresolved temporary or partial generation state remains",
+]
+excludes_in_this_step = [
+    "oracle_definitions_metrics (G_recover, G_oracle_unary)",
+    "gate_contract_outcomes",
+    "metric_contract_metrics (aAcc, mAcc, mIoU, boundary_iou)",
+]
+excludes_reason = "Step 10 provides storage/validation infrastructure only; no Phase 1A diagnostic driver exists yet to compute GT-dependent metrics or gate outcomes, so this step's result schema stores only the run's compute-projection summary and completion state, never a speculative metrics or gate section"
+
+[path_policy]
+allowed_path_kinds = ["repository_relative_logical_path", "safe_basename_no_directory_component"]
+forbidden = [
+    "absolute_path", "parent_traversal_dotdot", "empty_path_component", "forbidden_dot_component",
+    "drive_qualified_path", "backslash_traversal", "nul_byte", "path_escaping_artifact_root_after_resolution",
+    "unexpected_symlink_escape", "private_cluster_or_user_path",
+]
+canonical_image_id_distinct_from_physical_filename = true
+
+[atomic_write_policy]
+checkpoint_install = "write_verified_candidate_files_to_unpredictable_task_specific_temp_names_in_the_destination_filesystem_then_os_replace_the_checkpoint_pointer_last_after_full_self_verification_previous_valid_checkpoint_preserved_until_the_new_candidate_verifies_orphan_temp_files_removed_on_any_failure"
+result_install = "build_the_complete_result_in_a_fresh_sibling_staging_directory_verify_every_file_and_every_cross_file_hash_then_atomically_rename_the_directory_into_place_reject_cleanly_if_the_destination_already_exists_no_partial_multi_file_replacement"
