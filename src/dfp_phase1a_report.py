@@ -90,6 +90,19 @@ def _require_sha256(value: Any, label: str) -> str:
     return token
 
 
+def _checkpoint_authority_field(checkpoint: Any, key: str) -> Any:
+    """Best-effort extraction of one of ``checkpoint``'s own fields, used
+    ONLY as a fallback authority for :func:`validate_checkpoint_structure`
+    below when ``result`` carries no corresponding field of its own --
+    safe even when ``checkpoint`` is not yet known to be a well-formed
+    mapping, since ``validate_checkpoint_structure``'s own closed-mapping
+    check (its first statement) rejects any malformed checkpoint --
+    missing, renamed, extra, or wrong-typed top-level key -- before ever
+    comparing an authority value against anything. Never raises
+    ``KeyError``; never mutates ``checkpoint``."""
+    return checkpoint.get(key) if isinstance(checkpoint, Mapping) else None
+
+
 def validate_result_structure(result: Mapping[str, Any], *, checkpoint: Mapping[str, Any], checkpoint_sha256: str) -> None:
     """Sole authority for the final-result document's schema/binding/
     completeness checks. A result may declare ``complete=true`` /
@@ -103,6 +116,41 @@ def validate_result_structure(result: Mapping[str, Any], *, checkpoint: Mapping[
         raise DfpPhase1aReportError(f"result.schema must be exactly {RESULT_SCHEMA_NAME!r}")
     if _require_int(result["schema_version"], "result.schema_version", minimum=1) != RESULT_SCHEMA_VERSION:
         raise DfpPhase1aReportError(f"result.schema_version must be exactly {RESULT_SCHEMA_VERSION}")
+
+    # The embedded checkpoint must receive the SAME structural validation
+    # a standalone checkpoint gets -- closed key set, required fields,
+    # unknown-field rejection, exact types, SHA/Git-identity formats,
+    # counts, horizons, class bindings, state flags -- before the first
+    # direct `checkpoint[...]` access below. This function never reloads
+    # a live identity file or an NPZ: the relational authorities
+    # "available at this layer" are `result`'s own already-closed-key-set
+    # -checked fields (the closed-mapping check just above guarantees
+    # every one of these keys exists, so plain indexing is safe even
+    # though their individual values are not yet format-checked) for
+    # every authority `result` itself carries (artifact-schema/protocol/
+    # subset-manifest identity, run_mode, image_count_expected); for the
+    # two authorities `result`'s own schema never carries at all
+    # (bridge_checkpoint_sha256, required_ancestor_commit -- Step 10
+    # deliberately excludes these from the result document), the
+    # checkpoint's own field is the only authority available at this
+    # layer, used purely to exercise the structural/format checks for
+    # those two. Agreement between `result` and `checkpoint`'s
+    # corresponding fields remains the unchanged, separate relational
+    # check performed explicitly below (now redundant-but-harmless for
+    # the fields already cross-checked here).
+    try:
+        validate_checkpoint_structure(
+            checkpoint,
+            artifact_schema_identity_sha256=result["artifact_schema_identity_sha256"],
+            protocol_identity_sha256=result["protocol_identity_sha256"],
+            subset_manifest_sha256=result["subset_manifest_sha256"],
+            bridge_checkpoint_sha256=_checkpoint_authority_field(checkpoint, "bridge_checkpoint_sha256"),
+            required_ancestor_commit=_checkpoint_authority_field(checkpoint, "required_ancestor_commit"),
+            run_mode=result["run_mode"] if type(result["run_mode"]) is str else None,
+            image_count_expected=result["image_count_expected"] if type(result["image_count_expected"]) is int and type(result["image_count_expected"]) is not bool else None,
+        )
+    except DfpPhase1aCheckpointError as error:
+        raise DfpPhase1aReportError(f"embedded checkpoint is invalid: {error}") from error
 
     _require_sha256(result["artifact_schema_identity_sha256"], "result.artifact_schema_identity_sha256")
     if result["artifact_schema_identity_sha256"] != checkpoint["artifact_schema_identity_sha256"]:

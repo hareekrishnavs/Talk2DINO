@@ -598,7 +598,14 @@ def test_pilot_result_never_labeled_as_another_run(tmp_path, schema_summary, art
         "per_image_stats_manifest_sha256": checkpoint["per_image_stats_manifest_sha256"], "complete": True, "final": True,
         "created_at_utc": "2026-01-01T00:00:00+00:00",
     }
-    with pytest.raises(report.DfpPhase1aReportError, match="another dataset/run"):
+    # The embedded-checkpoint-validation repair (src/dfp_phase1a_report.py
+    # validate_result_structure) now catches a run_mode mismatch earlier,
+    # via validate_checkpoint_structure's own run_mode authority check
+    # (using result.run_mode, chained as DfpPhase1aCheckpointError) --
+    # still an unambiguous rejection, just with a different, more
+    # precisely-attributed diagnostic than the old direct comparison
+    # this test originally exercised.
+    with pytest.raises(report.DfpPhase1aReportError, match="run_mode disagrees"):
         report.validate_result_structure(result, checkpoint=checkpoint, checkpoint_sha256=checkpoint_sha256)
 
 
