@@ -31,8 +31,11 @@ from src.dfp_phase1a_artifact_schema import (
     write_json_atomically,
 )
 from src.dfp_phase1a_checkpoint import (
+    PER_IMAGE_STATS_SCHEMA_VARIANT_V2,
     DfpPhase1aCheckpointError,
+    identify_per_image_stats_schema_variant,
     load_per_image_stats_npz,
+    load_per_image_stats_npz_v2,
     validate_checkpoint_against_per_image_stats,
     validate_checkpoint_structure,
     validate_per_image_stats_manifest_structure,
@@ -101,6 +104,36 @@ def _checkpoint_authority_field(checkpoint: Any, key: str) -> Any:
     comparing an authority value against anything. Never raises
     ``KeyError``; never mutates ``checkpoint``."""
     return checkpoint.get(key) if isinstance(checkpoint, Mapping) else None
+
+
+def _load_per_image_stats_npz_dispatch(npz_path: Path, stats_manifest: Mapping[str, Any]) -> dict[str, Any]:
+    """Sole dispatch point in this module for loading a per-image-stats
+    NPZ referenced by an already-structurally-validated stats manifest
+    (see :func:`validate_per_image_stats_manifest_structure`, which must
+    already have run on ``stats_manifest`` before this is called).
+    Identifies the exact ``(schema, schema_version)`` variant the
+    manifest itself declares via
+    :func:`identify_per_image_stats_schema_variant` -- never guesses,
+    coerces, or falls back between v1 and v2 -- then calls the one
+    matching loader: the v1 loader for v1, or
+    :func:`load_per_image_stats_npz_v2` (supplying the manifest's own
+    ``class_count``) for v2. Every :class:`DfpPhase1aCheckpointError`
+    raised by identification or loading is translated into this
+    module's own :class:`DfpPhase1aReportError`, never left to escape
+    unwrapped; ``KeyboardInterrupt``, ``SystemExit``, and
+    ``MemoryError`` are never caught and always propagate. Loads the
+    NPZ exactly once -- callers must never also call a loader directly
+    for the same file."""
+    try:
+        variant = identify_per_image_stats_schema_variant(stats_manifest["schema"], stats_manifest["schema_version"])
+        if variant == PER_IMAGE_STATS_SCHEMA_VARIANT_V2:
+            return load_per_image_stats_npz_v2(
+                npz_path, expected_sha256=stats_manifest["npz_sha256"], image_count=stats_manifest["image_count"],
+                class_count=stats_manifest["class_count"],
+            )
+        return load_per_image_stats_npz(npz_path, expected_sha256=stats_manifest["npz_sha256"], image_count=stats_manifest["image_count"])
+    except DfpPhase1aCheckpointError as error:
+        raise DfpPhase1aReportError(str(error)) from error
 
 
 def validate_result_structure(result: Mapping[str, Any], *, checkpoint: Mapping[str, Any], checkpoint_sha256: str) -> None:
@@ -224,17 +257,24 @@ def install_result_bundle(
         stats_manifest = parse_strict_json_document(stats_manifest_path, label="per-image-stats manifest")
     except DfpPhase1aArtifactSchemaError as error:
         raise DfpPhase1aReportError(str(error)) from error
+    # Ordering: (1) manifest closed-schema validation, (2) exact version
+    # identification + (3) NPZ loading (both inside the dispatch helper,
+    # which never guesses/coerces/falls back between v1 and v2), THEN
+    # (4) the relational checkpoint/statistics validation -- the
+    # manifest's own internal validity is established before relating
+    # it to a different sibling artifact (the checkpoint).
     try:
         validate_per_image_stats_manifest_structure(stats_manifest)
-        validate_checkpoint_against_per_image_stats(checkpoint, stats_manifest)
     except DfpPhase1aCheckpointError as error:
         raise DfpPhase1aReportError(str(error)) from error
     if sha256_file(stats_manifest_path) != checkpoint["per_image_stats_manifest_sha256"]:
         raise DfpPhase1aReportError("per-image-stats manifest SHA256 mismatch against the checkpoint's binding")
 
     npz_path = checkpoints_dir / stats_manifest["npz_filename"]
+    _load_per_image_stats_npz_dispatch(npz_path, stats_manifest)
+
     try:
-        load_per_image_stats_npz(npz_path, expected_sha256=stats_manifest["npz_sha256"], image_count=stats_manifest["image_count"])
+        validate_checkpoint_against_per_image_stats(checkpoint, stats_manifest)
     except DfpPhase1aCheckpointError as error:
         raise DfpPhase1aReportError(str(error)) from error
 
@@ -272,7 +312,7 @@ def install_result_bundle(
         staged_npz_sha256 = sha256_file(staging_dir / npz_path.name)
         if staged_npz_sha256 != stats_manifest["npz_sha256"]:
             raise DfpPhase1aReportError("staged per-image-stats NPZ does not hash-match its manifest")
-        load_per_image_stats_npz(staging_dir / npz_path.name, expected_sha256=staged_npz_sha256, image_count=stats_manifest["image_count"])
+        _load_per_image_stats_npz_dispatch(staging_dir / npz_path.name, stats_manifest)
         staged_result = parse_strict_json_document(staging_dir / "result.json", label="staged result")
         validate_result_structure(staged_result, checkpoint=checkpoint, checkpoint_sha256=checkpoint_sha256)
     except Exception:
@@ -310,17 +350,21 @@ def verify_result_bundle(bundle_dir: Path) -> dict[str, Any]:
         stats_manifest = parse_strict_json_document(manifest_path, label="per-image-stats manifest")
     except DfpPhase1aArtifactSchemaError as error:
         raise DfpPhase1aReportError(str(error)) from error
+    # Same ordering as install_result_bundle: closed-schema validation,
+    # then version identification + NPZ loading (both inside the
+    # dispatch helper), then the relational checkpoint/statistics check.
     try:
         validate_per_image_stats_manifest_structure(stats_manifest)
-        validate_checkpoint_against_per_image_stats(checkpoint, stats_manifest)
     except DfpPhase1aCheckpointError as error:
         raise DfpPhase1aReportError(str(error)) from error
     if sha256_file(manifest_path) != checkpoint["per_image_stats_manifest_sha256"]:
         raise DfpPhase1aReportError("bundled per-image-stats manifest SHA256 mismatch against the checkpoint's binding")
 
     npz_path = bundle_dir / require_safe_basename(stats_manifest["npz_filename"], "per-image-stats manifest.npz_filename")
+    arrays = _load_per_image_stats_npz_dispatch(npz_path, stats_manifest)
+
     try:
-        arrays = load_per_image_stats_npz(npz_path, expected_sha256=stats_manifest["npz_sha256"], image_count=stats_manifest["image_count"])
+        validate_checkpoint_against_per_image_stats(checkpoint, stats_manifest)
     except DfpPhase1aCheckpointError as error:
         raise DfpPhase1aReportError(str(error)) from error
 
