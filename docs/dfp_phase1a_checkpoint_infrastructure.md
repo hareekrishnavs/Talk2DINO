@@ -82,6 +82,94 @@ count varies per real image (sliding-window geometry depends on each
 image's actual height/width), so no fixed-shape NPZ column could hold it,
 and the frozen protocol requires only the aggregate statistics anyway.
 
+## Per-image-stats schema v2 (versioned successor)
+
+`talk2dino-dfp-phase1a-per-image-stats-v2` (`schema_version = 1`) is a
+**versioned successor** to the v1 schema above -- never a version bump
+under the v1 name, and never a rewrite of it. The v1 schema, its name,
+version, and closed 19-member set are byte-for-byte unchanged and remain
+independently loadable/verifiable (`load_per_image_stats_npz`,
+`build_zero_row_arrays`); any artifact already generated under v1
+continues to validate exactly as before. Schema identification is
+exact-match on the `(schema, schema_version)` pair, via the single
+dispatcher `src.dfp_phase1a_checkpoint.identify_per_image_stats_schema_
+variant` -- an unrecognized pair (including a correct name paired with
+the wrong version) is always rejected, never guessed.
+
+v1 is deliberately scoped only to the aggregate Phase-1B compute-
+projection quantities. v2 additively carries every v1 member forward
+unchanged and adds the sufficient statistics needed to reconstruct every
+preregistered Phase-1A Gate-1 measurement without rerunning inference,
+in four member categories (122 members total, see
+`src.dfp_phase1a_artifact_schema`'s own module-level v2 comment and
+`evaluation_identities/e13_dfp_phase1a_artifacts.toml`'s
+`[per_image_stats_schema_v2]` section for the authoritative name list):
+
+- **scalar** (`shape (image_count,)`, 33 `int64` + 6 `float64`): every
+  v1 member plus dispute-category/persistence-reverted/ignore pixel
+  counts, global-unary/reversion-coherence component counts, and the
+  harmful-washout x boundary-band JOINT counts
+  `harmful_boundary_pixel_count`/`harmful_interior_pixel_count`
+  (`harmful_boundary_pixel_count + harmful_interior_pixel_count ==
+  harmful_pixel_count`, each bounded by the corresponding
+  `disputed_boundary_pixel_count`/`disputed_interior_pixel_count`
+  marginal) -- required because the protocol's own
+  `[gate_expectations].boundary_mass_reframe_threshold` is defined
+  specifically over harmful-washout mass within the boundary band, a
+  quantity the marginal `harmful_pixel_count` and the ALL-category
+  `disputed_boundary_pixel_count` cannot reconstruct on their own (their
+  intersection is not determined by the marginals without assuming
+  independence, which this schema never does). No equivalent joint is
+  defined for beneficial/third-label: neither the protocol's
+  `[gate_expectations]` nor the frozen qualitative-report identity's own
+  `[category_binding]` defines a beneficial- or third-label-specific
+  boundary/interior category;
+- **per-class confusion-2D** (`shape (image_count, class_count)`,
+  `int64`, 76 members): `intersection`/`union`/`predicted_pixels`/
+  `ground_truth_pixels` -- exactly `[metric_contract].required_
+  statistics` -- for 19 prediction variants: the five raw horizon label
+  maps T=0/16/32/64/320, the harmful-only recovery oracle `O_P`, the
+  Third-Label Reversion Delta `third_label_revert_to_t0` (begin with the
+  T320 prediction; wherever GT is neither T0's a(x) nor T320's b(x),
+  replace b(x) with a(x); leave every other pixel equal to T320 -- an
+  exact reproduction of `src.dfp_phase1a_analysis.construct_oracle_
+  maps`'s `third_label_diagnostic` map, per the protocol's own
+  `[oracle_definitions].third_label_diagnostic_rule`), and all four
+  horizon-persistence variants at each of the three persistence horizons
+  16/32/64. Every one of these is a GT-conditioned diagnostic only,
+  never a deployable prediction. Ground truth does not change across
+  variants, so `ground_truth_pixels` is additionally enforced to be
+  IDENTICAL, class by class, across every variant for a given image --
+  not merely equal in row sum. Boundary IoU per-class statistics are
+  deliberately excluded: the live protocol's `[boundary_iou].
+  implementation_source_status` is still `"not_yet_bound"`, so no run
+  this schema describes can legitimately compute one;
+- **offset** (`shape (image_count + 1,)`, `int64`, monotonically
+  non-decreasing, starting at 0, 2 members): a CSR-style per-image row
+  index into a parallel flattened member -- `component_offsets` and
+  `reversion_component_offsets`;
+- **flattened variable-length** (`shape (offsets[-1],)`, 3 `int64` + 2
+  `float64` members, each keyed to exactly one offset member): global
+  unary component class indices/pixel areas/patch-equivalent areas/
+  source mass, and reversion-coherence component sizes at the primary
+  persistence horizon (32) -- never a fixed-shape/invented histogram
+  bin, since component/reversion counts are genuinely data-dependent.
+
+Every relational content invariant these categories imply (confusion
+`union == predicted + ground_truth - intersection`; confusion row sums
+equal `evaluated_pixel_count`; classwise `ground_truth_pixels` equality
+across every variant; dispute/boundary/persistence count partitions,
+including the harmful x boundary-band joint; offset-diff-vs-scalar-count
+agreement; flat-length and per-image segment-sum agreement against the
+offset arrays) is checked by `_validate_per_image_stats_v2_relations`,
+run automatically by `load_per_image_stats_npz_v2`. Zero-progress
+support is `build_zero_row_arrays_v2(class_count=...)` -- scalar/flat
+members get shape `(0,)`, confusion-2D members get shape `(0,
+class_count)`, offset members get the single-element array `[0]` --
+never `np.stack([])`. `validate_resume_state` reads the on-disk
+per-image-stats manifest's own declared variant and dispatches to the
+matching loader; it never guesses.
+
 ## Atomic generation/install order
 
 Each checkpoint update: (1) validates the candidate NPZ arrays and

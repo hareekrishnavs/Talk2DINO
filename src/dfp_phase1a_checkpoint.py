@@ -30,15 +30,29 @@ import numpy as np
 
 from src.dfp_phase1a_artifact_schema import (
     ALL_NPZ_MEMBER_NAMES,
+    ALL_NPZ_MEMBER_NAMES_V2,
     CHECKPOINT_SCHEMA_NAME,
     CHECKPOINT_SCHEMA_VERSION,
+    CONFUSION_2D_MEMBER_NAMES_V2,
+    CONFUSION_STAT_NAMES_V2,
+    FLAT_FLOAT64_MEMBER_NAMES_V2,
+    FLAT_INT64_MEMBER_NAMES_V2,
+    FLAT_MEMBER_OFFSET_KEY_V2,
     FLOAT64_MEMBER_NAMES,
     HORIZON_ORDER,
     INT64_MEMBER_NAMES,
+    OFFSET_MEMBER_NAMES_V2,
     PER_IMAGE_STATS_SCHEMA_NAME,
+    PER_IMAGE_STATS_SCHEMA_NAME_V2,
     PER_IMAGE_STATS_SCHEMA_VERSION,
+    PER_IMAGE_STATS_SCHEMA_VERSION_V2,
+    PERSISTENCE_HORIZONS_V2,
+    PREDICTION_VARIANT_NAMES_V2,
     RUN_MODE_NAMES,
+    SCALAR_FLOAT64_MEMBER_NAMES_V2,
+    SCALAR_INT64_MEMBER_NAMES_V2,
     DfpPhase1aArtifactSchemaError,
+    confusion_member_name_v2,
     parse_strict_json_document,
     require_safe_basename,
     sha256_file,
@@ -69,6 +83,49 @@ PER_IMAGE_STATS_MANIFEST_KEYS = frozenset(
         "class_names_digest", "image_count", "image_ids",
     }
 )
+
+# ---------------------------------------------------------------------------
+# Per-image-stats schema version identification. Every reader/writer that
+# needs to know which NPZ layout an on-disk artifact uses goes through
+# this ONE dispatcher -- an unrecognized (schema, schema_version) pair is
+# always rejected, never guessed or coerced to the nearest known one.
+# ---------------------------------------------------------------------------
+
+PER_IMAGE_STATS_SCHEMA_VARIANT_V1 = "v1"
+PER_IMAGE_STATS_SCHEMA_VARIANT_V2 = "v2"
+
+_PER_IMAGE_STATS_SCHEMA_VARIANTS: dict[tuple[str, int], str] = {
+    (PER_IMAGE_STATS_SCHEMA_NAME, PER_IMAGE_STATS_SCHEMA_VERSION): PER_IMAGE_STATS_SCHEMA_VARIANT_V1,
+    (PER_IMAGE_STATS_SCHEMA_NAME_V2, PER_IMAGE_STATS_SCHEMA_VERSION_V2): PER_IMAGE_STATS_SCHEMA_VARIANT_V2,
+}
+
+
+def identify_per_image_stats_schema_variant(schema: Any, schema_version: Any) -> str:
+    """The sole authority mapping an on-disk per-image-stats manifest's
+    own declared ``(schema, schema_version)`` pair to a known internal
+    variant tag (``PER_IMAGE_STATS_SCHEMA_VARIANT_V1`` or ``_V2``). Never
+    inspects NPZ member names, array shapes, or any other content to
+    infer a version -- identification is exact-match on the declared pair
+    alone. Any pair not in the fixed, closed set above (including a
+    correct name paired with the WRONG version, or vice versa) is
+    rejected immediately, never guessed."""
+    try:
+        variant = _PER_IMAGE_STATS_SCHEMA_VARIANTS.get((schema, schema_version))
+    except TypeError as error:
+        # An unhashable schema/schema_version (e.g. a list) fails the dict
+        # lookup itself before the "not in the known set" branch below
+        # would ever run -- always translated into this module's own
+        # clean, fail-closed error, never leaked as a raw TypeError.
+        raise DfpPhase1aCheckpointError(
+            f"per-image-stats manifest (schema={schema!r}, schema_version={schema_version!r}) is not a valid "
+            "(hashable) schema identification pair -- refusing to guess which layout to validate against"
+        ) from error
+    if variant is None:
+        raise DfpPhase1aCheckpointError(
+            f"per-image-stats manifest (schema={schema!r}, schema_version={schema_version!r}) does not match any "
+            "known schema (name, version) pair -- refusing to guess which layout to validate against"
+        )
+    return variant
 
 
 # ---------------------------------------------------------------------------
@@ -256,10 +313,13 @@ def validate_checkpoint_against_per_image_stats(checkpoint: Mapping[str, Any], s
     CHECKPOINT, transitively inheriting every other binding. CPU-only;
     must run before any dataset/model/CUDA work. Never mutates either
     argument."""
-    if stats_manifest["schema"] != PER_IMAGE_STATS_SCHEMA_NAME:
-        raise DfpPhase1aCheckpointError(f"per-image-stats manifest schema disagrees with the authoritative {PER_IMAGE_STATS_SCHEMA_NAME!r}")
-    if stats_manifest["schema_version"] != PER_IMAGE_STATS_SCHEMA_VERSION:
-        raise DfpPhase1aCheckpointError("per-image-stats manifest schema_version disagrees with the authoritative version")
+    # Accept either the v1 or the v2 per-image-stats schema (schema, schema_
+    # version) pair -- never a third, unrecognized one; see
+    # identify_per_image_stats_schema_variant. Which variant is in play
+    # does not change any of the checkpoint-binding checks below: both
+    # schemas carry the same run_mode/class_count/class_names_digest/
+    # image_count/image_ids fields with identical meaning.
+    identify_per_image_stats_schema_variant(stats_manifest["schema"], stats_manifest["schema_version"])
     if stats_manifest["run_mode"] != checkpoint["run_mode"]:
         raise DfpPhase1aCheckpointError("per-image-stats manifest run_mode disagrees with the checkpoint")
     if stats_manifest["class_count"] != checkpoint["class_count"]:
@@ -277,12 +337,16 @@ def validate_checkpoint_against_per_image_stats(checkpoint: Mapping[str, Any], s
         raise DfpPhase1aCheckpointError("per-image-stats manifest image_ids disagrees with checkpoint.completed_image_ids")
 
 
-def validate_per_image_stats_manifest_structure(manifest: Mapping[str, Any]) -> None:
+def validate_per_image_stats_manifest_structure(manifest: Mapping[str, Any]) -> str:
+    """Returns the identified schema variant (``PER_IMAGE_STATS_SCHEMA_
+    VARIANT_V1`` or ``_V2``) on success. Accepts EITHER the v1 or the v2
+    (schema, schema_version) pair -- never a third, unrecognized pair
+    (see :func:`identify_per_image_stats_schema_variant`); the two
+    schemas share every other structural field checked below."""
     _require_closed_mapping(manifest, PER_IMAGE_STATS_MANIFEST_KEYS, "per-image-stats manifest")
-    if _require_exact_string(manifest["schema"], "per-image-stats manifest.schema") != PER_IMAGE_STATS_SCHEMA_NAME:
-        raise DfpPhase1aCheckpointError(f"per-image-stats manifest.schema must be exactly {PER_IMAGE_STATS_SCHEMA_NAME!r}")
-    if _require_int(manifest["schema_version"], "per-image-stats manifest.schema_version", minimum=1) != PER_IMAGE_STATS_SCHEMA_VERSION:
-        raise DfpPhase1aCheckpointError(f"per-image-stats manifest.schema_version must be exactly {PER_IMAGE_STATS_SCHEMA_VERSION}")
+    schema = _require_exact_string(manifest["schema"], "per-image-stats manifest.schema")
+    schema_version = _require_int(manifest["schema_version"], "per-image-stats manifest.schema_version", minimum=1)
+    variant = identify_per_image_stats_schema_variant(schema, schema_version)
     try:
         require_safe_basename(manifest["npz_filename"], "per-image-stats manifest.npz_filename")
     except DfpPhase1aArtifactSchemaError as error:
@@ -299,6 +363,7 @@ def validate_per_image_stats_manifest_structure(manifest: Mapping[str, Any]) -> 
         raise DfpPhase1aCheckpointError("per-image-stats manifest.image_ids length disagrees with image_count")
     if len(set(image_ids)) != len(image_ids):
         raise DfpPhase1aCheckpointError("per-image-stats manifest.image_ids contains a duplicate image ID")
+    return variant
 
 
 # ---------------------------------------------------------------------------
@@ -432,6 +497,350 @@ def build_zero_row_arrays() -> dict[str, np.ndarray]:
 
 
 # ---------------------------------------------------------------------------
+# Per-image compute-projection-statistics NPZ v2: exact closed member
+# schema -- see src.dfp_phase1a_artifact_schema's own module-level v2
+# comment for the full rationale. Every function below is the v2
+# counterpart of its v1 sibling immediately above; the v1 functions are
+# byte-for-byte unchanged and remain independently callable/verifiable.
+# ---------------------------------------------------------------------------
+
+
+def validate_per_image_stats_array_v2(name: str, array: Any, *, image_count: int, class_count: int) -> None:
+    """Sole authority for one v2 per-image-stats NPZ array's own dtype/
+    rank/shape contract, covering all four v2 member categories (scalar,
+    per-class confusion-2D, offset, flattened variable-length). Invoked
+    identically by the reader (after loading) so it can never drift from
+    what a future writer would self-verify against. Never casts,
+    reshapes, squeezes, truncates, or pads a malformed array -- always
+    rejected, never coerced. Cross-member RELATIONAL content (offset
+    monotonicity, confusion-statistic identities, flat-length agreement
+    with the offset array it is keyed to, etc.) is checked separately by
+    :func:`_validate_per_image_stats_v2_relations`, since those checks
+    inherently need every member at once, not one array in isolation."""
+    if not isinstance(array, np.ndarray):
+        raise DfpPhase1aCheckpointError(f"per-image-stats-v2 array {name!r} must be a numpy.ndarray")
+    if name not in ALL_NPZ_MEMBER_NAMES_V2:
+        raise DfpPhase1aCheckpointError(f"per-image-stats-v2 array {name!r} is not part of the authoritative v2 schema")
+    if array.dtype.byteorder == ">":
+        raise DfpPhase1aCheckpointError(f"per-image-stats-v2 array {name!r} must use native (non-big-endian) byte order")
+
+    if name in SCALAR_INT64_MEMBER_NAMES_V2:
+        if array.dtype != np.dtype(np.int64):
+            raise DfpPhase1aCheckpointError(f"per-image-stats-v2 array {name!r} must have exact dtype int64, got {array.dtype}")
+        if array.ndim != 1:
+            raise DfpPhase1aCheckpointError(f"per-image-stats-v2 array {name!r} must be exactly 1-dimensional, got ndim={array.ndim}")
+        if array.shape[0] != image_count:
+            raise DfpPhase1aCheckpointError(f"per-image-stats-v2 array {name!r} has {array.shape[0]} rows, expected exactly image_count={image_count}")
+        if array.size and array.min() < 0:
+            raise DfpPhase1aCheckpointError(f"per-image-stats-v2 array {name!r} must be entirely non-negative")
+        return
+
+    if name in SCALAR_FLOAT64_MEMBER_NAMES_V2:
+        if array.dtype != np.dtype(np.float64):
+            raise DfpPhase1aCheckpointError(f"per-image-stats-v2 array {name!r} must have exact dtype float64, got {array.dtype}")
+        if array.ndim != 1:
+            raise DfpPhase1aCheckpointError(f"per-image-stats-v2 array {name!r} must be exactly 1-dimensional, got ndim={array.ndim}")
+        if array.shape[0] != image_count:
+            raise DfpPhase1aCheckpointError(f"per-image-stats-v2 array {name!r} has {array.shape[0]} rows, expected exactly image_count={image_count}")
+        if array.size and not np.isfinite(array).all():
+            raise DfpPhase1aCheckpointError(f"per-image-stats-v2 array {name!r} contains a non-finite value (NaN or Infinity)")
+        return
+
+    if name in CONFUSION_2D_MEMBER_NAMES_V2:
+        if array.dtype != np.dtype(np.int64):
+            raise DfpPhase1aCheckpointError(f"per-image-stats-v2 array {name!r} must have exact dtype int64, got {array.dtype}")
+        if array.ndim != 2:
+            raise DfpPhase1aCheckpointError(f"per-image-stats-v2 array {name!r} must be exactly 2-dimensional [image_count, class_count], got ndim={array.ndim}")
+        if tuple(array.shape) != (image_count, class_count):
+            raise DfpPhase1aCheckpointError(f"per-image-stats-v2 array {name!r} has shape {tuple(array.shape)}, expected exactly ({image_count}, {class_count})")
+        if array.size and array.min() < 0:
+            raise DfpPhase1aCheckpointError(f"per-image-stats-v2 array {name!r} must be entirely non-negative")
+        return
+
+    if name in OFFSET_MEMBER_NAMES_V2:
+        if array.dtype != np.dtype(np.int64):
+            raise DfpPhase1aCheckpointError(f"per-image-stats-v2 offset array {name!r} must have exact dtype int64, got {array.dtype}")
+        if array.ndim != 1:
+            raise DfpPhase1aCheckpointError(f"per-image-stats-v2 offset array {name!r} must be exactly 1-dimensional, got ndim={array.ndim}")
+        if array.shape[0] != image_count + 1:
+            raise DfpPhase1aCheckpointError(f"per-image-stats-v2 offset array {name!r} has {array.shape[0]} rows, expected exactly image_count+1={image_count + 1}")
+        if array.min() < 0:
+            raise DfpPhase1aCheckpointError(f"per-image-stats-v2 offset array {name!r} must be entirely non-negative")
+        if array[0] != 0:
+            raise DfpPhase1aCheckpointError(f"per-image-stats-v2 offset array {name!r} must start at exactly 0")
+        if array.shape[0] > 1 and not np.all(np.diff(array) >= 0):
+            raise DfpPhase1aCheckpointError(f"per-image-stats-v2 offset array {name!r} must be monotonically non-decreasing")
+        return
+
+    if name in FLAT_INT64_MEMBER_NAMES_V2:
+        if array.dtype != np.dtype(np.int64):
+            raise DfpPhase1aCheckpointError(f"per-image-stats-v2 flat array {name!r} must have exact dtype int64, got {array.dtype}")
+        if array.ndim != 1:
+            raise DfpPhase1aCheckpointError(f"per-image-stats-v2 flat array {name!r} must be exactly 1-dimensional, got ndim={array.ndim}")
+        if array.size and array.min() < 0:
+            raise DfpPhase1aCheckpointError(f"per-image-stats-v2 flat array {name!r} must be entirely non-negative")
+        return
+
+    if name in FLAT_FLOAT64_MEMBER_NAMES_V2:
+        if array.dtype != np.dtype(np.float64):
+            raise DfpPhase1aCheckpointError(f"per-image-stats-v2 flat array {name!r} must have exact dtype float64, got {array.dtype}")
+        if array.ndim != 1:
+            raise DfpPhase1aCheckpointError(f"per-image-stats-v2 flat array {name!r} must be exactly 1-dimensional, got ndim={array.ndim}")
+        if array.size and not np.isfinite(array).all():
+            raise DfpPhase1aCheckpointError(f"per-image-stats-v2 flat array {name!r} contains a non-finite value (NaN or Infinity)")
+        if array.size and array.min() < 0:
+            raise DfpPhase1aCheckpointError(f"per-image-stats-v2 flat array {name!r} must be entirely non-negative")
+        return
+
+    raise DfpPhase1aCheckpointError(f"internal error: per-image-stats-v2 array {name!r} matched no known member category")
+
+
+def _segment_sums(flat_array: np.ndarray, offsets: np.ndarray) -> np.ndarray:
+    """Exact per-image sum of ``flat_array[offsets[i]:offsets[i+1]]`` for
+    every ``i``, via a cumulative-sum difference. Deliberately NOT
+    ``numpy.add.reduceat``: reduceat has a documented, easy-to-mishandle
+    quirk for an empty slice (``indices[i] >= indices[i+1]``), which
+    substitutes a single raw element lookup instead of 0 and can index
+    out of bounds when the empty segment sits at or past the array's own
+    end -- exactly the shape this schema legitimately produces for one
+    or more trailing zero-component images. The cumulative-sum
+    difference used here requires no special-casing for any pattern of
+    empty segments. ``offsets`` values are assumed already validated to
+    lie in ``[0, flat_array.shape[0]]``."""
+    cumulative = np.concatenate(([np.int64(0)], np.cumsum(flat_array, dtype=np.int64)))
+    return cumulative[offsets[1:]] - cumulative[offsets[:-1]]
+
+
+def _validate_per_image_stats_v2_relations(arrays: Mapping[str, np.ndarray], *, image_count: int, class_count: int) -> None:
+    """Cross-member content checks for the v2 schema that no single
+    array's own dtype/shape check can express: ``dataset_indices``
+    canonicality, the inherited v1 percentile-monotonicity/dispute-vs-
+    evaluated/zero-dispute-vs-window invariants (still meaningful, since
+    every v1 member is carried forward unchanged into v2), the new
+    scalar dispute/persistence-count partitions, per-prediction-variant
+    confusion-statistic identities (``union == predicted + ground_truth
+    - intersection``; row sums equal ``evaluated_pixel_count``), and
+    offset/flat-length/segment-sum agreement. Never mutates ``arrays``."""
+    if not np.array_equal(arrays["dataset_indices"], np.arange(image_count, dtype=np.int64)):
+        raise DfpPhase1aCheckpointError("per-image-stats-v2 dataset_indices is not the exact canonical 0..image_count-1 sequence")
+    _validate_percentile_monotonicity(arrays)
+
+    for offset_name in OFFSET_MEMBER_NAMES_V2:
+        if arrays[offset_name].shape != (image_count + 1,):
+            raise DfpPhase1aCheckpointError(f"per-image-stats-v2 offset array {offset_name!r} has an unexpected shape")
+
+    if image_count == 0:
+        # Every relation below is vacuously about per-image content, which
+        # does not exist; offset arrays have already been confirmed above
+        # to be exactly the single-element [0] array (image_count+1 == 1),
+        # and validate_per_image_stats_array_v2 already confirmed that
+        # element is exactly 0 -- nothing further to check.
+        return
+
+    dispute = arrays["dispute_pixel_count"]
+    harmful = arrays["harmful_pixel_count"]
+    beneficial = arrays["beneficial_pixel_count"]
+    third_label = arrays["third_label_pixel_count"]
+    if not np.array_equal(dispute, harmful + beneficial + third_label):
+        raise DfpPhase1aCheckpointError(
+            "per-image-stats-v2 dispute_pixel_count disagrees with harmful_pixel_count+beneficial_pixel_count"
+            "+third_label_pixel_count for at least one image"
+        )
+
+    boundary = arrays["disputed_boundary_pixel_count"]
+    interior = arrays["disputed_interior_pixel_count"]
+    if not np.array_equal(dispute, boundary + interior):
+        raise DfpPhase1aCheckpointError(
+            "per-image-stats-v2 dispute_pixel_count disagrees with disputed_boundary_pixel_count"
+            "+disputed_interior_pixel_count for at least one image"
+        )
+
+    # Harmful-washout x boundary-band JOINT counts -- required to
+    # reconstruct the protocol's own [gate_expectations].boundary_mass_
+    # reframe_threshold, which is defined specifically over harmful-
+    # washout mass within the boundary band. This is genuinely an
+    # intersection: harmful_pixel_count and boundary_pixel_count are
+    # both marginals over the (harmful|beneficial|third_label) x
+    # (boundary|interior) 2x3 partition of the dispute set, and neither
+    # marginal pair determines the other's joint cell without assuming
+    # independence -- an assumption this schema must never make. No
+    # equivalent beneficial/third-label joint is required: see the
+    # module-level v2 comment in src.dfp_phase1a_artifact_schema for the
+    # explicit citation (neither the protocol's [gate_expectations] nor
+    # the frozen qualitative-report identity's own category set defines
+    # a beneficial- or third-label-specific boundary/interior category).
+    harmful_boundary = arrays["harmful_boundary_pixel_count"]
+    harmful_interior = arrays["harmful_interior_pixel_count"]
+    if not np.array_equal(harmful, harmful_boundary + harmful_interior):
+        raise DfpPhase1aCheckpointError(
+            "per-image-stats-v2 harmful_pixel_count disagrees with harmful_boundary_pixel_count"
+            "+harmful_interior_pixel_count for at least one image"
+        )
+    if np.any(harmful_boundary > boundary):
+        raise DfpPhase1aCheckpointError("per-image-stats-v2 harmful_boundary_pixel_count exceeds disputed_boundary_pixel_count for at least one image")
+    if np.any(harmful_interior > interior):
+        raise DfpPhase1aCheckpointError("per-image-stats-v2 harmful_interior_pixel_count exceeds disputed_interior_pixel_count for at least one image")
+
+    for horizon in PERSISTENCE_HORIZONS_V2:
+        h_harmful = arrays[f"persistence_h{horizon}_harmful_reverted_count"]
+        h_beneficial = arrays[f"persistence_h{horizon}_beneficial_reverted_count"]
+        h_third_label = arrays[f"persistence_h{horizon}_third_label_reverted_count"]
+        if np.any(h_harmful > harmful):
+            raise DfpPhase1aCheckpointError(f"per-image-stats-v2 persistence_h{horizon}_harmful_reverted_count exceeds harmful_pixel_count for at least one image")
+        if np.any(h_beneficial > beneficial):
+            raise DfpPhase1aCheckpointError(f"per-image-stats-v2 persistence_h{horizon}_beneficial_reverted_count exceeds beneficial_pixel_count for at least one image")
+        if np.any(h_third_label > third_label):
+            raise DfpPhase1aCheckpointError(f"per-image-stats-v2 persistence_h{horizon}_third_label_reverted_count exceeds third_label_pixel_count for at least one image")
+
+    evaluated = arrays["evaluated_pixel_count"]
+    reference_variant = PREDICTION_VARIANT_NAMES_V2[0]
+    reference_ground_truth = arrays[confusion_member_name_v2(reference_variant, "ground_truth_pixels")]
+    for variant in PREDICTION_VARIANT_NAMES_V2:
+        intersection = arrays[confusion_member_name_v2(variant, "intersection")]
+        union = arrays[confusion_member_name_v2(variant, "union")]
+        predicted = arrays[confusion_member_name_v2(variant, "predicted_pixels")]
+        ground_truth = arrays[confusion_member_name_v2(variant, "ground_truth_pixels")]
+        if not np.array_equal(union, predicted + ground_truth - intersection):
+            raise DfpPhase1aCheckpointError(
+                f"per-image-stats-v2 conf2d_{variant}_union disagrees with predicted_pixels+ground_truth_pixels"
+                "-intersection for at least one image/class"
+            )
+        if np.any(intersection > predicted) or np.any(intersection > ground_truth):
+            raise DfpPhase1aCheckpointError(f"per-image-stats-v2 conf2d_{variant}_intersection exceeds predicted_pixels or ground_truth_pixels for at least one image/class")
+        if not np.array_equal(predicted.sum(axis=1), evaluated):
+            raise DfpPhase1aCheckpointError(f"per-image-stats-v2 conf2d_{variant}_predicted_pixels does not sum to evaluated_pixel_count for at least one image")
+        if not np.array_equal(ground_truth.sum(axis=1), evaluated):
+            raise DfpPhase1aCheckpointError(f"per-image-stats-v2 conf2d_{variant}_ground_truth_pixels does not sum to evaluated_pixel_count for at least one image")
+        # Ground truth does not change across prediction variants -- only
+        # the prediction b(x) does -- so every variant's per-class
+        # ground_truth_pixels must be IDENTICAL, class by class, not
+        # merely equal in row-sum (the row-sum check above alone would
+        # miss a corruption that redistributes counts across classes
+        # while preserving the total). Checked against a single fixed
+        # reference variant rather than all-pairs, which is equivalent
+        # by transitivity and cheaper.
+        if variant != reference_variant and not np.array_equal(ground_truth, reference_ground_truth):
+            raise DfpPhase1aCheckpointError(
+                f"per-image-stats-v2 conf2d_{variant}_ground_truth_pixels disagrees classwise with "
+                f"conf2d_{reference_variant}_ground_truth_pixels for at least one image/class -- ground truth "
+                "must be identical across every prediction variant"
+            )
+
+    component_offsets = arrays["component_offsets"]
+    component_counts = arrays["component_count"]
+    if not np.array_equal(np.diff(component_offsets), component_counts):
+        raise DfpPhase1aCheckpointError("per-image-stats-v2 component_offsets diffs disagree with component_count for at least one image")
+
+    reversion_offsets = arrays["reversion_component_offsets"]
+    reversion_counts = arrays["reversion_component_count"]
+    if not np.array_equal(np.diff(reversion_offsets), reversion_counts):
+        raise DfpPhase1aCheckpointError("per-image-stats-v2 reversion_component_offsets diffs disagree with reversion_component_count for at least one image")
+
+    for flat_name, offset_name in FLAT_MEMBER_OFFSET_KEY_V2.items():
+        flat_array = arrays[flat_name]
+        offsets = arrays[offset_name]
+        expected_length = int(offsets[-1])
+        if flat_array.shape[0] != expected_length:
+            raise DfpPhase1aCheckpointError(
+                f"per-image-stats-v2 flat array {flat_name!r} has length {flat_array.shape[0]}, expected exactly "
+                f"{expected_length} (the final value of {offset_name!r})"
+            )
+
+    class_indices = arrays["component_class_indices_flat"]
+    if class_indices.size and (int(class_indices.min()) < 0 or int(class_indices.max()) >= class_count):
+        raise DfpPhase1aCheckpointError("per-image-stats-v2 component_class_indices_flat contains a value outside [0, class_count)")
+
+    for name in ("component_pixel_areas_flat", "reversion_component_sizes_flat"):
+        arr = arrays[name]
+        if arr.size and arr.min() < 1:
+            raise DfpPhase1aCheckpointError(f"per-image-stats-v2 {name!r} must be entirely >= 1 (a labeled component always has at least one pixel)")
+
+    pixel_area_segment_sums = _segment_sums(arrays["component_pixel_areas_flat"], component_offsets)
+    ignore = arrays["ignore_pixel_count"]
+    if not np.array_equal(pixel_area_segment_sums, evaluated + ignore):
+        raise DfpPhase1aCheckpointError(
+            "per-image-stats-v2 component_pixel_areas_flat per-image segment sum disagrees with "
+            "evaluated_pixel_count+ignore_pixel_count for at least one image"
+        )
+
+    reversion_segment_sums = _segment_sums(arrays["reversion_component_sizes_flat"], reversion_offsets)
+    h32_total_reverted = (
+        arrays["persistence_h32_harmful_reverted_count"]
+        + arrays["persistence_h32_beneficial_reverted_count"]
+        + arrays["persistence_h32_third_label_reverted_count"]
+    )
+    if not np.array_equal(reversion_segment_sums, h32_total_reverted):
+        raise DfpPhase1aCheckpointError(
+            "per-image-stats-v2 reversion_component_sizes_flat per-image segment sum disagrees with the "
+            "persistence_h32 reverted-pixel counts for at least one image"
+        )
+
+
+def load_per_image_stats_npz_v2(npz_path: Path, *, expected_sha256: str, image_count: int, class_count: int) -> dict[str, np.ndarray]:
+    """v2 counterpart of :func:`load_per_image_stats_npz`: load and
+    fully validate every member of a v2 per-image-stats NPZ, including
+    every v2 relational check (see
+    :func:`_validate_per_image_stats_v2_relations`). Rejects a missing/
+    inaccessible file, digest mismatch, malformed/truncated archive, an
+    unexpected/missing/duplicate member, an object-dtype or structured-
+    dtype array, and any dtype/rank/shape/relational disagreement --
+    always as a clean :class:`DfpPhase1aCheckpointError`, never a raw
+    traceback."""
+    npz_path = Path(npz_path)
+    try:
+        observed_sha256 = sha256_file(npz_path)
+    except DfpPhase1aArtifactSchemaError as error:
+        raise DfpPhase1aCheckpointError(str(error)) from error
+    if observed_sha256 != expected_sha256:
+        raise DfpPhase1aCheckpointError(f"per-image-stats-v2 NPZ {npz_path} SHA256 mismatch: expected {expected_sha256}, observed {observed_sha256}")
+
+    _check_zip_member_hygiene(npz_path)
+
+    try:
+        with np.load(npz_path, allow_pickle=False) as data:
+            observed_names = frozenset(data.files)
+            if observed_names != ALL_NPZ_MEMBER_NAMES_V2:
+                missing = sorted(ALL_NPZ_MEMBER_NAMES_V2 - observed_names)
+                unexpected = sorted(observed_names - ALL_NPZ_MEMBER_NAMES_V2)
+                raise DfpPhase1aCheckpointError(f"per-image-stats-v2 NPZ member set disagrees with the authoritative schema (missing={missing}, unexpected={unexpected})")
+            arrays = {key: data[key] for key in data.files}
+    except DfpPhase1aCheckpointError:
+        raise
+    except (ValueError, OSError, zipfile.BadZipFile) as error:
+        raise DfpPhase1aCheckpointError(f"cannot load per-image-stats-v2 NPZ {npz_path}: {error}") from error
+
+    for name, array in arrays.items():
+        validate_per_image_stats_array_v2(name, array, image_count=image_count, class_count=class_count)
+    _validate_per_image_stats_v2_relations(arrays, image_count=image_count, class_count=class_count)
+    return arrays
+
+
+def build_zero_row_arrays_v2(*, class_count: int) -> dict[str, np.ndarray]:
+    """Zero-image v2 checkpoint support: every member as a correctly-
+    shaped, correctly-typed zero-progress array -- never via
+    ``np.stack([])``. Scalar members get shape ``(0,)``; confusion-2D
+    members get shape ``(0, class_count)``; offset members get the
+    single-element array ``[0]`` (``image_count == 0`` means exactly one
+    offset entry); flattened members get shape ``(0,)``."""
+    if type(class_count) is not int or isinstance(class_count, bool) or class_count <= 0:
+        raise DfpPhase1aCheckpointError("class_count must be a positive exact integer")
+    arrays: dict[str, np.ndarray] = {}
+    for name in SCALAR_INT64_MEMBER_NAMES_V2:
+        arrays[name] = np.zeros((0,), dtype=np.int64)
+    for name in SCALAR_FLOAT64_MEMBER_NAMES_V2:
+        arrays[name] = np.zeros((0,), dtype=np.float64)
+    for name in CONFUSION_2D_MEMBER_NAMES_V2:
+        arrays[name] = np.zeros((0, class_count), dtype=np.int64)
+    for name in OFFSET_MEMBER_NAMES_V2:
+        arrays[name] = np.zeros((1,), dtype=np.int64)
+    for name in FLAT_INT64_MEMBER_NAMES_V2:
+        arrays[name] = np.zeros((0,), dtype=np.int64)
+    for name in FLAT_FLOAT64_MEMBER_NAMES_V2:
+        arrays[name] = np.zeros((0,), dtype=np.float64)
+    return arrays
+
+
+# ---------------------------------------------------------------------------
 # Ordered Phase-A resume validation -- every step here runs before dataset
 # construction, the first dataset sample, torch import (where avoidable),
 # model construction, checkpoint weight loading, CUDA availability checks,
@@ -520,7 +929,7 @@ def validate_resume_state(*, checkpoints_dir: Path, checkpoint_filename: str, re
         stats_manifest = parse_strict_json_document(stats_manifest_path, label="per-image-stats manifest")
     except DfpPhase1aArtifactSchemaError as error:
         raise DfpPhase1aCheckpointError(str(error)) from error
-    validate_per_image_stats_manifest_structure(stats_manifest)
+    per_image_stats_schema_variant = validate_per_image_stats_manifest_structure(stats_manifest)
     observed_manifest_sha256 = sha256_file(stats_manifest_path)
     if observed_manifest_sha256 != checkpoint["per_image_stats_manifest_sha256"]:
         raise DfpPhase1aCheckpointError("per-image-stats manifest SHA256 mismatch against the checkpoint's binding")
@@ -528,9 +937,17 @@ def validate_resume_state(*, checkpoints_dir: Path, checkpoint_filename: str, re
 
     # 7. NPZ existence and SHA-256; 8. NPZ closed member schema; 9. array
     # shape/dtype; 10. checkpoint/array reconciliation (image_count already
-    # bound to checkpoint.next_dataset_index in step 6)
+    # bound to checkpoint.next_dataset_index in step 6). Which loader/schema
+    # applies is taken ONLY from the manifest's own already-identified
+    # variant (step 6) -- never guessed from content.
     npz_path = checkpoints_dir / stats_manifest["npz_filename"]
-    arrays = load_per_image_stats_npz(npz_path, expected_sha256=stats_manifest["npz_sha256"], image_count=stats_manifest["image_count"])
+    if per_image_stats_schema_variant == PER_IMAGE_STATS_SCHEMA_VARIANT_V2:
+        arrays = load_per_image_stats_npz_v2(
+            npz_path, expected_sha256=stats_manifest["npz_sha256"], image_count=stats_manifest["image_count"],
+            class_count=stats_manifest["class_count"],
+        )
+    else:
+        arrays = load_per_image_stats_npz(npz_path, expected_sha256=stats_manifest["npz_sha256"], image_count=stats_manifest["image_count"])
 
     # 11. complete/resumable state
     if checkpoint["complete"]:
@@ -547,6 +964,7 @@ def validate_resume_state(*, checkpoints_dir: Path, checkpoint_filename: str, re
         "next_dataset_index": next_index,
         "resumable": resumable,
         "run_mode": run_mode,
+        "per_image_stats_schema_variant": per_image_stats_schema_variant,
     }
 
 
@@ -738,6 +1156,9 @@ __all__ = [
     "DfpPhase1aCheckpointError",
     "TOP_CHECKPOINT_KEYS",
     "PER_IMAGE_STATS_MANIFEST_KEYS",
+    "PER_IMAGE_STATS_SCHEMA_VARIANT_V1",
+    "PER_IMAGE_STATS_SCHEMA_VARIANT_V2",
+    "identify_per_image_stats_schema_variant",
     "validate_checkpoint_structure",
     "validate_checkpoint_against_canonical_order",
     "resume_dataset_index",
@@ -746,6 +1167,9 @@ __all__ = [
     "validate_per_image_stats_array",
     "load_per_image_stats_npz",
     "build_zero_row_arrays",
+    "validate_per_image_stats_array_v2",
+    "load_per_image_stats_npz_v2",
+    "build_zero_row_arrays_v2",
     "validate_resume_state",
     "generate_and_install_checkpoint",
 ]

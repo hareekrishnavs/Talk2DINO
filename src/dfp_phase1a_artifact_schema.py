@@ -46,7 +46,7 @@ IDENTITY_TOP_KEYS = frozenset(
     {
         "format_version", "identity", "protocol_binding", "subset_manifest_binding",
         "parent_identity_binding", "dataset_binding", "checkpoint_schema", "per_image_stats_schema",
-        "result_schema", "path_policy", "atomic_write_policy",
+        "per_image_stats_schema_v2", "result_schema", "path_policy", "atomic_write_policy",
     }
 )
 
@@ -83,6 +83,15 @@ SECTION_KEYS: dict[str, frozenset[str]] = {
         {
             "schema_name", "schema_version", "row_axis", "int64_member_names", "float64_member_names",
             "excluded_by_design", "excluded_by_design_reason",
+        }
+    ),
+    "per_image_stats_schema_v2": frozenset(
+        {
+            "schema_name", "schema_version", "predecessor_schema_name", "predecessor_schema_version",
+            "predecessor_still_independently_verifiable", "row_axis", "prediction_variant_names",
+            "confusion_stat_names", "scalar_int64_member_names", "scalar_float64_member_names",
+            "confusion_2d_member_names", "offset_member_names", "flat_int64_member_names",
+            "flat_float64_member_names", "flat_member_offset_key", "boundary_iou_excluded_reason",
         }
     ),
     "result_schema": frozenset({"schema_name", "schema_version", "final_requires", "excludes_in_this_step", "excludes_reason"}),
@@ -348,6 +357,201 @@ RUN_MODE_NAMES: tuple[str, ...] = ("coco_stuff_500", "ade20k_500")
 
 
 # ---------------------------------------------------------------------------
+# Per-image-stats schema v2 -- a versioned SUCCESSOR to the v1 schema above,
+# never a silent rewrite of it. v1's schema name/version/member lists above
+# this comment are byte-for-byte unchanged and remain independently
+# loadable/verifiable (see PER_IMAGE_STATS_SCHEMA_NAME/VERSION and
+# INT64_MEMBER_NAMES/FLOAT64_MEMBER_NAMES above) -- any artifact already
+# generated under v1 continues to validate exactly as before.
+#
+# v1 is deliberately scoped ONLY to the aggregate Phase-1B compute-
+# projection quantities (see its own `excluded_by_design_reason`). v2
+# additively carries every v1 member forward UNCHANGED and adds the
+# sufficient statistics needed to reconstruct every preregistered Phase-1A
+# Gate-1 measurement without rerunning inference: full per-class confusion
+# statistics (exactly the four per-class arrays
+# `[metric_contract].required_statistics` already pins -- intersection,
+# union, predicted_pixels, ground_truth_pixels; never a fuller C x C
+# confusion matrix, which the protocol does not require) for every
+# prediction variant a Gate-1 metric or gain formula is defined over;
+# scalar dispute/persistence/ignore pixel counts; and variable-length
+# global-unary-component and reversion-coherence data via flattened arrays
+# plus validated per-image offsets (never `np.stack([])`, never an invented
+# histogram bin).
+#
+# Schema identification is exact-match on the (schema, schema_version)
+# PAIR taken together (see `_PER_IMAGE_STATS_SCHEMA_VARIANTS` in
+# `dfp_phase1a_checkpoint.py`) -- v2 uses a wholly distinct schema NAME,
+# never a version bump under the v1 name, so no reader ever has to guess
+# which layout an artifact on disk actually uses; an unrecognized
+# (name, version) pair is always rejected, never coerced to the nearest
+# known one.
+#
+# Nineteen prediction variants (each needing the four per-class arrays
+# above) are required to reconstruct every Gate-1 measurement the live
+# protocol identity defines:
+#   - the five raw horizon label maps T=0/16/32/64/320 (unary/T0..T320
+#     dataset-level metrics; T0 and T320 double as U and P for the oracle
+#     gain formulas);
+#   - the harmful-only recovery oracle O_P (`[oracle_definitions]`
+#     `oracle_O_P_rule`);
+#   - the Third-Label Reversion Delta `third_label_revert_to_t0`
+#     (`[oracle_definitions]` `third_label_diagnostic_rule`: begin with
+#     the T320/P prediction; wherever GT is neither T0/unary class a(x)
+#     nor T320/P class b(x), replace b(x) with a(x); retain P(x)
+#     elsewhere -- an exact reproduction of
+#     `src.dfp_phase1a_analysis.construct_oracle_maps`'s
+#     `third_label_diagnostic` map, itself already frozen and unmodified
+#     by this schema);
+#   - all four horizon-persistence variants (full,
+#     harmful_recovery_only, beneficial_undo_only,
+#     third_label_fallback_only) at each of the three persistence
+#     horizons 16/32/64 (`[horizon_persistence]`,
+#     `compute_persistence_gain_summary`).
+# Every one of these is a GT-CONDITIONED DIAGNOSTIC ONLY (per the
+# protocol's own `ground_truth_permitted_uses`), never a deployable
+# prediction -- this schema persists their per-class confusion
+# statistics for measurement reconstruction, never their pixel-level
+# label maps, and adds no new construction rule of its own.
+#
+# Boundary IoU per-class statistics are deliberately NOT included: the
+# live protocol identity's own `[boundary_iou].implementation_source_
+# status = "not_yet_bound"` means no concrete Boundary IoU implementation
+# is bound yet, so no Boundary IoU quantity is computable by any run this
+# schema could describe -- adding a member for it now would be inventing
+# data no producer can ever legitimately fill.
+#
+# Joint harmful-washout x boundary-band pixel counts (`harmful_boundary_
+# pixel_count` / `harmful_interior_pixel_count`) are required: the live
+# protocol identity's own `[gate_expectations].boundary_mass_reframe_
+# threshold` is defined specifically over "harmful-washout mass" within
+# the primary boundary band -- a quantity the existing marginal totals
+# (`harmful_pixel_count`, the ALL-category `disputed_boundary_pixel_
+# count`/`disputed_interior_pixel_count`) cannot reconstruct, since a
+# marginal harmful count and a marginal (harmful+beneficial+third_label)
+# boundary count do not determine their INTERSECTION without an
+# independence assumption this schema must never make. No equivalent
+# joint count is added for beneficial/third-label: neither the protocol's
+# `[gate_expectations]` nor the frozen qualitative-report identity's own
+# `[category_binding]` (`evaluation_identities/e13_dfp_phase1a_
+# qualitative_report.toml`, `category_source`) defines a beneficial- or
+# third-label-specific boundary/interior category -- both of that
+# identity's `disputed_boundary`/`disputed_interior` categories are
+# explicitly the FULL (all three dispute categories combined) dispute
+# mask split by the boundary primitive, already exactly represented by
+# the existing `disputed_boundary_pixel_count`/`disputed_interior_pixel_
+# count` members.
+# ---------------------------------------------------------------------------
+
+PER_IMAGE_STATS_SCHEMA_NAME_V2 = "talk2dino-dfp-phase1a-per-image-stats-v2"
+PER_IMAGE_STATS_SCHEMA_VERSION_V2 = 1
+PER_IMAGE_STATS_SCHEMA_V2_PREDECESSOR_NAME = PER_IMAGE_STATS_SCHEMA_NAME
+PER_IMAGE_STATS_SCHEMA_V2_PREDECESSOR_VERSION = PER_IMAGE_STATS_SCHEMA_VERSION
+
+HORIZON_LABEL_VARIANT_NAMES: tuple[str, ...] = ("t0", "t16", "t32", "t64", "t320")
+ORACLE_VARIANT_NAMES: tuple[str, ...] = ("oracle_o_p",)
+# The Third-Label Reversion Delta: src.dfp_phase1a_analysis.construct_
+# oracle_maps's `third_label_diagnostic` map, reproduced by name only
+# (never a new construction rule) -- see the module-level v2 comment
+# above for the exact definition and its protocol citation.
+THIRD_LABEL_REVERT_VARIANT_NAMES: tuple[str, ...] = ("third_label_revert_to_t0",)
+PERSISTENCE_HORIZONS_V2: tuple[int, ...] = (16, 32, 64)
+PERSISTENCE_SUBVARIANT_NAMES: tuple[str, ...] = ("full", "harmful_only", "beneficial_only", "third_label_only")
+
+
+def _persistence_variant_names_v2() -> tuple[str, ...]:
+    names: list[str] = []
+    for horizon in PERSISTENCE_HORIZONS_V2:
+        for subvariant in PERSISTENCE_SUBVARIANT_NAMES:
+            names.append(f"persist_h{horizon}_{subvariant}")
+    return tuple(names)
+
+
+PREDICTION_VARIANT_NAMES_V2: tuple[str, ...] = (
+    HORIZON_LABEL_VARIANT_NAMES + ORACLE_VARIANT_NAMES + THIRD_LABEL_REVERT_VARIANT_NAMES + _persistence_variant_names_v2()
+)
+assert len(PREDICTION_VARIANT_NAMES_V2) == 19
+assert len(set(PREDICTION_VARIANT_NAMES_V2)) == 19
+
+CONFUSION_STAT_NAMES_V2: tuple[str, ...] = ("intersection", "union", "predicted_pixels", "ground_truth_pixels")
+
+
+def confusion_member_name_v2(variant: str, stat: str) -> str:
+    """The single authority for a v2 per-class confusion-statistics NPZ
+    member name -- every producer/consumer/test computes this name via
+    this function, never by hand-formatting a matching f-string
+    independently."""
+    if variant not in PREDICTION_VARIANT_NAMES_V2:
+        raise DfpPhase1aArtifactSchemaError(f"unknown v2 prediction variant {variant!r}")
+    if stat not in CONFUSION_STAT_NAMES_V2:
+        raise DfpPhase1aArtifactSchemaError(f"unknown v2 confusion statistic {stat!r}")
+    return f"conf2d_{variant}_{stat}"
+
+
+CONFUSION_2D_MEMBER_NAMES_V2: tuple[str, ...] = tuple(
+    confusion_member_name_v2(variant, stat) for variant in PREDICTION_VARIANT_NAMES_V2 for stat in CONFUSION_STAT_NAMES_V2
+)
+assert len(CONFUSION_2D_MEMBER_NAMES_V2) == 19 * 4 == 76
+assert len(set(CONFUSION_2D_MEMBER_NAMES_V2)) == 76
+
+# Scalar (shape (image_count,)) additions -- v1's own 13 int64 / 6 float64
+# member names are carried forward completely UNCHANGED (still required:
+# the Q_w/compute-projection statistics remain part of what every Phase 1A
+# artifact must report) and are never redefined here.
+SCALAR_INT64_MEMBER_NAMES_V2_ADDITIONS: tuple[str, ...] = (
+    "ignore_pixel_count",
+    "harmful_pixel_count", "beneficial_pixel_count", "third_label_pixel_count",
+    "disputed_boundary_pixel_count", "disputed_interior_pixel_count",
+    "harmful_boundary_pixel_count", "harmful_interior_pixel_count",
+    "persistence_h16_harmful_reverted_count", "persistence_h16_beneficial_reverted_count", "persistence_h16_third_label_reverted_count",
+    "persistence_h32_harmful_reverted_count", "persistence_h32_beneficial_reverted_count", "persistence_h32_third_label_reverted_count",
+    "persistence_h64_harmful_reverted_count", "persistence_h64_beneficial_reverted_count", "persistence_h64_third_label_reverted_count",
+    "component_count", "reversion_component_count", "reversion_perimeter",
+)
+assert len(SCALAR_INT64_MEMBER_NAMES_V2_ADDITIONS) == 20
+assert len(set(SCALAR_INT64_MEMBER_NAMES_V2_ADDITIONS)) == 20
+assert not (set(SCALAR_INT64_MEMBER_NAMES_V2_ADDITIONS) & set(INT64_MEMBER_NAMES))
+
+SCALAR_INT64_MEMBER_NAMES_V2: tuple[str, ...] = INT64_MEMBER_NAMES + SCALAR_INT64_MEMBER_NAMES_V2_ADDITIONS
+SCALAR_FLOAT64_MEMBER_NAMES_V2: tuple[str, ...] = FLOAT64_MEMBER_NAMES
+
+# Offset members (shape (image_count + 1,)): a validated CSR-style
+# per-image row-offset index into a parallel flattened member -- never a
+# fixed-shape/fixed-bin representation, since component/reversion counts
+# are genuinely data-dependent and vary per image.
+OFFSET_MEMBER_NAMES_V2: tuple[str, ...] = ("component_offsets", "reversion_component_offsets")
+
+# Flattened variable-length members, each keyed to exactly one offset
+# member above (see FLAT_MEMBER_OFFSET_KEY_V2): image i's exact slice is
+# flat[offsets[i]:offsets[i+1]]. Zero images/zero components produce a
+# valid, correctly-shaped length-0 (or length-1, for an offset array)
+# array via build_zero_row_arrays_v2 -- never `np.stack([])`.
+FLAT_INT64_MEMBER_NAMES_V2: tuple[str, ...] = (
+    "component_class_indices_flat", "component_pixel_areas_flat", "reversion_component_sizes_flat",
+)
+FLAT_FLOAT64_MEMBER_NAMES_V2: tuple[str, ...] = (
+    "component_patch_equivalent_areas_flat", "component_source_mass_flat",
+)
+
+FLAT_MEMBER_OFFSET_KEY_V2: dict[str, str] = {
+    "component_class_indices_flat": "component_offsets",
+    "component_pixel_areas_flat": "component_offsets",
+    "component_patch_equivalent_areas_flat": "component_offsets",
+    "component_source_mass_flat": "component_offsets",
+    "reversion_component_sizes_flat": "reversion_component_offsets",
+}
+assert set(FLAT_MEMBER_OFFSET_KEY_V2) == set(FLAT_INT64_MEMBER_NAMES_V2) | set(FLAT_FLOAT64_MEMBER_NAMES_V2)
+assert set(FLAT_MEMBER_OFFSET_KEY_V2.values()) <= set(OFFSET_MEMBER_NAMES_V2)
+
+ALL_NPZ_MEMBER_NAMES_V2 = (
+    frozenset(SCALAR_INT64_MEMBER_NAMES_V2) | frozenset(SCALAR_FLOAT64_MEMBER_NAMES_V2)
+    | frozenset(CONFUSION_2D_MEMBER_NAMES_V2) | frozenset(OFFSET_MEMBER_NAMES_V2)
+    | frozenset(FLAT_INT64_MEMBER_NAMES_V2) | frozenset(FLAT_FLOAT64_MEMBER_NAMES_V2)
+)
+assert len(ALL_NPZ_MEMBER_NAMES_V2) == 33 + 6 + 76 + 2 + 3 + 2 == 122
+
+
+# ---------------------------------------------------------------------------
 # Identity loading/validation.
 # ---------------------------------------------------------------------------
 
@@ -379,6 +583,7 @@ def load_identity(path: Path | None = None, *, repo_root: Path | None = None) ->
     _validate_dataset_binding_block(identity["dataset_binding"])
     _validate_checkpoint_schema_block(identity["checkpoint_schema"])
     _validate_per_image_stats_schema_block(identity["per_image_stats_schema"])
+    _validate_per_image_stats_schema_v2_block(identity["per_image_stats_schema_v2"])
     _validate_result_schema_block(identity["result_schema"])
     _validate_path_policy_block(identity["path_policy"])
     _validate_atomic_write_policy_block(identity["atomic_write_policy"])
@@ -460,6 +665,51 @@ def _validate_per_image_stats_schema_block(block: Mapping[str, Any]) -> None:
         raise DfpPhase1aArtifactSchemaError("per_image_stats_schema.float64_member_names disagrees with the authoritative Python member list")
     _require_string_list(block["excluded_by_design"], "per_image_stats_schema.excluded_by_design", nonempty=True)
     _require_exact_string(block["excluded_by_design_reason"], "per_image_stats_schema.excluded_by_design_reason")
+
+
+def _validate_per_image_stats_schema_v2_block(block: Mapping[str, Any]) -> None:
+    if _require_exact_string(block["schema_name"], "per_image_stats_schema_v2.schema_name") != PER_IMAGE_STATS_SCHEMA_NAME_V2:
+        raise DfpPhase1aArtifactSchemaError(f"per_image_stats_schema_v2.schema_name must be exactly {PER_IMAGE_STATS_SCHEMA_NAME_V2!r}")
+    if _require_exact_int(block["schema_version"], "per_image_stats_schema_v2.schema_version", minimum=1) != PER_IMAGE_STATS_SCHEMA_VERSION_V2:
+        raise DfpPhase1aArtifactSchemaError(f"per_image_stats_schema_v2.schema_version must be exactly {PER_IMAGE_STATS_SCHEMA_VERSION_V2}")
+    if _require_exact_string(block["predecessor_schema_name"], "per_image_stats_schema_v2.predecessor_schema_name") != PER_IMAGE_STATS_SCHEMA_V2_PREDECESSOR_NAME:
+        raise DfpPhase1aArtifactSchemaError("per_image_stats_schema_v2.predecessor_schema_name disagrees with the authoritative v1 schema name")
+    if _require_exact_int(block["predecessor_schema_version"], "per_image_stats_schema_v2.predecessor_schema_version", minimum=1) != PER_IMAGE_STATS_SCHEMA_V2_PREDECESSOR_VERSION:
+        raise DfpPhase1aArtifactSchemaError("per_image_stats_schema_v2.predecessor_schema_version disagrees with the authoritative v1 schema version")
+    if _require_exact_bool(block["predecessor_still_independently_verifiable"], "per_image_stats_schema_v2.predecessor_still_independently_verifiable") is not True:
+        raise DfpPhase1aArtifactSchemaError("per_image_stats_schema_v2.predecessor_still_independently_verifiable must be true -- v2 must never silently rewrite the v1 contract")
+    _require_exact_string(block["row_axis"], "per_image_stats_schema_v2.row_axis")
+
+    variant_names = _require_string_list(block["prediction_variant_names"], "per_image_stats_schema_v2.prediction_variant_names", nonempty=True)
+    if tuple(variant_names) != PREDICTION_VARIANT_NAMES_V2:
+        raise DfpPhase1aArtifactSchemaError("per_image_stats_schema_v2.prediction_variant_names disagrees with the authoritative Python variant list")
+    stat_names = _require_string_list(block["confusion_stat_names"], "per_image_stats_schema_v2.confusion_stat_names", nonempty=True)
+    if tuple(stat_names) != CONFUSION_STAT_NAMES_V2:
+        raise DfpPhase1aArtifactSchemaError("per_image_stats_schema_v2.confusion_stat_names disagrees with the authoritative Python statistic list")
+
+    scalar_int64 = _require_string_list(block["scalar_int64_member_names"], "per_image_stats_schema_v2.scalar_int64_member_names", nonempty=True)
+    if tuple(scalar_int64) != SCALAR_INT64_MEMBER_NAMES_V2:
+        raise DfpPhase1aArtifactSchemaError("per_image_stats_schema_v2.scalar_int64_member_names disagrees with the authoritative Python member list")
+    scalar_float64 = _require_string_list(block["scalar_float64_member_names"], "per_image_stats_schema_v2.scalar_float64_member_names", nonempty=True)
+    if tuple(scalar_float64) != SCALAR_FLOAT64_MEMBER_NAMES_V2:
+        raise DfpPhase1aArtifactSchemaError("per_image_stats_schema_v2.scalar_float64_member_names disagrees with the authoritative Python member list")
+    confusion_2d = _require_string_list(block["confusion_2d_member_names"], "per_image_stats_schema_v2.confusion_2d_member_names", nonempty=True)
+    if tuple(confusion_2d) != CONFUSION_2D_MEMBER_NAMES_V2:
+        raise DfpPhase1aArtifactSchemaError("per_image_stats_schema_v2.confusion_2d_member_names disagrees with the authoritative Python member list")
+    offsets = _require_string_list(block["offset_member_names"], "per_image_stats_schema_v2.offset_member_names", nonempty=True)
+    if tuple(offsets) != OFFSET_MEMBER_NAMES_V2:
+        raise DfpPhase1aArtifactSchemaError("per_image_stats_schema_v2.offset_member_names disagrees with the authoritative Python member list")
+    flat_int64 = _require_string_list(block["flat_int64_member_names"], "per_image_stats_schema_v2.flat_int64_member_names", nonempty=True)
+    if tuple(flat_int64) != FLAT_INT64_MEMBER_NAMES_V2:
+        raise DfpPhase1aArtifactSchemaError("per_image_stats_schema_v2.flat_int64_member_names disagrees with the authoritative Python member list")
+    flat_float64 = _require_string_list(block["flat_float64_member_names"], "per_image_stats_schema_v2.flat_float64_member_names", nonempty=True)
+    if tuple(flat_float64) != FLAT_FLOAT64_MEMBER_NAMES_V2:
+        raise DfpPhase1aArtifactSchemaError("per_image_stats_schema_v2.flat_float64_member_names disagrees with the authoritative Python member list")
+
+    offset_key = block["flat_member_offset_key"]
+    if not isinstance(offset_key, Mapping) or dict(offset_key) != FLAT_MEMBER_OFFSET_KEY_V2:
+        raise DfpPhase1aArtifactSchemaError("per_image_stats_schema_v2.flat_member_offset_key disagrees with the authoritative Python mapping")
+    _require_exact_string(block["boundary_iou_excluded_reason"], "per_image_stats_schema_v2.boundary_iou_excluded_reason")
 
 
 def _validate_result_schema_block(block: Mapping[str, Any]) -> None:
@@ -570,6 +820,27 @@ __all__ = [
     "ALL_NPZ_MEMBER_NAMES",
     "HORIZON_ORDER",
     "RUN_MODE_NAMES",
+    "PER_IMAGE_STATS_SCHEMA_NAME_V2",
+    "PER_IMAGE_STATS_SCHEMA_VERSION_V2",
+    "PER_IMAGE_STATS_SCHEMA_V2_PREDECESSOR_NAME",
+    "PER_IMAGE_STATS_SCHEMA_V2_PREDECESSOR_VERSION",
+    "HORIZON_LABEL_VARIANT_NAMES",
+    "ORACLE_VARIANT_NAMES",
+    "THIRD_LABEL_REVERT_VARIANT_NAMES",
+    "PERSISTENCE_HORIZONS_V2",
+    "PERSISTENCE_SUBVARIANT_NAMES",
+    "PREDICTION_VARIANT_NAMES_V2",
+    "CONFUSION_STAT_NAMES_V2",
+    "confusion_member_name_v2",
+    "CONFUSION_2D_MEMBER_NAMES_V2",
+    "SCALAR_INT64_MEMBER_NAMES_V2_ADDITIONS",
+    "SCALAR_INT64_MEMBER_NAMES_V2",
+    "SCALAR_FLOAT64_MEMBER_NAMES_V2",
+    "OFFSET_MEMBER_NAMES_V2",
+    "FLAT_INT64_MEMBER_NAMES_V2",
+    "FLAT_FLOAT64_MEMBER_NAMES_V2",
+    "FLAT_MEMBER_OFFSET_KEY_V2",
+    "ALL_NPZ_MEMBER_NAMES_V2",
     "repository_root",
     "sha256_file",
     "require_safe_relative_path",

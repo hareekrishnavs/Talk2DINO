@@ -25,7 +25,7 @@ protocol_identity_sha256 = "d53cfe6b9632b0fb24a90ed1c1482a00b83dd64255aaa595b0af
 
 [artifact_schema_binding]
 artifact_schema_identity_relative_path = "evaluation_identities/e13_dfp_phase1a_artifacts.toml"
-artifact_schema_identity_sha256 = "65c861d8b227d247c841b2c29164794f276e0bb57ef1507a6fb368ffe9985a76"
+artifact_schema_identity_sha256 = "76df6986a406a9cc26c91cc702ff4b410c5182c80eb40378aa1a646d2120369e"
 
 [boundary_iou_binding]
 boundary_iou_identity_relative_path = "evaluation_identities/e13_dfp_phase1a_boundary_iou.toml"

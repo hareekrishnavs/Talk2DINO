@@ -81,6 +81,184 @@ excluded_by_design = [
 ]
 excluded_by_design_reason = "the protocol requires only aggregate/statistical persistence of query-compute-projection quantities (mean/median/p90/p95/p99/maximum of |Q_w|, total and worst-window projected width, projected peak memory) and explicitly marks phase1a_propagates_component_masks = false; per-window arrays would additionally have a variable length across images (window count depends on each image's real height/width) and cannot form a fixed-shape NPZ column"
 
+[per_image_stats_schema_v2]
+schema_name = "talk2dino-dfp-phase1a-per-image-stats-v2"
+schema_version = 1
+predecessor_schema_name = "talk2dino-dfp-phase1a-per-image-stats-v1"
+predecessor_schema_version = 1
+predecessor_still_independently_verifiable = true
+row_axis = "image_index_0_based_matching_the_checkpoints_completed_image_ids_prefix_exactly; offset_member_names index into a parallel flattened member instead, image i's slice is flat[offsets[i]:offsets[i+1]]"
+prediction_variant_names = [
+    "t0",
+    "t16",
+    "t32",
+    "t64",
+    "t320",
+    "oracle_o_p",
+    "third_label_revert_to_t0",
+    "persist_h16_full",
+    "persist_h16_harmful_only",
+    "persist_h16_beneficial_only",
+    "persist_h16_third_label_only",
+    "persist_h32_full",
+    "persist_h32_harmful_only",
+    "persist_h32_beneficial_only",
+    "persist_h32_third_label_only",
+    "persist_h64_full",
+    "persist_h64_harmful_only",
+    "persist_h64_beneficial_only",
+    "persist_h64_third_label_only",
+]
+confusion_stat_names = [
+    "intersection",
+    "union",
+    "predicted_pixels",
+    "ground_truth_pixels",
+]
+scalar_int64_member_names = [
+    "dataset_indices",
+    "dispute_pixel_count",
+    "evaluated_pixel_count",
+    "window_count",
+    "zero_dispute_window_count",
+    "total_node_count",
+    "total_nonzero_count",
+    "total_baseline_recurrence_flops",
+    "total_projected_recurrence_flops",
+    "total_chunk_invocations",
+    "total_projected_width",
+    "maximum_projected_width",
+    "maximum_peak_planned_bytes",
+    "ignore_pixel_count",
+    "harmful_pixel_count",
+    "beneficial_pixel_count",
+    "third_label_pixel_count",
+    "disputed_boundary_pixel_count",
+    "disputed_interior_pixel_count",
+    "harmful_boundary_pixel_count",
+    "harmful_interior_pixel_count",
+    "persistence_h16_harmful_reverted_count",
+    "persistence_h16_beneficial_reverted_count",
+    "persistence_h16_third_label_reverted_count",
+    "persistence_h32_harmful_reverted_count",
+    "persistence_h32_beneficial_reverted_count",
+    "persistence_h32_third_label_reverted_count",
+    "persistence_h64_harmful_reverted_count",
+    "persistence_h64_beneficial_reverted_count",
+    "persistence_h64_third_label_reverted_count",
+    "component_count",
+    "reversion_component_count",
+    "reversion_perimeter",
+]
+scalar_float64_member_names = [
+    "q_w_mean",
+    "q_w_median",
+    "q_w_p90",
+    "q_w_p95",
+    "q_w_p99",
+    "q_w_maximum",
+]
+confusion_2d_member_names = [
+    "conf2d_t0_intersection",
+    "conf2d_t0_union",
+    "conf2d_t0_predicted_pixels",
+    "conf2d_t0_ground_truth_pixels",
+    "conf2d_t16_intersection",
+    "conf2d_t16_union",
+    "conf2d_t16_predicted_pixels",
+    "conf2d_t16_ground_truth_pixels",
+    "conf2d_t32_intersection",
+    "conf2d_t32_union",
+    "conf2d_t32_predicted_pixels",
+    "conf2d_t32_ground_truth_pixels",
+    "conf2d_t64_intersection",
+    "conf2d_t64_union",
+    "conf2d_t64_predicted_pixels",
+    "conf2d_t64_ground_truth_pixels",
+    "conf2d_t320_intersection",
+    "conf2d_t320_union",
+    "conf2d_t320_predicted_pixels",
+    "conf2d_t320_ground_truth_pixels",
+    "conf2d_oracle_o_p_intersection",
+    "conf2d_oracle_o_p_union",
+    "conf2d_oracle_o_p_predicted_pixels",
+    "conf2d_oracle_o_p_ground_truth_pixels",
+    "conf2d_third_label_revert_to_t0_intersection",
+    "conf2d_third_label_revert_to_t0_union",
+    "conf2d_third_label_revert_to_t0_predicted_pixels",
+    "conf2d_third_label_revert_to_t0_ground_truth_pixels",
+    "conf2d_persist_h16_full_intersection",
+    "conf2d_persist_h16_full_union",
+    "conf2d_persist_h16_full_predicted_pixels",
+    "conf2d_persist_h16_full_ground_truth_pixels",
+    "conf2d_persist_h16_harmful_only_intersection",
+    "conf2d_persist_h16_harmful_only_union",
+    "conf2d_persist_h16_harmful_only_predicted_pixels",
+    "conf2d_persist_h16_harmful_only_ground_truth_pixels",
+    "conf2d_persist_h16_beneficial_only_intersection",
+    "conf2d_persist_h16_beneficial_only_union",
+    "conf2d_persist_h16_beneficial_only_predicted_pixels",
+    "conf2d_persist_h16_beneficial_only_ground_truth_pixels",
+    "conf2d_persist_h16_third_label_only_intersection",
+    "conf2d_persist_h16_third_label_only_union",
+    "conf2d_persist_h16_third_label_only_predicted_pixels",
+    "conf2d_persist_h16_third_label_only_ground_truth_pixels",
+    "conf2d_persist_h32_full_intersection",
+    "conf2d_persist_h32_full_union",
+    "conf2d_persist_h32_full_predicted_pixels",
+    "conf2d_persist_h32_full_ground_truth_pixels",
+    "conf2d_persist_h32_harmful_only_intersection",
+    "conf2d_persist_h32_harmful_only_union",
+    "conf2d_persist_h32_harmful_only_predicted_pixels",
+    "conf2d_persist_h32_harmful_only_ground_truth_pixels",
+    "conf2d_persist_h32_beneficial_only_intersection",
+    "conf2d_persist_h32_beneficial_only_union",
+    "conf2d_persist_h32_beneficial_only_predicted_pixels",
+    "conf2d_persist_h32_beneficial_only_ground_truth_pixels",
+    "conf2d_persist_h32_third_label_only_intersection",
+    "conf2d_persist_h32_third_label_only_union",
+    "conf2d_persist_h32_third_label_only_predicted_pixels",
+    "conf2d_persist_h32_third_label_only_ground_truth_pixels",
+    "conf2d_persist_h64_full_intersection",
+    "conf2d_persist_h64_full_union",
+    "conf2d_persist_h64_full_predicted_pixels",
+    "conf2d_persist_h64_full_ground_truth_pixels",
+    "conf2d_persist_h64_harmful_only_intersection",
+    "conf2d_persist_h64_harmful_only_union",
+    "conf2d_persist_h64_harmful_only_predicted_pixels",
+    "conf2d_persist_h64_harmful_only_ground_truth_pixels",
+    "conf2d_persist_h64_beneficial_only_intersection",
+    "conf2d_persist_h64_beneficial_only_union",
+    "conf2d_persist_h64_beneficial_only_predicted_pixels",
+    "conf2d_persist_h64_beneficial_only_ground_truth_pixels",
+    "conf2d_persist_h64_third_label_only_intersection",
+    "conf2d_persist_h64_third_label_only_union",
+    "conf2d_persist_h64_third_label_only_predicted_pixels",
+    "conf2d_persist_h64_third_label_only_ground_truth_pixels",
+]
+offset_member_names = [
+    "component_offsets",
+    "reversion_component_offsets",
+]
+flat_int64_member_names = [
+    "component_class_indices_flat",
+    "component_pixel_areas_flat",
+    "reversion_component_sizes_flat",
+]
+flat_float64_member_names = [
+    "component_patch_equivalent_areas_flat",
+    "component_source_mass_flat",
+]
+
+boundary_iou_excluded_reason = "the live protocol identity's [boundary_iou].implementation_source_status is still 'not_yet_bound' (no concrete Boundary IoU implementation is bound), so no Boundary IoU per-class quantity is computable by any run this schema could describe; adding a member for it now would be inventing data no producer could ever legitimately fill"
+
+[per_image_stats_schema_v2.flat_member_offset_key]
+component_class_indices_flat = "component_offsets"
+component_pixel_areas_flat = "component_offsets"
+component_patch_equivalent_areas_flat = "component_offsets"
+component_source_mass_flat = "component_offsets"
+reversion_component_sizes_flat = "reversion_component_offsets"
+
 [result_schema]
 schema_name = "talk2dino-dfp-phase1a-result-v1"
 schema_version = 1
