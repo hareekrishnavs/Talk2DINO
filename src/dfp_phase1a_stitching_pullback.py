@@ -263,13 +263,39 @@ def _apply_window_bilinear_adjoint(v_scaled: torch.Tensor, *, grid_hw: tuple[int
     A_w. ``v_scaled`` has shape ``[K, crop_h, crop_w]`` (K = chunk size,
     or 1 for a single vector). Returns ``[K, N]``, always detached, no
     graph retained, no parameter gradients (the probe tensor is a fresh
-    disconnected leaf, never a model parameter)."""
+    disconnected leaf, never a model parameter).
+
+    Inference-context safe: identical result whether the caller is in
+    ordinary grad-enabled mode, ``torch.no_grad()``, ``torch.set_grad_
+    enabled(False)``, or ``torch.inference_mode()``. ``v_scaled`` is
+    detached before use (it may itself be an inference-mode tensor,
+    which autograd otherwise refuses to touch even as a constant), and
+    the probe/forward/backward triple is wrapped in a narrowly scoped
+    ``torch.inference_mode(False)`` + ``torch.enable_grad()`` pair --
+    covering only this construction, never the caller's own tensors or
+    any surrounding model computation. Both context managers restore
+    the caller's exact prior state on every exit path (success, a
+    raised domain error, or any BaseException, including
+    KeyboardInterrupt/SystemExit/MemoryError) via Python's own
+    context-manager protocol. Never alters the interpolation formula
+    itself -- ``interpolate_raw_scores`` is called exactly as before.
+
+    ``v_scaled`` may itself have been created under an ACTIVE
+    ``torch.inference_mode()``. Such a tensor carries an inference-tensor
+    marker that survives a bare ``.detach()`` and can never be saved for
+    backward, even once inference mode is locally disabled here -- so
+    the detach-and-clone happens INSIDE the ``inference_mode(False)``
+    block, which is what actually produces an ordinary, non-inference
+    tensor safe to use in this local autograd computation."""
     chunk_size = v_scaled.shape[0]
     node_count = grid_hw[0] * grid_hw[1]
-    probe = torch.zeros((1, node_count, chunk_size), dtype=v_scaled.dtype, device=v_scaled.device, requires_grad=True)
-    forward = interpolate_raw_scores(probe, grid_hw, crop_hw)  # [1, K, crop_h, crop_w]
-    loss = (forward.squeeze(0) * v_scaled).sum()
-    (grad,) = torch.autograd.grad(loss, probe, retain_graph=False, create_graph=False)
+    with torch.inference_mode(False):
+        with torch.enable_grad():
+            v_normal = v_scaled.detach().clone()  # strips any inference-tensor marker; never touches v_scaled itself
+            probe = torch.zeros((1, node_count, chunk_size), dtype=v_scaled.dtype, device=v_scaled.device, requires_grad=True)
+            forward = interpolate_raw_scores(probe, grid_hw, crop_hw)  # [1, K, crop_h, crop_w]
+            loss = (forward.squeeze(0) * v_normal).sum()
+            (grad,) = torch.autograd.grad(loss, probe, retain_graph=False, create_graph=False)
     return grad.detach().squeeze(0).transpose(0, 1).contiguous()  # [K, N]
 
 

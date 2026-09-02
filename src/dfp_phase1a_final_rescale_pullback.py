@@ -235,13 +235,43 @@ def _bilinear_resize_adjoint(v: torch.Tensor, *, in_size: tuple[int, int], out_s
     returns ``[K, in_h, in_w]``. The probe tensor is a fresh, disconnected
     leaf (never a model parameter, never part of any external graph);
     the returned gradient is always detached -- no graph is retained and
-    no parameter gradient is ever touched."""
+    no parameter gradient is ever touched.
+
+    Inference-context safe: this local autograd probe must produce the
+    identical result whether the caller is in ordinary grad-enabled mode,
+    ``torch.no_grad()``, ``torch.set_grad_enabled(False)``, or
+    ``torch.inference_mode()`` -- exactly the ambient state every real
+    inference pipeline runs under. ``v`` is detached before use (it may
+    itself be an inference-mode tensor, which autograd otherwise refuses
+    to touch even as a constant), and the probe/forward/backward triple
+    is wrapped in a narrowly scoped ``torch.inference_mode(False)`` +
+    ``torch.enable_grad()`` pair -- covering only this construction, never
+    the caller's own tensors or any surrounding model computation. Both
+    context managers restore the caller's exact prior state on every exit
+    path (success, a raised domain error, or any BaseException, including
+    KeyboardInterrupt/SystemExit/MemoryError) -- that restoration is a
+    property of Python's own context-manager protocol, not additional
+    logic here to get wrong. No model gradient is ever enabled: nothing
+    inside this block references a model parameter, and the probe is a
+    fresh leaf every call.
+
+    ``v`` may itself have been created under an ACTIVE ``torch.inference_
+    mode()`` (an ordinary occurrence: the whole surrounding pipeline runs
+    under one ambient mode). Such a tensor carries an inference-tensor
+    marker that survives a bare ``.detach()`` and can never be saved for
+    backward, even once inference mode is locally disabled here -- so the
+    detach-and-clone happens INSIDE the ``inference_mode(False)`` block,
+    which is what actually produces an ordinary, non-inference tensor
+    safe to use in this local autograd computation."""
     k = v.shape[0]
     in_h, in_w = in_size
-    probe = torch.zeros((1, k, in_h, in_w), dtype=v.dtype, device=v.device, requires_grad=True)
-    forward = F.interpolate(probe, size=tuple(out_size), mode="bilinear", align_corners=align_corners)  # [1, K, out_h, out_w]
-    loss = (forward.squeeze(0) * v).sum()
-    (grad,) = torch.autograd.grad(loss, probe, retain_graph=False, create_graph=False)
+    with torch.inference_mode(False):
+        with torch.enable_grad():
+            v_normal = v.detach().clone()  # strips any inference-tensor marker; never touches v itself
+            probe = torch.zeros((1, k, in_h, in_w), dtype=v.dtype, device=v.device, requires_grad=True)
+            forward = F.interpolate(probe, size=tuple(out_size), mode="bilinear", align_corners=align_corners)  # [1, K, out_h, out_w]
+            loss = (forward.squeeze(0) * v_normal).sum()
+            (grad,) = torch.autograd.grad(loss, probe, retain_graph=False, create_graph=False)
     return grad.detach().squeeze(0)  # [K, in_h, in_w]
 
 
