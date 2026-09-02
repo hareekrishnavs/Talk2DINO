@@ -31,7 +31,7 @@ IDENTITY_TOP_KEYS = frozenset(
         "dispute_categories", "oracle_definitions", "horizon_persistence", "metric_contract", "boundary_iou",
         "gate_contract", "gate_expectations", "run_modes", "subset_selection_policy", "structural_components",
         "structural_component_area", "query_compute_projection", "numerical_validation_policy", "prohibited",
-        "future_step_bindings",
+        "final_resolution_analysis", "reversion_coherence", "future_step_bindings",
     }
 )
 
@@ -175,6 +175,27 @@ SECTION_KEYS: dict[str, frozenset[str]] = {
         }
     ),
     "prohibited": frozenset({"list", "ground_truth_permitted_uses"}),
+    "final_resolution_analysis": frozenset(
+        {
+            "canonical_domain", "ori_shape_source", "rescale_before_argmax_required",
+            "gt_shape_must_equal_final_domain", "gt_derived_prediction_geometry_forbidden",
+            "rescale_source_relative_path", "rescale_source_sha256", "rescale_source_function",
+            "rescale_interpolation_mode", "rescale_align_corners", "rescale_antialias",
+            "rescale_crop_before_resize", "rescale_dtype_policy", "rescale_channel_order",
+            "rescale_argmax_after_rescale", "rescale_alternative_path_forbidden",
+            "composition_formula", "composition_adjoint_formula", "components_and_membership_use_a_final",
+            "component_domain", "component_tie_rule", "component_connectivity", "component_pixel_area_unit",
+            "component_resizing_forbidden", "component_nearest_neighbor_reconciliation_forbidden",
+        }
+    ),
+    "reversion_coherence": frozenset(
+        {
+            "baseline_prediction", "fallback_prediction", "reversion_set_definition", "domain", "connectivity",
+            "component_size_unit", "small_component_threshold_pixels", "small_component_comparison",
+            "thresholded_statistic", "raw_component_sizes_are_primary_evidence", "empty_reversion_set_behavior",
+            "frozen_before_any_phase1a_result", "diagnostic_only_not_a_method_parameter",
+        }
+    ),
     "future_step_bindings": frozenset({"description", "step2_items", "step1b_items"}),
 }
 
@@ -292,6 +313,26 @@ CANONICAL_SCIENTIFIC_STRINGS: dict[tuple[str, str], str] = {
     ("numerical_validation_policy", "conservation_summary_accumulation_dtype"): "float64",
     ("numerical_validation_policy", "tolerance_source"): "separate_frozen_200_window_numerical_calibration_artifact",
     ("future_step_bindings", "description"): "Fields explicitly deferred to later DFP steps, never guessed or invented here.",
+    ("final_resolution_analysis", "canonical_domain"): "final_evaluator_output_at_ori_shape",
+    ("final_resolution_analysis", "ori_shape_source"): "image_pipeline_metadata_img_metas_ori_shape_never_ground_truth",
+    ("final_resolution_analysis", "rescale_source_function"): "finalize_prediction",
+    ("final_resolution_analysis", "rescale_interpolation_mode"): "bilinear",
+    ("final_resolution_analysis", "rescale_crop_before_resize"): "crop_stitched_field_to_img_metas_img_shape_then_interpolate_to_ori_shape",
+    ("final_resolution_analysis", "rescale_dtype_policy"): "preserve_input_floating_point_dtype",
+    ("final_resolution_analysis", "rescale_channel_order"): "class_channel_first_CHW",
+    ("final_resolution_analysis", "composition_formula"): "A_final = R composed with A_stitch",
+    ("final_resolution_analysis", "composition_adjoint_formula"): "A_final^T = A_stitch^T composed with R^T",
+    ("final_resolution_analysis", "component_domain"): "final_ori_resolution_stitched_T0_scores",
+    ("final_resolution_analysis", "component_tie_rule"): "lowest_class_index",
+    ("final_resolution_analysis", "component_pixel_area_unit"): "final_output_pixels",
+    ("reversion_coherence", "baseline_prediction"): "T320",
+    ("reversion_coherence", "fallback_prediction"): "T0",
+    ("reversion_coherence", "reversion_set_definition"): "GT(x) == a(x) and GT(x) != b(x)",
+    ("reversion_coherence", "domain"): "final_ori_resolution_pixels",
+    ("reversion_coherence", "component_size_unit"): "pixel_area",
+    ("reversion_coherence", "small_component_comparison"): "component_pixel_area_strictly_less_than_threshold",
+    ("reversion_coherence", "thresholded_statistic"): "fraction_of_reverted_pixel_mass_in_small_components",
+    ("reversion_coherence", "empty_reversion_set_behavior"): "zero reverted pixels: component_count=0, component_sizes=(), small_component_fraction=0.0, perimeter=0, perimeter_to_area_ratio=0.0, is_zero_reversion=true",
 }
 
 # String fields whose exactness is already independently and at least as
@@ -318,6 +359,8 @@ _RELATIONALLY_GOVERNED_STRING_FIELDS: frozenset[tuple[str, str]] = frozenset(
         ("bridge_checkpoint", "sha256"),
         ("coco_stuff_dataset", "class_names_digest"),
         ("ade20k_dataset", "class_names_digest"),
+        ("final_resolution_analysis", "rescale_source_relative_path"),
+        ("final_resolution_analysis", "rescale_source_sha256"),
     }
 )
 
@@ -541,6 +584,10 @@ def load_identity(path: Path | None = None, *, repo_root: Path | None = None) ->
     _validate_query_compute_projection_block(identity["query_compute_projection"])
     _validate_numerical_validation_policy_block(identity["numerical_validation_policy"])
     _validate_prohibited_block(identity["prohibited"])
+    _validate_final_resolution_analysis_block(identity["final_resolution_analysis"], identity["structural_components"])
+    _validate_reversion_coherence_block(
+        identity["reversion_coherence"], identity["dispute_categories"], identity["structural_components"],
+    )
     _validate_future_step_bindings_block(identity["future_step_bindings"])
 
     return identity
@@ -971,6 +1018,116 @@ def _validate_prohibited_block(block: Mapping[str, Any]) -> None:
         raise DfpPhase1aIdentityError("prohibited.ground_truth_permitted_uses must be exactly the four frozen permitted uses")
 
 
+def _validate_final_resolution_analysis_block(block: Mapping[str, Any], structural_components_block: Mapping[str, Any]) -> None:
+    _require_canonical_string(block["canonical_domain"], "final_resolution_analysis", "canonical_domain")
+    _require_canonical_string(block["ori_shape_source"], "final_resolution_analysis", "ori_shape_source")
+    for field in (
+        "rescale_before_argmax_required", "gt_shape_must_equal_final_domain", "gt_derived_prediction_geometry_forbidden",
+    ):
+        if _require_exact_bool(block[field], f"final_resolution_analysis.{field}") is not True:
+            raise DfpPhase1aIdentityError(f"final_resolution_analysis.{field} must be true")
+    _require_relative_path(block["rescale_source_relative_path"], "final_resolution_analysis.rescale_source_relative_path")
+    _require_sha256(block["rescale_source_sha256"], "final_resolution_analysis.rescale_source_sha256")
+    _require_canonical_string(block["rescale_source_function"], "final_resolution_analysis", "rescale_source_function")
+    _require_canonical_string(block["rescale_interpolation_mode"], "final_resolution_analysis", "rescale_interpolation_mode")
+    if _require_exact_bool(block["rescale_align_corners"], "final_resolution_analysis.rescale_align_corners") is not True:
+        raise DfpPhase1aIdentityError("final_resolution_analysis.rescale_align_corners must be true")
+    if _require_exact_bool(block["rescale_antialias"], "final_resolution_analysis.rescale_antialias") is not False:
+        raise DfpPhase1aIdentityError("final_resolution_analysis.rescale_antialias must be false")
+    _require_canonical_string(block["rescale_crop_before_resize"], "final_resolution_analysis", "rescale_crop_before_resize")
+    _require_canonical_string(block["rescale_dtype_policy"], "final_resolution_analysis", "rescale_dtype_policy")
+    _require_canonical_string(block["rescale_channel_order"], "final_resolution_analysis", "rescale_channel_order")
+    if _require_exact_bool(block["rescale_argmax_after_rescale"], "final_resolution_analysis.rescale_argmax_after_rescale") is not True:
+        raise DfpPhase1aIdentityError("final_resolution_analysis.rescale_argmax_after_rescale must be true")
+    if _require_exact_bool(block["rescale_alternative_path_forbidden"], "final_resolution_analysis.rescale_alternative_path_forbidden") is not True:
+        raise DfpPhase1aIdentityError("final_resolution_analysis.rescale_alternative_path_forbidden must be true")
+    _require_canonical_string(block["composition_formula"], "final_resolution_analysis", "composition_formula")
+    _require_canonical_string(block["composition_adjoint_formula"], "final_resolution_analysis", "composition_adjoint_formula")
+    if _require_exact_bool(block["components_and_membership_use_a_final"], "final_resolution_analysis.components_and_membership_use_a_final") is not True:
+        raise DfpPhase1aIdentityError("final_resolution_analysis.components_and_membership_use_a_final must be true")
+    _require_canonical_string(block["component_domain"], "final_resolution_analysis", "component_domain")
+    _require_canonical_string(block["component_tie_rule"], "final_resolution_analysis", "component_tie_rule")
+    if _require_exact_int(block["component_connectivity"], "final_resolution_analysis.component_connectivity") != 8:
+        raise DfpPhase1aIdentityError("final_resolution_analysis.component_connectivity must be exactly 8")
+    if block["component_connectivity"] != structural_components_block["primary_connectivity"]:
+        raise DfpPhase1aIdentityError(
+            "final_resolution_analysis.component_connectivity disagrees with structural_components.primary_connectivity"
+        )
+    _require_canonical_string(block["component_pixel_area_unit"], "final_resolution_analysis", "component_pixel_area_unit")
+    if _require_exact_bool(block["component_resizing_forbidden"], "final_resolution_analysis.component_resizing_forbidden") is not True:
+        raise DfpPhase1aIdentityError("final_resolution_analysis.component_resizing_forbidden must be true")
+    if _require_exact_bool(
+        block["component_nearest_neighbor_reconciliation_forbidden"], "final_resolution_analysis.component_nearest_neighbor_reconciliation_forbidden"
+    ) is not True:
+        raise DfpPhase1aIdentityError("final_resolution_analysis.component_nearest_neighbor_reconciliation_forbidden must be true")
+
+
+def validate_final_resolution_analysis_block(block: Mapping[str, Any], structural_components_block: Mapping[str, Any]) -> None:
+    """Public delegate to the canonical [final_resolution_analysis] block
+    validator, so other modules (e.g. a DFP-specific final-rescale
+    pullback binding layer or the execution driver) can independently
+    re-validate a caller-supplied final_resolution_analysis block --
+    canonical_domain, the exact bound rescale operator, and the composed-
+    operator statement -- against this single authority (cross-checked
+    against the live [structural_components] block) without duplicating
+    any of its pinned values."""
+    _validate_final_resolution_analysis_block(block, structural_components_block)
+
+
+def _validate_reversion_coherence_block(
+    block: Mapping[str, Any], dispute_categories_block: Mapping[str, Any], structural_components_block: Mapping[str, Any],
+) -> None:
+    if _require_exact_string(block["baseline_prediction"], "reversion_coherence.baseline_prediction") != "T320":
+        raise DfpPhase1aIdentityError("reversion_coherence.baseline_prediction must be exactly 'T320'")
+    if _require_exact_string(block["fallback_prediction"], "reversion_coherence.fallback_prediction") != "T0":
+        raise DfpPhase1aIdentityError("reversion_coherence.fallback_prediction must be exactly 'T0'")
+    _require_canonical_string(block["reversion_set_definition"], "reversion_coherence", "reversion_set_definition")
+    # Relational, not merely a coincidentally-equal literal: the reversion
+    # set is required to be IDENTICAL text to the already-frozen
+    # dispute_categories.harmful_washout definition -- never a second,
+    # independently-worded (and therefore driftable) restatement of the
+    # same category.
+    if block["reversion_set_definition"] != dispute_categories_block["harmful_washout"]:
+        raise DfpPhase1aIdentityError(
+            "reversion_coherence.reversion_set_definition disagrees with the frozen dispute_categories.harmful_washout definition"
+        )
+    _require_canonical_string(block["domain"], "reversion_coherence", "domain")
+    if _require_exact_int(block["connectivity"], "reversion_coherence.connectivity") != 8:
+        raise DfpPhase1aIdentityError("reversion_coherence.connectivity must be exactly 8")
+    if block["connectivity"] != structural_components_block["primary_connectivity"]:
+        raise DfpPhase1aIdentityError("reversion_coherence.connectivity disagrees with structural_components.primary_connectivity")
+    _require_canonical_string(block["component_size_unit"], "reversion_coherence", "component_size_unit")
+    if _require_exact_int(block["small_component_threshold_pixels"], "reversion_coherence.small_component_threshold_pixels") != 20:
+        raise DfpPhase1aIdentityError("reversion_coherence.small_component_threshold_pixels must be exactly 20")
+    _require_canonical_string(block["small_component_comparison"], "reversion_coherence", "small_component_comparison")
+    _require_canonical_string(block["thresholded_statistic"], "reversion_coherence", "thresholded_statistic")
+    if _require_exact_bool(
+        block["raw_component_sizes_are_primary_evidence"], "reversion_coherence.raw_component_sizes_are_primary_evidence"
+    ) is not True:
+        raise DfpPhase1aIdentityError("reversion_coherence.raw_component_sizes_are_primary_evidence must be true")
+    _require_canonical_string(block["empty_reversion_set_behavior"], "reversion_coherence", "empty_reversion_set_behavior")
+    if _require_exact_bool(block["frozen_before_any_phase1a_result"], "reversion_coherence.frozen_before_any_phase1a_result") is not True:
+        raise DfpPhase1aIdentityError("reversion_coherence.frozen_before_any_phase1a_result must be true")
+    if _require_exact_bool(
+        block["diagnostic_only_not_a_method_parameter"], "reversion_coherence.diagnostic_only_not_a_method_parameter"
+    ) is not True:
+        raise DfpPhase1aIdentityError("reversion_coherence.diagnostic_only_not_a_method_parameter must be true")
+
+
+def validate_reversion_coherence_block(
+    block: Mapping[str, Any], dispute_categories_block: Mapping[str, Any], structural_components_block: Mapping[str, Any],
+) -> None:
+    """Public delegate to the canonical [reversion_coherence] block
+    validator, so other modules (e.g. the DFP analysis contract loader)
+    can independently re-validate a caller-supplied reversion_coherence
+    block -- the frozen reverted-pixel-set definition, domain,
+    connectivity, and pixel threshold -- against this single authority,
+    cross-checked against the live [dispute_categories] and
+    [structural_components] blocks, without duplicating any of its
+    pinned values."""
+    _validate_reversion_coherence_block(block, dispute_categories_block, structural_components_block)
+
+
 def _validate_future_step_bindings_block(block: Mapping[str, Any]) -> None:
     _require_canonical_string(block["description"], "future_step_bindings", "description")
     _require_canonical_string_set(block["step2_items"], "future_step_bindings.step2_items", STEP2_ITEMS_CANONICAL)
@@ -1012,6 +1169,17 @@ def _validate_parent_file_bindings(root: Path, identity: Mapping[str, Any]) -> N
             root, parents[f"{prefix}_identity_path"], parents[f"{prefix}_identity_sha256"],
             label=f"parent identity ({prefix})",
         )
+
+
+def validate_final_resolution_rescale_source_binding(root: Path, identity: Mapping[str, Any]) -> str:
+    """Verify the frozen [final_resolution_analysis].rescale_source_sha256
+    against the real file bytes on disk -- the same file-content hash
+    mechanism every other frozen source binding in this identity uses,
+    never a function-level hash (no such mechanism exists anywhere in
+    this identity system)."""
+    block = identity["final_resolution_analysis"]
+    _validate_file_binding(root, block["rescale_source_relative_path"], block["rescale_source_sha256"], label="final-resolution rescale source")
+    return block["rescale_source_sha256"]
 
 
 def _validate_matched_k11_k12_relational(root: Path, identity: Mapping[str, Any]) -> None:
@@ -1100,6 +1268,7 @@ def validate_static_configuration(*, repo_root: Path, identity_path: Path | None
 
     _validate_parent_file_bindings(root, identity)
     validate_bridge_checkpoint_binding(root, identity)
+    validate_final_resolution_rescale_source_binding(root, identity)
     _validate_matched_k11_k12_relational(root, identity)
     _validate_rwr_checkpoint_relational(root, identity)
     _validate_ade20k_relational(root, identity)
@@ -1128,4 +1297,7 @@ __all__ = [
     "validate_structural_component_area_block",
     "validate_dispute_protocol_block",
     "validate_query_compute_projection_block",
+    "validate_final_resolution_analysis_block",
+    "validate_reversion_coherence_block",
+    "validate_final_resolution_rescale_source_binding",
 ]

@@ -21,22 +21,22 @@ storage_representation_only = true
 
 [protocol_binding]
 protocol_identity_relative_path = "evaluation_identities/e13_dfp_phase1a_protocol.toml"
-protocol_identity_sha256 = "d53cfe6b9632b0fb24a90ed1c1482a00b83dd64255aaa595b0af141cab7febe7"
+protocol_identity_sha256 = "227549b03ec6b1262c465a18b7fc67529fa5a0b5deef419c33ec79a80feb2173"
 
 [artifact_schema_binding]
 artifact_schema_identity_relative_path = "evaluation_identities/e13_dfp_phase1a_artifacts.toml"
-artifact_schema_identity_sha256 = "76df6986a406a9cc26c91cc702ff4b410c5182c80eb40378aa1a646d2120369e"
+artifact_schema_identity_sha256 = "9b8827c77fc81a7e676dece6284f69c630d61eadf916c9c2adf72f0bb30584ce"
 
 [boundary_iou_binding]
 boundary_iou_identity_relative_path = "evaluation_identities/e13_dfp_phase1a_boundary_iou.toml"
-boundary_iou_identity_sha256 = "b5ca4aed473b19be9e19611cfd316dbbb7713e4bf62ab54567cb02da722dd2d1"
+boundary_iou_identity_sha256 = "be17f41627c2a3dadc12d49a78df47a0bdc07ed70e4154c13b42afded10abbdd"
 boundary_interior_split_source = "src.dfp_phase1a_analysis._official_mask_to_boundary (Step 3's own pinned Cheng et al. 2021 primitive, reused unmodified against the dispute mask itself, never reimplemented)"
 
 [subset_manifest_binding]
 coco_stuff_manifest_relative_path = "evaluation_subsets/dfp_phase1a_coco_stuff_500.json"
-coco_stuff_manifest_sha256 = "092a0af90bee1d2f3e407ac0b6ebfafae5a83d251bb0e234cbc7d933d91e5ee0"
+coco_stuff_manifest_sha256 = "75373aca8ef6d434ae02a7e90b6dcc9ba13fd8a31d1e87d858a2f542c19ef482"
 ade20k_manifest_relative_path = "evaluation_subsets/dfp_phase1a_ade20k_500.json"
-ade20k_manifest_sha256 = "eaf9923b906a22cc89882967359ac1a1764bdb34dfcdbad074ecb5450b8c7328"
+ade20k_manifest_sha256 = "c70375bd5707582b3e88bb68dc0f14630944b69a393b9b845cb67f5acf6ba56f"
 
 [category_binding]
 category_order = [

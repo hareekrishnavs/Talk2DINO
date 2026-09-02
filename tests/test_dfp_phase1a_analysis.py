@@ -633,6 +633,8 @@ def _small_contract(base_contract: m.AnalysisContract, *, class_count: int, igno
         class_count=class_count, ignore_index=ignore_index, metric_unit=base_contract.metric_unit,
         difference_unit=base_contract.difference_unit, tie_rule=base_contract.tie_rule,
         primary_connectivity=base_contract.primary_connectivity, sensitivity_connectivity=base_contract.sensitivity_connectivity,
+        reversion_connectivity=base_contract.reversion_connectivity,
+        reversion_small_component_threshold_pixels=base_contract.reversion_small_component_threshold_pixels,
     )
 
 

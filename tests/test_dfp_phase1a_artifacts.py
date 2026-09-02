@@ -152,7 +152,7 @@ def test_artifact_schema_relational_hash_mismatch_rejected(tmp_path):
     wrong_but_well_formed_hash = "0" * 64
     original_text = (ROOT / sch.IDENTITY_RELATIVE_PATH).read_text()
     tampered_text = original_text.replace(
-        'protocol_identity_sha256 = "d53cfe6b9632b0fb24a90ed1c1482a00b83dd64255aaa595b0af141cab7febe7"',
+        'protocol_identity_sha256 = "227549b03ec6b1262c465a18b7fc67529fa5a0b5deef419c33ec79a80feb2173"',
         f'protocol_identity_sha256 = "{wrong_but_well_formed_hash}"',
     )
     # Ensure the replacement actually changed the text (guards against a

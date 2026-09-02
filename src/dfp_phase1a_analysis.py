@@ -128,6 +128,8 @@ class AnalysisContract:
     tie_rule: str
     primary_connectivity: int
     sensitivity_connectivity: int
+    reversion_connectivity: int
+    reversion_small_component_threshold_pixels: int
     boundary_iou_authority: BoundaryIouAuthority | None = None
 
 
@@ -166,6 +168,15 @@ def load_analysis_contract_from_protocol(
     metric_contract = protocol_identity["metric_contract"]
     dispute_protocol = protocol_identity["dispute_protocol"]
     structural = protocol_identity["structural_components"]
+    dispute_categories = protocol_identity["dispute_categories"]
+    reversion_coherence = protocol_identity["reversion_coherence"]
+
+    try:
+        from src.dfp_phase1a_identity import DfpPhase1aIdentityError, validate_reversion_coherence_block
+
+        validate_reversion_coherence_block(reversion_coherence, dispute_categories, structural)
+    except DfpPhase1aIdentityError as exc:
+        raise DfpPhase1aAnalysisError(str(exc)) from exc
 
     tie_rule = dispute_protocol["tie_rule"]
     if tie_rule != _SUPPORTED_TIE_RULE:
@@ -202,6 +213,8 @@ def load_analysis_contract_from_protocol(
         tie_rule=tie_rule,
         primary_connectivity=structural["primary_connectivity"],
         sensitivity_connectivity=structural["sensitivity_connectivity"],
+        reversion_connectivity=reversion_coherence["connectivity"],
+        reversion_small_component_threshold_pixels=reversion_coherence["small_component_threshold_pixels"],
         boundary_iou_authority=boundary_iou_authority,
     )
 

@@ -299,6 +299,76 @@ ground_truth_permitted_uses = [
     "preregistered_analysis",
 ]
 
+[final_resolution_analysis]
+# Additive freeze (never touching [graph]/[propagation]/[score_interpolation_
+# stitching]/[metric_contract]/[coco_stuff_dataset]/[ade20k_dataset] above):
+# the canonical Phase 1A analysis domain, and the exact existing matched-
+# evaluator rescale-to-ori-shape behavior every stitched score field must
+# pass through before argmax/dispute/component/reversion analysis. Resolves
+# the ambiguity between [structural_components]/[dispute_protocol]'s
+# "stitched_prediction" wording (correctly describing the SCIENTIFIC
+# recurrence/stitching pipeline, Steps 3-5, which never mentions ori_shape)
+# and every already-committed evaluator's (matched_power_evaluator.
+# finalize_prediction, native_edge_support_audit.py) established convention
+# of comparing against GT at GT's own native resolution: the "canonical
+# stitched-T0/T16/T32/T64/T320 field" that Steps 6+ (components, dispute,
+# oracle, persistence, confusion, reversion coherence) consume is the
+# stitched field AFTER this one, single, exactly-bound rescale -- never the
+# raw pre-rescale Step-5 output, and never a second, independently invented
+# resize path.
+canonical_domain = "final_evaluator_output_at_ori_shape"
+ori_shape_source = "image_pipeline_metadata_img_metas_ori_shape_never_ground_truth"
+rescale_before_argmax_required = true
+gt_shape_must_equal_final_domain = true
+gt_derived_prediction_geometry_forbidden = true
+rescale_source_relative_path = "src/open_vocabulary_segmentation/models/dinotext/cover_dr/matched_power_evaluator.py"
+rescale_source_sha256 = "13371fd697ef5fae41f2a0b7e99f8c5a65d679a337de734e539a8fdf7e95acf4"
+rescale_source_function = "finalize_prediction"
+rescale_interpolation_mode = "bilinear"
+rescale_align_corners = true
+rescale_antialias = false
+rescale_crop_before_resize = "crop_stitched_field_to_img_metas_img_shape_then_interpolate_to_ori_shape"
+rescale_dtype_policy = "preserve_input_floating_point_dtype"
+rescale_channel_order = "class_channel_first_CHW"
+rescale_argmax_after_rescale = true
+rescale_alternative_path_forbidden = true
+composition_formula = "A_final = R composed with A_stitch"
+composition_adjoint_formula = "A_final^T = A_stitch^T composed with R^T"
+components_and_membership_use_a_final = true
+component_domain = "final_ori_resolution_stitched_T0_scores"
+component_tie_rule = "lowest_class_index"
+component_connectivity = 8
+component_pixel_area_unit = "final_output_pixels"
+component_resizing_forbidden = true
+component_nearest_neighbor_reconciliation_forbidden = true
+
+[reversion_coherence]
+# Additive freeze of the one diagnostic reverted-pixel-set structural
+# analysis (component count/sizes/perimeter/small-component mass fraction)
+# required by the per-image-stats-v2 schema's reversion_component_count/
+# reversion_perimeter/reversion_component_offsets/reversion_component_
+# sizes_flat members. The reversion set is EXACTLY the harmful-washout
+# dispute category already frozen in [dispute_categories] (a=T0, b=T320) --
+# reused verbatim, never redefined -- evaluated in the [final_resolution_
+# analysis] canonical domain. The 20-pixel threshold is the exact pre-run
+# formalization of the previously preregistered "components under
+# approximately 20 px" diagnostic, frozen here BEFORE any Phase 1A result
+# is generated; it is diagnostic-only descriptive evidence, never a method
+# parameter, never a gate, and never a filter applied to any prediction.
+baseline_prediction = "T320"
+fallback_prediction = "T0"
+reversion_set_definition = "GT(x) == a(x) and GT(x) != b(x)"
+domain = "final_ori_resolution_pixels"
+connectivity = 8
+component_size_unit = "pixel_area"
+small_component_threshold_pixels = 20
+small_component_comparison = "component_pixel_area_strictly_less_than_threshold"
+thresholded_statistic = "fraction_of_reverted_pixel_mass_in_small_components"
+raw_component_sizes_are_primary_evidence = true
+empty_reversion_set_behavior = "zero reverted pixels: component_count=0, component_sizes=(), small_component_fraction=0.0, perimeter=0, perimeter_to_area_ratio=0.0, is_zero_reversion=true"
+frozen_before_any_phase1a_result = true
+diagnostic_only_not_a_method_parameter = true
+
 [future_step_bindings]
 description = "Fields explicitly deferred to later DFP steps, never guessed or invented here."
 step2_items = [
