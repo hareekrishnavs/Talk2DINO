@@ -65,6 +65,24 @@ plumbing, never duplicating any of the above:
      module scope -- so merely importing this module (as the CLI does
      to register the ``execute`` subcommand) never initializes CUDA,
      never loads a real model, and never touches the dataset.
+  6. A manifest-ordered dataset execution view (``src.dfp_phase1a_
+     dataset_view.build_manifest_execution_view``): the real mmseg
+     dataset (``_build_inference``'s own return value) enumerates the
+     COMPLETE 5,000-image COCO-Stuff validation universe, in its own
+     native on-disk-listing order -- a DIFFERENT order from the frozen
+     500-image manifest's own canonical selection order. Manifest
+     position is never assumed to equal native dataset index. The view
+     is built once, resolving every one of the 500 frozen ``selected_
+     ids`` to its actual native dataset index, and fully validated
+     (unique canonical IDs, unique physical paths, correct suffix,
+     correct ID format, no missing selected ID) before the first image
+     is processed. Both ``dataset[...]`` and ``dataset.get_gt_seg_map_
+     by_idx(...)`` are then called with the SAME mapped native index
+     for a given image, and the persisted row/checkpoint/result order
+     remains exactly the frozen manifest order throughout -- native
+     index is purely a lookup detail, never observable in any
+     persisted artifact. See that module's own docstring for the full
+     rationale, including the real SLURM job (21055181) this closes.
 
 **Final-resolution analysis authority (now committed, no longer a driver
 judgment call).** Every temporary resolution/reconciliation choice this
@@ -426,10 +444,38 @@ def _process_one_window_dfp(
 
 def _process_one_image(
     inference: Any, dataset: Any, dataset_index: int, canonical_image_id: str, *, protocol_identity: Mapping[str, Any],
-    contracts: Mapping[str, Any], class_count: int, graph_variant: str,
+    contracts: Mapping[str, Any], class_count: int, graph_variant: str, native_dataset_index: int | None = None,
 ) -> tuple[dict[str, Any], int]:
-    """The full per-image scientific pipeline for exactly one image:
-    prepare once, build the canonical window plan once, run every
+    """The full per-image scientific pipeline for exactly one image.
+
+    ``dataset_index`` is the MANIFEST POSITION (0..expected_count-1,
+    canonical row/progress order -- persisted verbatim as the schema-v2
+    ``dataset_indices`` member). ``native_dataset_index`` is the actual
+    index to fetch from ``dataset`` itself (``dataset[native_dataset_
+    index]`` / ``dataset.get_gt_seg_map_by_idx(native_dataset_index)``)
+    -- the native mmseg dataset's own on-disk ordering is a DIFFERENT
+    order from the frozen manifest's, so these are never assumed equal
+    in production; see ``src/dfp_phase1a_dataset_view.py`` for the
+    manifest-order -> native-index mapping and its own full rationale
+    (including the real SLURM job -- 21055181 -- this closes: a stale
+    positional call here previously fed manifest position directly to
+    ``dataset[...]``, which the pre-existing ``reconcile_canonical_
+    image_id`` guard correctly rejected rather than silently mis-loading
+    the wrong image). Defaults to ``dataset_index`` when omitted, which
+    is exactly correct for any dataset whose native order already
+    matches manifest order by construction (every synthetic/small test
+    fixture in this driver's own test suite, which model no mmseg-style
+    metadata surface at all) -- production (``execute_run``) always
+    passes the real, distinct, mapped value explicitly. Whenever
+    ``native_dataset_index`` IS explicitly given, this function
+    independently re-verifies, before ``_extract_prepared_image`` is
+    ever called (``src.dfp_phase1a_dataset_view.verify_position_
+    identity``), that the dataset's own live metadata at that index
+    still yields exactly ``canonical_image_id`` -- never merely
+    trusting a value computed once, earlier, when the execution view
+    was built.
+
+    Prepare once, build the canonical window plan once, run every
     window's shared snapshot/graph/recurrence exactly once, stitch all
     five horizons once, then assemble every v2 NPZ member from Step
     3-10's own already-tested outputs. Ground truth is read ONLY after
@@ -449,6 +495,7 @@ def _process_one_image(
     import torch
 
     from diagnostics.run_k11_k12_stability import _extract_prepared_image
+    from src.dfp_phase1a_dataset_view import verify_position_identity
     from src.dfp_phase1a_analysis import (
         analyze_phase1a_image,
         compute_confusion_statistics,
@@ -481,7 +528,29 @@ def _process_one_image(
     affinity_power = float(protocol_identity["graph"]["affinity_power"])
     class_count_local = analysis_contract.class_count
 
-    prepared = _extract_prepared_image(dataset, dataset_index, canonical_image_id=canonical_image_id)
+    resolved_native_index = dataset_index if native_dataset_index is None else native_dataset_index
+    if native_dataset_index is not None:
+        # Runtime re-verification (Section 7's "three identities agree"
+        # guard), strictly before graph construction/recurrence/GT
+        # access: independently re-derives the canonical ID from the
+        # dataset's own LIVE metadata at resolved_native_index and
+        # requires it to still equal canonical_image_id.
+        # _extract_prepared_image's own internal reconcile_canonical_
+        # image_id call (immediately below) then checks the THIRD
+        # identity -- the pipeline-resolved physical filename --
+        # completing all three checks before any window is processed.
+        # Only meaningful (and only required) when a real manifest ->
+        # native-index MAPPING was actually applied -- i.e. production,
+        # via execute_run's own build_manifest_execution_view. When
+        # native_dataset_index is omitted, dataset_index is used
+        # directly with no remapping (every synthetic/small test
+        # fixture in this module's own test suite, which model no
+        # mmseg-style img_infos/img_suffix metadata surface at all), so
+        # there is no mapping step to re-verify.
+        verify_position_identity(
+            dataset, manifest_position=dataset_index, canonical_id=canonical_image_id, native_index=resolved_native_index,
+        )
+    prepared = _extract_prepared_image(dataset, resolved_native_index, canonical_image_id=canonical_image_id)
     image_tensor = prepared.image_tensor.unsqueeze(0)
     plan = SlidingWindowPlan.build(
         image_size=SpatialSize(prepared.inference_height, prepared.inference_width),
@@ -645,7 +714,7 @@ def _process_one_image(
     # receiving `gt`. GT shape must already equal the canonical final
     # domain -- a mismatch fails closed, it never triggers a resize of
     # any prediction or component. -------------------------------------
-    gt_raw = dataset.get_gt_seg_map_by_idx(dataset_index)
+    gt_raw = dataset.get_gt_seg_map_by_idx(resolved_native_index)
     ignore_index = int(dataset.ignore_index)
     gt = np.asarray(gt_raw).astype(np.int64)
     if gt.shape != ori_shape:
@@ -838,18 +907,41 @@ def execute_run(context: ExecutionContext) -> dict[str, Any]:
     graph_variant = str(protocol_identity["graph"]["canonical_k_variant"])
 
     from diagnostics.run_k11_k12_stability import _build_inference
+    from src.dfp_phase1a_dataset_view import build_manifest_execution_view
 
     inference, dataset = _build_inference(context.repo_root, e3_identity, context.device, log_dir=context.checkpoints_dir)
+
+    # Manifest-order -> native-dataset-index mapping, built and FULLY
+    # validated for every one of the frozen selected_ids (not merely the
+    # remaining resume suffix) before any image is processed -- see
+    # src/dfp_phase1a_dataset_view.py. A construction failure here (a
+    # missing/duplicate/unsafe/wrongly-suffixed mapping anywhere in the
+    # manifest) aborts before the first _process_one_image call, exactly
+    # as it would have aborted mid-run under the old positional-index
+    # bug, but now at the cheapest possible point instead of after
+    # partial GPU work.
+    execution_view = build_manifest_execution_view(dataset, preflight.selected_ids)
+    if len(execution_view) != preflight.expected_count:
+        raise DfpPhase1aExecuteError(
+            f"execution view has {len(execution_view)} positions, expected exactly {preflight.expected_count}"
+        )
 
     accumulator = _V2Accumulator(class_count=preflight.class_count, seed_arrays=preflight.checkpoint_arrays)
     completed_ids = list(preflight.completed_image_ids)
     total_windows_processed = 0  # only tracked forward from this invocation; resumed windows are not re-derivable and are not required by the schema
 
     for index in range(preflight.next_dataset_index, preflight.expected_count):
+        position = execution_view[index]
         canonical_id = preflight.selected_ids[index]
+        if position.manifest_position != index or position.canonical_id != canonical_id:
+            raise DfpPhase1aExecuteError(
+                f"execution view position {index} (canonical_id={position.canonical_id!r}) disagrees with "
+                f"the frozen manifest position {index} (selected_ids={canonical_id!r})"
+            )
         row, window_count = _process_one_image(
             inference, dataset, index, canonical_id, protocol_identity=protocol_identity,
             contracts=contracts, class_count=preflight.class_count, graph_variant=graph_variant,
+            native_dataset_index=position.native_index,
         )
         accumulator.append_image_row(row)
         completed_ids.append(canonical_id)

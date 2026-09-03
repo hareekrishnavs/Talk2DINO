@@ -1238,3 +1238,118 @@ def test_reversion_coherence_independent_of_t32_persistence(monkeypatch, small_f
         ckpt._segment_sums(mutated["reversion_component_sizes_flat"], mutated["reversion_component_offsets"]),
         mutated["harmful_pixel_count"],
     )
+
+
+# ---------------------------------------------------------------------------
+# Dataset-adapter integration: manifest position vs. native dataset index
+# (closes SLURM job 21055181 -- see src/dfp_phase1a_dataset_view.py).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+def test_process_one_image_uses_native_dataset_index_not_manifest_position(monkeypatch, small_fixture):
+    """Real _process_one_image, called with a deliberately DIFFERENT
+    manifest position and native index: proves image loading and GT
+    loading both receive the MAPPED NATIVE index (never the manifest
+    position), while the persisted row's own dataset_indices field still
+    carries the manifest position -- exactly the distinction job
+    21055181's failure exposed."""
+    import diagnostics.run_k11_k12_stability as rk
+    from diagnostics.run_k11_k12_stability import PreparedDiagnosticImage
+    import torch
+
+    protocol_identity = small_fixture["protocol_identity"]
+    contracts = small_fixture["contracts"]
+    class_count = small_fixture["class_count"]
+    inf_shape = small_fixture["inf_shape"]
+    ori_shape = small_fixture["ori_shape"]
+    graph_variant = small_fixture["graph_variant"]
+
+    manifest_position = 5
+    native_index = 2  # deliberately different from manifest_position
+    received_indices = {"extract": None, "gt": None}
+
+    class RecordingDataset:
+        ignore_index = 255
+        img_suffix = ".jpg"
+        img_dir = "images"
+        # native_index=2 must yield canonical_id "000000000724" for
+        # verify_position_identity's own re-check to agree.
+        img_infos = [{"filename": "000000000139.jpg"}, {"filename": "000000000285.jpg"}, {"filename": "000000000724.jpg"}]
+
+        def get_gt_seg_map_by_idx(self, dataset_index):
+            received_indices["gt"] = dataset_index
+            rng = np.random.default_rng(1000 + dataset_index)
+            gt = rng.integers(0, class_count, size=ori_shape).astype(np.int64)
+            gt[0:3, 0:3] = self.ignore_index
+            return gt
+
+    dataset = RecordingDataset()
+    inference = _make_fake_inference(class_count=class_count, patch_grid=contracts["stitching"].patch_grid)
+    inference.model._rng = np.random.default_rng(2000 + manifest_position)
+
+    def fake_extract(dataset_, dataset_index_, *, canonical_image_id=None, image_root=None):
+        received_indices["extract"] = dataset_index_
+        image_tensor = torch.zeros(3, *inf_shape)
+        img_metas = {"img_shape": (*inf_shape, 3), "ori_shape": (*ori_shape, 3)}
+        return PreparedDiagnosticImage(
+            dataset_index=dataset_index_, image_id=canonical_image_id or "000000000724",
+            image_tensor=image_tensor, img_metas=img_metas,
+            inference_height=inf_shape[0], inference_width=inf_shape[1], source_shape_provenance="synthetic-test",
+        )
+
+    monkeypatch.setattr(rk, "_extract_prepared_image", fake_extract)
+
+    row, _ = ex._process_one_image(
+        inference, dataset, manifest_position, "000000000724", protocol_identity=protocol_identity,
+        contracts=contracts, class_count=class_count, graph_variant=graph_variant,
+        native_dataset_index=native_index,
+    )
+
+    assert received_indices["extract"] == native_index, "image loading must use the mapped native index, not the manifest position"
+    assert received_indices["gt"] == native_index, "GT loading must use the mapped native index, not the manifest position"
+    assert row["dataset_indices"] == manifest_position, "the persisted schema-v2 row must still carry the manifest position"
+
+
+@pytest.mark.slow
+def test_process_one_image_guard_rejects_wrong_native_index_when_metadata_available(monkeypatch, small_fixture):
+    """When a real (img_infos-bearing) dataset is used and the caller
+    supplies a native index that disagrees with the dataset's own live
+    metadata for the expected canonical ID, _process_one_image must fail
+    BEFORE any window/graph/recurrence work -- reproducing job
+    21055181's exact failure shape end-to-end through the real driver
+    function, not just the standalone adapter module."""
+    import diagnostics.run_k11_k12_stability as rk
+    import src.dfp_phase1a_global_unary_components as guc
+
+    protocol_identity = small_fixture["protocol_identity"]
+    contracts = small_fixture["contracts"]
+    class_count = small_fixture["class_count"]
+    graph_variant = small_fixture["graph_variant"]
+
+    class MetadataBearingDataset:
+        ignore_index = 255
+        img_suffix = ".jpg"
+        img_dir = "images"
+        img_infos = [{"filename": "000000000139.jpg"}, {"filename": "000000000285.jpg"}, {"filename": "000000000724.jpg"}]
+
+        def get_gt_seg_map_by_idx(self, dataset_index):
+            raise AssertionError("GT must never be read once the pre-window guard rejects the mapping")
+
+    dataset = MetadataBearingDataset()
+    inference = _make_fake_inference(class_count=class_count, patch_grid=contracts["stitching"].patch_grid)
+
+    component_calls = []
+    monkeypatch.setattr(guc, "compute_global_unary_components", lambda *a, **kw: component_calls.append(1))
+
+    # manifest position 0 expects canonical_id "000000000724", but the
+    # (buggy) native index supplied is 0 -- dataset.img_infos[0] is
+    # "000000000139.jpg", not "000000000724.jpg".
+    with pytest.raises(Exception) as excinfo:
+        ex._process_one_image(
+            inference, dataset, 0, "000000000724", protocol_identity=protocol_identity,
+            contracts=contracts, class_count=class_count, graph_variant=graph_variant,
+            native_dataset_index=0,
+        )
+    assert "000000000724" in str(excinfo.value) and "000000000139" in str(excinfo.value)
+    assert component_calls == [], "no component construction (or any later stage) may run once the pre-window guard rejects the mapping"
