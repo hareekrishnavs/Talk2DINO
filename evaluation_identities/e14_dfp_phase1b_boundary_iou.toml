@@ -1,0 +1,130 @@
+format_version = "talk2dino-dfp-phase1b-boundary-iou-identity-v1"
+
+# Successor Boundary IoU authority for DFP PHASE 1B specifically.
+#
+# This identity is deliberately a NEW, generationally-separate authority
+# from evaluation_identities/e13_dfp_phase1a_boundary_iou.toml, which
+# already exists in this repository (committed at c042d07, predating the
+# DFP protocol freeze itself) and remains completely untouched by this
+# identity. The e13 supplement resolves the SAME deferred
+# [boundary_iou].implementation_source_status = "not_yet_bound" field on
+# the frozen e13-dfp-phase1a-protocol identity via a repository-defined
+# classwise extension whose ignore-handling masks ignored pixels BEFORE
+# erosion and re-masks the boundary AFTER -- which can manufacture
+# spurious internal boundary pixels around an ignore hole embedded inside
+# a class region. That primitive was never activated for the actual
+# completed COCO-Stuff-500 Phase 1A run (bind_boundary_iou was never
+# passed as True in dfp_phase1a_execute.py); only the underlying
+# mask-to-boundary primitive was reused there, for the diagnostic
+# harmful_boundary_pixel_count / disputed_boundary_pixel_count pixel-
+# count split -- never for an intersection/union Boundary IoU value.
+#
+# This e14 identity freezes a DIFFERENT, more careful semantic contract
+# (ignore-NEUTRAL erosion: an ignore hole is treated as filled-in during
+# erosion, so it cannot manufacture an internal boundary; only the true
+# image-edge and true class-boundary pixels are counted) specifically
+# for DFP PHASE 1B evaluation. It must never be read as claiming Boundary
+# IoU was available during the completed Phase 1A run, and it must never
+# be read as deprecating, overriding, or retroactively correcting the
+# e13 supplement, which remains valid for whatever purpose it already
+# serves elsewhere in this repository. The two identities coexist by
+# design; production DFP Phase 1B code binds ONLY to this one.
+#
+# No Boundary IoU value has been computed by this identity or by the
+# modules it governs. This is authority-freezing and CPU-only
+# implementation only -- no artifact integration, no COCO-Stuff-500
+# rerun, no Phase 1B result schema, no selector.
+
+[identity]
+name = "e14-dfp-phase1b-boundary-iou"
+schema_name = "talk2dino-dfp-phase1b-boundary-iou-identity-v1"
+schema_version = 1
+purpose = "Freezes the authoritative Boundary IoU metric (Cheng et al. 2021) required before DFP Phase 1B evaluation, per the DFP Phase 1A Gate-1 boundary-mass reframe trigger (FIRED on coco_stuff_500). Binds the exact upstream implementation, an explicitly-labeled DFP classwise semantic-segmentation adaptation with ignore-neutral erosion, and closed validation. Implements no evaluator, no inference, and computes no real Boundary IoU value."
+storage_representation_only = true
+
+[parent_protocol_binding]
+parent_protocol_relative_path = "evaluation_identities/e13_dfp_phase1a_protocol.toml"
+parent_protocol_sha256 = "227549b03ec6b1262c465a18b7fc67529fa5a0b5deef419c33ec79a80feb2173"
+parent_protocol_untouched_by_this_identity = true
+parent_deferred_field = "[boundary_iou].implementation_source_status"
+parent_deferred_value_required = "not_yet_bound"
+retroactive_phase1a_claim_forbidden = true
+
+[published_authority]
+paper_title = "Boundary IoU: Improving Object-Centric Image Segmentation Evaluation"
+paper_authors = "Bowen Cheng, Ross Girshick, Piotr Dollar, Alexander C. Berg, Alexander Kirillov"
+paper_venue = "CVPR"
+paper_year = 2021
+paper_arxiv_id = "2103.16562"
+paper_canonical_url = "https://arxiv.org/abs/2103.16562"
+
+[upstream_implementation_authority]
+official_repository_url = "https://github.com/bowenc0221/boundary-iou-api"
+official_repository_commit = "37d25586a677b043ed585f10e5c42d4e80176ea9"
+canonical_source_relative_path = "boundary_iou/utils/boundary_utils.py"
+canonical_source_function_name = "mask_to_boundary"
+upstream_source_sha256 = "a495cc15fdbded38681edef30b29c62014e81e864f0e68ca6062ce42db51fd9c"
+vendored_source_relative_path = "third_party/boundary_iou_api/boundary_iou/utils/boundary_utils.py"
+vendored_source_sha256 = "a495cc15fdbded38681edef30b29c62014e81e864f0e68ca6062ce42db51fd9c"
+upstream_license_relative_path = "third_party/boundary_iou_api/license.txt"
+upstream_license_sha256 = "6da6c74bb714b3f7fe7eb6b817e42dd59ebfca15f292f54a9a7ad33a6a872863"
+upstream_commit_pin_relative_path = "third_party/boundary_iou_api/UPSTREAM_COMMIT"
+retrieval_date_utc_non_scientific_metadata = "2026-09-03"
+
+[binary_boundary_definition]
+dilation_ratio = 0.02
+diagonal_formula = "image_diagonal = sqrt(height^2 + width^2)"
+dilation_formula = "dilation = int(round(dilation_ratio * image_diagonal))"
+rounding_convention = "python_builtin_round_half_to_even_then_int_cast"
+minimum_dilation = 1
+kernel_shape = "3x3"
+kernel_dtype = "uint8"
+kernel_value = "all_ones"
+kernel_connectivity = 8
+erosion_iterations = "dilation"
+padding_width = 1
+padding_value = 0
+image_edge_behavior = "a foreground mask truncated by the image border is treated as having a boundary at that edge, via zero padding before erosion"
+inner_boundary_formula = "boundary(mask) = mask - eroded(mask)"
+mask_dtype_requirement = "uint8"
+mask_value_requirement = "binary_0_or_1"
+tunable_boundary_width_forbidden = true
+
+[semantic_adaptation]
+label = "DFP classwise semantic-segmentation adaptation of Cheng et al. Boundary IoU"
+is_official_semantic_definition = false
+adaptation_statement = "The official boundary-iou-api package provides only instance/panoptic integrations built on the mask_to_boundary primitive above; it does not supply a complete COCO-Stuff-style classwise semantic-mIoU aggregation contract with an ignore label. Every formula in this [semantic_adaptation] section and its subsections is a repository-defined (DFP) extension on top of the pinned official primitive, and must never be attributed to the upstream paper or repository."
+valid_mask_formula = "V = (G != ignore_index)"
+class_gt_mask_formula = "G_c = (G == c) AND V"
+class_pred_mask_formula = "P_c = (P == c) AND V"
+ignore_semantics = "ignore pixels are unknown, not class-negative"
+valid_domain_erosion_formula = "E_V(M) = erosion(M OR NOT V)"
+ignore_neutral_boundary_formula = "B_V(M) = M AND V AND NOT E_V(M)"
+image_exterior_behavior = "the image exterior remains zero-padded before erosion, so true image-edge boundaries are still counted; only INTERIOR invalid/ignore pixels are neutral for erosion"
+all_valid_reduction_required = "this construction must reduce exactly to the official boundary extraction B(M) = M - erosion(M) when V is all-true (no ignore pixels)"
+boundary_intersection_formula = "boundary_intersection_c = count(B_V(G_c) AND B_V(P_c))"
+boundary_union_formula = "boundary_union_c = count(B_V(G_c) OR B_V(P_c))"
+gt_boundary_pixel_count_formula = "gt_boundary_pixels_c = count(B_V(G_c))"
+pred_boundary_pixel_count_formula = "pred_boundary_pixels_c = count(B_V(P_c))"
+per_image_sufficient_statistics = ["boundary_intersection_c", "boundary_union_c", "gt_boundary_pixels_c", "pred_boundary_pixels_c"]
+dataset_aggregation_rule = "dataset_level_sum_then_divide_full_precision_integer_sufficient_statistics"
+class_intersection_sum_formula = "I_c = sum over images of boundary_intersection_c"
+class_union_sum_formula = "U_c = sum over images of boundary_union_c"
+class_boundary_iou_formula = "BoundaryIoU_c = I_c / U_c"
+class_inclusion_rule = "U_c > 0"
+mean_formula = "mBoundaryIoU = mean over classes with U_c > 0 of BoundaryIoU_c"
+undefined_aggregate_behavior = "if no class has U_c > 0 across the complete evaluated dataset, the aggregate is rejected as undefined with a named error, never a fabricated value"
+all_ignore_image_behavior = "an all-ignore image contributes all-zero per-class sufficient statistics and does not independently fail a multi-image aggregate"
+epsilon_in_denominator_forbidden = true
+metric_unit = "percent_0_100"
+difference_unit = "percentage_points"
+
+[evaluation_role]
+primary_phase1b_metric = "mBoundaryIoU"
+secondary_phase1b_metric = "mIoU preservation"
+gate1_boundary_trigger_source = true
+phase1a_retroactive_result_forbidden = true
+is_method_parameter = false
+is_training_signal = false
+threshold_fitting_forbidden = true
+phase1b_evaluation_still_requires_independent_verification = true
