@@ -83,6 +83,24 @@ plumbing, never duplicating any of the above:
      index is purely a lookup detail, never observable in any
      persisted artifact. See that module's own docstring for the full
      rationale, including the real SLURM job (21055181) this closes.
+  7. Canonical-identity/relative-path separation at the ``_extract_
+     prepared_image`` call boundary: ``ManifestExecutionPosition``
+     carries two distinct identities for the same image -- the bare,
+     frozen manifest ID (``canonical_id``, e.g. ``"000000000724"``,
+     used for row/checkpoint identity throughout this module) and the
+     suffix-bearing, image-root-relative path (``relative_path``, e.g.
+     ``"000000000724.jpg"``, used ONLY as ``_extract_prepared_image``'s
+     own ``canonical_image_id`` argument, which that function's
+     docstring defines as the value ``reconcile_canonical_image_id``
+     reconciles against the pipeline's resolved physical filename).
+     ``execute_run`` passes both explicitly, from the same already-
+     validated execution-view position; neither is ever reconstructed
+     from the other by string concatenation. See the real SLURM job
+     (21060527) this closes: item 6's native-index mapping was already
+     correct, but the bare manifest ID was still being forwarded into
+     the suffix-bearing parameter, so the pipeline's correctly-resolved
+     ``000000000724.jpg`` disagreed with an expected path derived from
+     the un-suffixed ``000000000724``.
 
 **Final-resolution analysis authority (now committed, no longer a driver
 judgment call).** Every temporary resolution/reconciliation choice this
@@ -445,6 +463,7 @@ def _process_one_window_dfp(
 def _process_one_image(
     inference: Any, dataset: Any, dataset_index: int, canonical_image_id: str, *, protocol_identity: Mapping[str, Any],
     contracts: Mapping[str, Any], class_count: int, graph_variant: str, native_dataset_index: int | None = None,
+    canonical_relative_image_path: str | None = None,
 ) -> tuple[dict[str, Any], int]:
     """The full per-image scientific pipeline for exactly one image.
 
@@ -474,6 +493,28 @@ def _process_one_image(
     still yields exactly ``canonical_image_id`` -- never merely
     trusting a value computed once, earlier, when the execution view
     was built.
+
+    ``canonical_image_id`` and ``canonical_relative_image_path`` are two
+    DELIBERATELY DISTINCT identities, never interchangeable (this is the
+    exact call-site defect SLURM job 21060527 exposed: passing the bare
+    manifest ID where the suffix-bearing relative path was required).
+    ``canonical_image_id`` is the bare, frozen 12-digit manifest ID (e.g.
+    ``"000000000724"``, no extension) -- authoritative for row/checkpoint
+    identity, progress accounting, and every diagnostic message in this
+    function; it is what ``verify_position_identity`` above checks and
+    what ``execute_run`` persists into ``dataset_indices``/
+    ``completed_image_ids``. ``canonical_relative_image_path`` is the
+    image-root-relative, suffix-bearing path (e.g. ``"000000000724.jpg"``)
+    -- authoritative ONLY for ``_extract_prepared_image``'s own
+    ``canonical_image_id`` parameter, which that function's docstring
+    defines as the value ``reconcile_canonical_image_id`` reconciles
+    against the pipeline's actually-resolved physical filename. Defaults
+    to ``canonical_image_id`` when omitted (exactly correct for any
+    dataset whose native filenames already equal the bare manifest ID --
+    every synthetic/small test fixture in this driver's own test suite);
+    production (``execute_run``) always passes the adapter's own already-
+    validated ``ManifestExecutionPosition.relative_path`` explicitly --
+    never a hand-built ``canonical_image_id + suffix`` concatenation.
 
     Prepare once, build the canonical window plan once, run every
     window's shared snapshot/graph/recurrence exactly once, stitch all
@@ -550,7 +591,20 @@ def _process_one_image(
         verify_position_identity(
             dataset, manifest_position=dataset_index, canonical_id=canonical_image_id, native_index=resolved_native_index,
         )
-    prepared = _extract_prepared_image(dataset, resolved_native_index, canonical_image_id=canonical_image_id)
+    # Bug closed here (SLURM job 21060527): the bare canonical_image_id
+    # (manifest identity) must NEVER be forwarded as-is into
+    # _extract_prepared_image's own canonical_image_id parameter, which
+    # that function's docstring defines as the suffix-bearing, image-
+    # root-relative path reconciled against the pipeline's resolved
+    # physical filename (see the module docstring above). Falls back to
+    # canonical_image_id only when no relative path was supplied (every
+    # synthetic/small test fixture whose native filenames already equal
+    # the bare ID); production always supplies the adapter's own
+    # already-validated ManifestExecutionPosition.relative_path.
+    resolved_relative_image_path = (
+        canonical_image_id if canonical_relative_image_path is None else canonical_relative_image_path
+    )
+    prepared = _extract_prepared_image(dataset, resolved_native_index, canonical_image_id=resolved_relative_image_path)
     image_tensor = prepared.image_tensor.unsqueeze(0)
     plan = SlidingWindowPlan.build(
         image_size=SpatialSize(prepared.inference_height, prepared.inference_width),
@@ -932,19 +986,29 @@ def execute_run(context: ExecutionContext) -> dict[str, Any]:
 
     for index in range(preflight.next_dataset_index, preflight.expected_count):
         position = execution_view[index]
-        canonical_id = preflight.selected_ids[index]
-        if position.manifest_position != index or position.canonical_id != canonical_id:
+        # canonical_manifest_id: bare, frozen manifest ID -- row/checkpoint
+        # identity (never suffix-bearing). position.relative_path: the
+        # SAME adapter-validated ManifestExecutionPosition's own suffix-
+        # bearing, image-root-relative path -- authoritative ONLY for
+        # _extract_prepared_image's reconciliation. These are two
+        # deliberately distinct identities (see _process_one_image's
+        # docstring); never conflate them, and never reconstruct one from
+        # the other by string concatenation -- both already come from this
+        # single already-validated execution-view position.
+        canonical_manifest_id = preflight.selected_ids[index]
+        if position.manifest_position != index or position.canonical_id != canonical_manifest_id:
             raise DfpPhase1aExecuteError(
                 f"execution view position {index} (canonical_id={position.canonical_id!r}) disagrees with "
-                f"the frozen manifest position {index} (selected_ids={canonical_id!r})"
+                f"the frozen manifest position {index} (selected_ids={canonical_manifest_id!r})"
             )
         row, window_count = _process_one_image(
-            inference, dataset, index, canonical_id, protocol_identity=protocol_identity,
+            inference, dataset, index, canonical_manifest_id, protocol_identity=protocol_identity,
             contracts=contracts, class_count=preflight.class_count, graph_variant=graph_variant,
             native_dataset_index=position.native_index,
+            canonical_relative_image_path=position.relative_path,
         )
         accumulator.append_image_row(row)
-        completed_ids.append(canonical_id)
+        completed_ids.append(canonical_manifest_id)
         total_windows_processed += window_count
         _write_checkpoint(context, accumulator, completed_ids=completed_ids, total_windows_processed=total_windows_processed)
 

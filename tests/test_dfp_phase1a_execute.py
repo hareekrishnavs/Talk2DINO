@@ -1353,3 +1353,291 @@ def test_process_one_image_guard_rejects_wrong_native_index_when_metadata_availa
         )
     assert "000000000724" in str(excinfo.value) and "000000000139" in str(excinfo.value)
     assert component_calls == [], "no component construction (or any later stage) may run once the pre-window guard rejects the mapping"
+
+
+# ---------------------------------------------------------------------------
+# Canonical-relative-path call-site repair (SLURM job 21060527): tests below
+# never monkeypatch diagnostics.run_k11_k12_stability._extract_prepared_image
+# -- they reach the REAL function and the REAL
+# src.dataset_image_identity.reconcile_canonical_image_id through it, using a
+# small synthetic dataset that implements the real mmseg-style sample
+# contract (__getitem__ returning {"img": [...], "img_metas": [...]}) rather
+# than a monkeypatched extraction stand-in.
+# ---------------------------------------------------------------------------
+
+_NATIVE_FILENAMES = ["000000000139.jpg", "000000000285.jpg", "000000000501.jpg", "000000000724.jpg"]
+_MANIFEST_ID = "000000000724"
+_RELATIVE_PATH = "000000000724.jpg"
+_NATIVE_INDEX = 3  # native_filenames[3] == "000000000724.jpg"
+_IMAGE_ROOT = "images"
+
+
+def _make_realistic_native_dataset(*, class_count, inf_shape, ori_shape, access_log=None, ignore_index=255):
+    """A dataset stand-in that satisfies the REAL
+    diagnostics.run_k11_k12_stability._extract_prepared_image contract
+    (``dataset[index]`` returns the canonical single-TTA mmseg sample
+    shape; ``img_metas['filename']`` is the pipeline-resolved physical
+    path exactly as ``LoadImageFromFile`` would produce it: ``image_root
+    / img_infos[index]['filename']``) -- never a monkeypatch of that
+    function itself."""
+    import torch
+
+    log = access_log if access_log is not None else {"img": [], "gt": []}
+    dataset_ignore_index = ignore_index  # class-body scoping cannot read a same-named enclosing local directly
+
+    class RealisticNativeDataset:
+        ignore_index = dataset_ignore_index
+        img_suffix = ".jpg"
+        img_dir = _IMAGE_ROOT
+        img_infos = [{"filename": f} for f in _NATIVE_FILENAMES]
+
+        def __getitem__(self, index):
+            log["img"].append(index)
+            pipeline_path = str(Path(_IMAGE_ROOT) / self.img_infos[index]["filename"])
+            image_tensor = torch.zeros(3, *inf_shape)
+            img_meta = {"img_shape": (*inf_shape, 3), "ori_shape": (*ori_shape, 3), "filename": pipeline_path}
+            return {"img": [image_tensor], "img_metas": [img_meta]}
+
+        def get_gt_seg_map_by_idx(self, index):
+            log["gt"].append(index)
+            rng = np.random.default_rng(1000 + index)
+            gt = rng.integers(0, class_count, size=ori_shape).astype(np.int64)
+            gt[0:3, 0:3] = ignore_index
+            return gt
+
+    return RealisticNativeDataset(), log
+
+
+@pytest.mark.slow
+def test_process_one_image_real_reconciliation_receives_suffixed_relative_path(monkeypatch, small_fixture):
+    """Real, non-monkeypatched _extract_prepared_image -> real
+    reconcile_canonical_image_id path: proves the suffix-bearing
+    canonical_relative_image_path (never the bare canonical_image_id)
+    is what reaches reconciliation, and that it resolves cleanly against
+    a correctly-suffixed pipeline path -- closing SLURM job 21060527.
+    reconcile_canonical_image_id is wrapped (its real implementation
+    still runs unmodified and its return value is used) purely to record
+    the arguments it received; _extract_prepared_image itself is never
+    monkeypatched. Only SlidingWindowPlan.build is monkeypatched, to a
+    sentinel raise reached ONLY after extraction/reconciliation already
+    succeeded, so no window/graph/recurrence/checkpoint work ever runs."""
+    import diagnostics.run_k11_k12_stability as rk
+    from segmentation.evaluation.sliding_window_geometry import SlidingWindowPlan
+    from src.dataset_image_identity import reconcile_canonical_image_id as real_reconcile
+
+    protocol_identity = small_fixture["protocol_identity"]
+    contracts = small_fixture["contracts"]
+    class_count = small_fixture["class_count"]
+    inf_shape = small_fixture["inf_shape"]
+    ori_shape = small_fixture["ori_shape"]
+    graph_variant = small_fixture["graph_variant"]
+
+    dataset, _log = _make_realistic_native_dataset(class_count=class_count, inf_shape=inf_shape, ori_shape=ori_shape)
+    inference = _make_fake_inference(class_count=class_count, patch_grid=contracts["stitching"].patch_grid)
+    inference.model._rng = np.random.default_rng(4000)
+
+    reconcile_received = {}
+
+    def spying_reconcile(*, canonical_relative_id, image_root, pipeline_resolved_filename):
+        reconcile_received["canonical_relative_id"] = canonical_relative_id
+        reconcile_received["image_root"] = image_root
+        reconcile_received["pipeline_resolved_filename"] = pipeline_resolved_filename
+        return real_reconcile(
+            canonical_relative_id=canonical_relative_id, image_root=image_root,
+            pipeline_resolved_filename=pipeline_resolved_filename,
+        )
+
+    monkeypatch.setattr(rk, "reconcile_canonical_image_id", spying_reconcile)
+
+    class _SentinelReached(Exception):
+        pass
+
+    def sentinel_build(cls, **kwargs):
+        raise _SentinelReached("window-plan construction reached: extraction/reconciliation already succeeded")
+
+    monkeypatch.setattr(SlidingWindowPlan, "build", classmethod(sentinel_build))
+
+    with pytest.raises(_SentinelReached):
+        ex._process_one_image(
+            inference, dataset, 0, _MANIFEST_ID, protocol_identity=protocol_identity,
+            contracts=contracts, class_count=class_count, graph_variant=graph_variant,
+            native_dataset_index=_NATIVE_INDEX, canonical_relative_image_path=_RELATIVE_PATH,
+        )
+
+    assert reconcile_received["canonical_relative_id"] == "000000000724.jpg", (
+        "the real reconciliation call must receive the suffix-bearing relative path, not the bare manifest ID"
+    )
+    assert reconcile_received["pipeline_resolved_filename"] == str(Path(_IMAGE_ROOT) / "000000000724.jpg")
+    assert _log["img"] == [_NATIVE_INDEX], "extraction must have indexed the dataset with the native index exactly once before the sentinel fired"
+
+
+@pytest.mark.slow
+def test_process_one_image_real_path_end_to_end_native_index_and_suffix(small_fixture):
+    """Full, non-monkeypatched real _extract_prepared_image ->
+    reconcile_canonical_image_id path, run to completion (a real v2
+    row): manifest position 0 maps to native index 3 for BOTH image and
+    GT access, reconciliation succeeds against the suffix-bearing
+    relative path, and the persisted row still carries the bare
+    manifest ID -- the combined regression this closes for SLURM jobs
+    21055181 (native-index mapping) and 21060527 (suffix) together."""
+    protocol_identity = small_fixture["protocol_identity"]
+    contracts = small_fixture["contracts"]
+    class_count = small_fixture["class_count"]
+    inf_shape = small_fixture["inf_shape"]
+    ori_shape = small_fixture["ori_shape"]
+    graph_variant = small_fixture["graph_variant"]
+
+    dataset, log = _make_realistic_native_dataset(class_count=class_count, inf_shape=inf_shape, ori_shape=ori_shape)
+    inference = _make_fake_inference(class_count=class_count, patch_grid=contracts["stitching"].patch_grid)
+    inference.model._rng = np.random.default_rng(4100)
+
+    row, window_count = ex._process_one_image(
+        inference, dataset, 0, _MANIFEST_ID, protocol_identity=protocol_identity,
+        contracts=contracts, class_count=class_count, graph_variant=graph_variant,
+        native_dataset_index=_NATIVE_INDEX, canonical_relative_image_path=_RELATIVE_PATH,
+    )
+
+    assert log["img"] == [_NATIVE_INDEX], "image access must use the mapped native index, not the manifest position"
+    assert log["gt"] == [_NATIVE_INDEX], "GT access must use the SAME mapped native index"
+    assert row["dataset_indices"] == 0, "the persisted row must carry the bare manifest position (0), never the native index (3) or a suffixed value"
+    assert window_count > 0
+
+
+@pytest.mark.slow
+def test_process_one_image_real_path_rejects_manifest_position_as_native_index(small_fixture):
+    """Historical regression 1 (job 21055181), reproduced through the
+    REAL reconciliation path: omitting native_dataset_index makes
+    resolved_native_index fall back to the manifest position (0) --
+    dataset[0] is "000000000139.jpg", not the expected "000000000724",
+    so the real reconciliation call must reject it before any window is
+    processed."""
+    from src.k11_k12_stability_gate_identity import K11K12StabilityGateError
+
+    protocol_identity = small_fixture["protocol_identity"]
+    contracts = small_fixture["contracts"]
+    class_count = small_fixture["class_count"]
+    inf_shape = small_fixture["inf_shape"]
+    ori_shape = small_fixture["ori_shape"]
+    graph_variant = small_fixture["graph_variant"]
+
+    dataset, log = _make_realistic_native_dataset(class_count=class_count, inf_shape=inf_shape, ori_shape=ori_shape)
+    inference = _make_fake_inference(class_count=class_count, patch_grid=contracts["stitching"].patch_grid)
+
+    with pytest.raises(K11K12StabilityGateError) as excinfo:
+        ex._process_one_image(
+            inference, dataset, 0, _MANIFEST_ID, protocol_identity=protocol_identity,
+            contracts=contracts, class_count=class_count, graph_variant=graph_variant,
+            canonical_relative_image_path=_RELATIVE_PATH,  # native_dataset_index deliberately omitted
+        )
+    assert "000000000724" in str(excinfo.value) and "000000000139" in str(excinfo.value)
+    assert log["gt"] == [], "GT must never be read once reconciliation rejects the mapping"
+
+
+@pytest.mark.slow
+def test_process_one_image_real_path_rejects_bare_manifest_id_without_relative_path(small_fixture):
+    """Historical regression 2 (job 21060527), reproduced through the
+    REAL reconciliation path: the native-index mapping is correct (3),
+    but canonical_relative_image_path is deliberately omitted, so
+    _process_one_image falls back to the bare canonical_image_id
+    ("000000000724", no suffix) -- exactly the pre-repair call
+    convention -- and the real reconciliation call must reject it."""
+    from src.k11_k12_stability_gate_identity import K11K12StabilityGateError
+
+    protocol_identity = small_fixture["protocol_identity"]
+    contracts = small_fixture["contracts"]
+    class_count = small_fixture["class_count"]
+    inf_shape = small_fixture["inf_shape"]
+    ori_shape = small_fixture["ori_shape"]
+    graph_variant = small_fixture["graph_variant"]
+
+    dataset, log = _make_realistic_native_dataset(class_count=class_count, inf_shape=inf_shape, ori_shape=ori_shape)
+    inference = _make_fake_inference(class_count=class_count, patch_grid=contracts["stitching"].patch_grid)
+
+    with pytest.raises(K11K12StabilityGateError) as excinfo:
+        ex._process_one_image(
+            inference, dataset, 0, _MANIFEST_ID, protocol_identity=protocol_identity,
+            contracts=contracts, class_count=class_count, graph_variant=graph_variant,
+            native_dataset_index=_NATIVE_INDEX,  # canonical_relative_image_path deliberately omitted
+        )
+    assert "000000000724" in str(excinfo.value)
+    assert log["gt"] == [], "GT must never be read once reconciliation rejects the mapping"
+
+
+@pytest.mark.parametrize(
+    "label, canonical_relative_id, pipeline_filename, expect_ok",
+    [
+        ("correct_relative_path", "000000000724.jpg", "images/000000000724.jpg", True),
+        ("missing_suffix", "000000000724", "images/000000000724.jpg", False),
+        ("wrong_suffix", "000000000724.png", "images/000000000724.jpg", False),
+        ("uppercase_suffix", "000000000724.JPG", "images/000000000724.jpg", False),
+        ("correct_basename_wrong_directory", "000000000724.jpg", "other/000000000724.jpg", False),
+        ("traversal", "../000000000724.jpg", "images/000000000724.jpg", False),
+        ("absolute_outside_root", "/etc/000000000724.jpg", "images/000000000724.jpg", False),
+        ("doubled_suffix", "000000000724.jpg.jpg", "images/000000000724.jpg", False),
+        ("relative_path_for_another_selected_image", "000000000139.jpg", "images/000000000724.jpg", False),
+        ("pipeline_correct_stem_wrong_suffix", "000000000724.jpg", "images/000000000724.png", False),
+    ],
+)
+def test_real_reconciliation_adversarial_paths(label, canonical_relative_id, pipeline_filename, expect_ok):
+    """Direct calls into the REAL, unmodified _extract_prepared_image ->
+    reconcile_canonical_image_id path (never re-implemented here) across
+    adversarial relative-path/pipeline-path variants; every corrupted
+    variant must be rejected before any window/graph work, exactly like
+    ``reconcile_canonical_image_id``'s own contract."""
+    import torch
+    from diagnostics.run_k11_k12_stability import _extract_prepared_image
+    from src.k11_k12_stability_gate_identity import K11K12StabilityGateError
+
+    inf_shape = (24, 16)
+
+    class MinimalDataset:
+        img_dir = _IMAGE_ROOT
+
+        def __getitem__(self, index):
+            image_tensor = torch.zeros(3, *inf_shape)
+            img_meta = {"img_shape": (*inf_shape, 3), "filename": pipeline_filename}
+            return {"img": [image_tensor], "img_metas": [img_meta]}
+
+    dataset = MinimalDataset()
+    if expect_ok:
+        prepared = _extract_prepared_image(dataset, 0, canonical_image_id=canonical_relative_id)
+        assert prepared.image_id == canonical_relative_id
+    else:
+        with pytest.raises(K11K12StabilityGateError):
+            _extract_prepared_image(dataset, 0, canonical_image_id=canonical_relative_id)
+
+
+@pytest.mark.skipif(not __import__("os").environ.get("COCO_STUFF_REAL_DATA_ROOT"), reason="requires COCO_STUFF_REAL_DATA_ROOT")
+def test_real_coco_stuff_dataset_reconciliation_receives_suffixed_relative_path():
+    """Real-data-gated (COCO_STUFF_REAL_DATA_ROOT): build the ACTUAL
+    5,000-image COCO-Stuff mmseg dataset and the real manifest execution
+    view, confirm manifest position 0 is canonical ID "000000000724" at
+    the adapter-derived native index, then run the REAL, non-
+    monkeypatched _extract_prepared_image -> reconcile_canonical_
+    image_id path for it and confirm the resolved filename is
+    "000000000724.jpg". No model/backbone/bridge weights are loaded and
+    no CUDA is touched -- only dataset construction and the CPU-only
+    mmseg test pipeline."""
+    import json
+
+    from diagnostics.run_k11_k12_stability import _build_dataset_only, _extract_prepared_image
+    from src.dfp_phase1a_dataset_view import build_manifest_execution_view
+    from src.dfp_phase1a_execute import _load_e3_identity
+    from src.dfp_phase1a_identity import load_identity as load_protocol_identity
+
+    protocol_identity = load_protocol_identity(repo_root=REPO_ROOT)
+    e3_identity = _load_e3_identity(REPO_ROOT, protocol_identity)
+    _, dataset, _ = _build_dataset_only(REPO_ROOT, e3_identity)
+
+    manifest = json.loads((REPO_ROOT / "evaluation_subsets/dfp_phase1a_coco_stuff_500.json").read_text())
+    selected_ids = manifest["selected_ids"]
+
+    view = build_manifest_execution_view(dataset, selected_ids)
+    position = view[0]
+    assert position.canonical_id == "000000000724"
+    assert position.relative_path == "000000000724.jpg"
+    assert position.native_index == 3
+
+    prepared = _extract_prepared_image(dataset, position.native_index, canonical_image_id=position.relative_path)
+    assert prepared.image_id == "000000000724.jpg"
+    assert prepared.img_metas["filename"].endswith("000000000724.jpg")
