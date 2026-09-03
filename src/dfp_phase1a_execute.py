@@ -101,6 +101,36 @@ plumbing, never duplicating any of the above:
      the suffix-bearing parameter, so the pipeline's correctly-resolved
      ``000000000724.jpg`` disagreed with an expected path derived from
      the un-suffixed ``000000000724``.
+  8. Final-result installation destination and finalize-only recovery:
+     ``ExecutionContext.result_bundle_dir`` (``context.checkpoints_dir /
+     "result"``, a fixed, deterministic subdirectory name -- never a
+     new CLI-selected path, never the checkpoints directory itself,
+     which already exists once any checkpoint has been written and
+     would make ``install_result_bundle``'s own already-exists guard
+     reject every run) is the ONE destination both
+     ``install_result_bundle`` and ``verify_result_bundle`` are called
+     with in ``_install_final_result``. ``execute_run`` also checks,
+     BEFORE ``_build_inference`` (never after, as a trailing check
+     alone would still pay for a full model/dataset/CUDA construction
+     just to immediately skip an empty per-image loop), whether
+     ``preflight.next_dataset_index`` already equals
+     ``preflight.expected_count`` -- i.e. a checkpoint that is already
+     complete but whose result bundle was never installed -- and if so
+     finalizes directly, constructing no model, loading no weight,
+     initializing no CUDA, and building no dataset. See the real SLURM
+     job (21063877) this closes: preflight/Phase-A/B/C validation and
+     per-image processing had ALREADY produced a complete, self-
+     verified 500-image v2 checkpoint; only the final call --
+     ``install_result_bundle(checkpoints_dir=..., checkpoint_filename=...,
+     repo_root=...)``, omitting the required keyword-only
+     ``destination_dir`` -- raised an uncaught ``TypeError`` after all
+     500 images had already finished, at which point the driver had no
+     way to finalize that checkpoint again without reprocessing every
+     image (the per-image loop's own ``range(preflight.next_dataset_
+     index, preflight.expected_count)`` would already have been empty
+     on any subsequent invocation, so this failure would recur exactly
+     the same way every retry without the destination fix and the
+     early finalize-only check together).
 
 **Final-resolution analysis authority (now committed, no longer a driver
 judgment call).** Every temporary resolution/reconciliation choice this
@@ -230,19 +260,48 @@ therefore never caught here."""
 # ---------------------------------------------------------------------------
 
 
+_RESULT_BUNDLE_DIRNAME = "result"  # fixed, deterministic -- never CLI-selected, never inferred from any artifact
+
+
+def _resolve_result_bundle_dir(output_root: Path) -> Path:
+    """The one authoritative final-result-bundle destination for a given
+    run output root: ``output_root / "result"`` -- a fixed subdirectory
+    name, never the output root itself (which already exists once any
+    checkpoint has been written, and ``install_result_bundle`` refuses
+    to install over an existing destination), never a new CLI-selected
+    or hand-typed path. Defensively confirms the lexically-resolved
+    result path still lands inside the lexically-resolved output root
+    (the same containment shape ``src.dataset_image_identity.
+    reconcile_canonical_image_id`` already uses) -- unreachable under
+    normal construction (the child is a literal, non-symlink path
+    component appended to ``output_root``), but fails closed rather
+    than silently trusting it if ``output_root`` itself ever resolves
+    somewhere unexpected."""
+    result_dir = output_root / _RESULT_BUNDLE_DIRNAME
+    resolved_result_dir = result_dir.resolve(strict=False)
+    resolved_output_root = output_root.resolve(strict=False)
+    if not (resolved_result_dir == resolved_output_root or resolved_output_root in resolved_result_dir.parents):
+        raise DfpPhase1aExecuteError(
+            f"result bundle directory {result_dir} (resolved {resolved_result_dir}) does not resolve inside "
+            f"the run output root {output_root} (resolved {resolved_output_root})"
+        )
+    return result_dir
+
+
 class ExecutionContext:
     """Immutable bundle produced once Phase A, B, and C (via
     ``run_preflight``) and this module's own additive v2-only gate have
     ALL passed. Carries nothing torch-flavored -- constructing this
     object never imports torch."""
 
-    __slots__ = ("preflight", "device", "repo_root", "checkpoints_dir", "trace")
+    __slots__ = ("preflight", "device", "repo_root", "checkpoints_dir", "result_bundle_dir", "trace")
 
     def __init__(self, *, preflight: PreflightContext, device: str, repo_root: Path, trace: PreflightTrace) -> None:
         self.preflight = preflight
         self.device = device
         self.repo_root = repo_root
         self.checkpoints_dir = preflight.output_root
+        self.result_bundle_dir = _resolve_result_bundle_dir(preflight.output_root)
         self.trace = trace
 
 
@@ -942,8 +1001,11 @@ def _install_final_result(context: ExecutionContext) -> None:
     and selects no example of its own."""
     from src.dfp_phase1a_report import install_result_bundle, verify_result_bundle
 
-    install_result_bundle(checkpoints_dir=context.checkpoints_dir, checkpoint_filename=_CHECKPOINT_FILENAME, repo_root=context.repo_root)
-    verify_result_bundle(context.checkpoints_dir)
+    install_result_bundle(
+        destination_dir=context.result_bundle_dir, checkpoints_dir=context.checkpoints_dir,
+        checkpoint_filename=_CHECKPOINT_FILENAME, repo_root=context.repo_root,
+    )
+    verify_result_bundle(context.result_bundle_dir)
 
 
 def execute_run(context: ExecutionContext) -> dict[str, Any]:
@@ -955,6 +1017,26 @@ def execute_run(context: ExecutionContext) -> dict[str, Any]:
     image decoding -- and it does so strictly after ``build_execution_
     context`` has already returned successfully."""
     preflight = context.preflight
+
+    # Finalize-only recovery (closes the real gap SLURM job 21063877
+    # exposed): a checkpoint whose next_dataset_index already equals
+    # expected_count has nothing left to process -- the per-image loop
+    # below would already iterate zero times -- but reaching that empty
+    # loop still cost a full model build, weight load, CUDA init, and
+    # dataset construction on every retry. Checked here, BEFORE any of
+    # that, using only the already-validated preflight fields (no new
+    # state, no new flag): if the checkpoint is already complete,
+    # finalize directly. install_result_bundle/verify_result_bundle
+    # re-derive everything they need from the checkpoint, per-image-
+    # stats manifest, and NPZ already on disk -- no image is read,
+    # decoded, or reprocessed.
+    if preflight.next_dataset_index == preflight.expected_count:
+        _install_final_result(context)
+        return {
+            "images_completed": len(preflight.completed_image_ids),
+            "expected_count": preflight.expected_count, "complete": True,
+        }
+
     protocol_identity = load_protocol_identity(repo_root=context.repo_root)
     e3_identity = _load_e3_identity(context.repo_root, protocol_identity)
     contracts = _build_contracts(protocol_identity, repo_root=context.repo_root)
