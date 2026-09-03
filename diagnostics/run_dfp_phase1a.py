@@ -67,6 +67,7 @@ from src.dfp_phase1a_identity import validate_static_configuration as validate_p
 from src.dfp_phase1a_preflight import (
     DfpPhase1aPreflightError,
     ENV_VAR_BY_RUN_MODE,
+    EXECUTION_ACTION_FINALIZE_ONLY,
     run_preflight,
     validate_model_evaluator_binding,
     verify_frozen_subset_manifest,
@@ -244,11 +245,18 @@ def _cmd_preflight(args: argparse.Namespace) -> int:
         check_git=not args.no_git_check,
     )
     summary = ctx.to_summary_dict()
-    print("READY: DFP Phase 1A preflight passed all phases -- no execution has occurred")
+    if summary["execution_action"] == EXECUTION_ACTION_FINALIZE_ONLY:
+        print(
+            "READY_TO_FINALIZE: DFP Phase 1A preflight passed all phases -- checkpoint is already complete, "
+            f"images to process: 0 -- no execution has occurred"
+        )
+    else:
+        print("READY: DFP Phase 1A preflight passed all phases -- no execution has occurred")
     print(
-        f"# run_mode={summary['run_mode']} mode={summary['mode']} expected_count={summary['expected_count']} "
-        f"class_count={summary['class_count']} next_dataset_index={summary['next_dataset_index']} "
-        f"completed_count={summary['completed_count']} evaluator_identity={summary['evaluator_identity_name']} "
+        f"# run_mode={summary['run_mode']} mode={summary['mode']} execution_action={summary['execution_action']} "
+        f"expected_count={summary['expected_count']} class_count={summary['class_count']} "
+        f"next_dataset_index={summary['next_dataset_index']} completed_count={summary['completed_count']} "
+        f"images_to_process={summary['images_to_process']} evaluator_identity={summary['evaluator_identity_name']} "
         f"source_commit={summary['source_commit']}",
         file=sys.stderr,
     )

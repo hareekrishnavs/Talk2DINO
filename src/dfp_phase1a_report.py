@@ -47,6 +47,40 @@ class DfpPhase1aReportError(ValueError):
     invariant violation. Always fail closed."""
 
 
+RESULT_BUNDLE_DIRNAME = "result"  # fixed, deterministic -- never CLI-selected, never inferred from any artifact
+
+
+def resolve_result_bundle_dir(output_root: Path) -> Path:
+    """The ONE authoritative final-result-bundle destination for a given
+    run output root (``checkpoints_dir`` in this module's own vocabulary):
+    ``output_root / "result"`` -- a fixed subdirectory name, never the
+    output root itself (which already exists once any checkpoint has
+    been written, and :func:`install_result_bundle` refuses to install
+    over an existing destination), never a new CLI-selected or hand-
+    typed path. The single shared authority both
+    ``src.dfp_phase1a_execute.ExecutionContext`` (via
+    ``_install_final_result``) and ``src.dfp_phase1a_preflight.run_phase_c``
+    (finalize-only eligibility / existing-result policy) call -- neither
+    module re-derives or hardcodes this path independently, so they can
+    never disagree about where a result bundle lives. Defensively
+    confirms the lexically-resolved result path still lands inside the
+    lexically-resolved output root (the same containment shape
+    ``src.dataset_image_identity.reconcile_canonical_image_id`` already
+    uses) -- unreachable under normal construction (the child is a
+    literal, non-symlink path component appended to ``output_root``),
+    but fails closed rather than silently trusting it if ``output_root``
+    itself ever resolves somewhere unexpected."""
+    result_dir = Path(output_root) / RESULT_BUNDLE_DIRNAME
+    resolved_result_dir = result_dir.resolve(strict=False)
+    resolved_output_root = Path(output_root).resolve(strict=False)
+    if not (resolved_result_dir == resolved_output_root or resolved_output_root in resolved_result_dir.parents):
+        raise DfpPhase1aReportError(
+            f"result bundle directory {result_dir} (resolved {resolved_result_dir}) does not resolve inside "
+            f"the run output root {output_root} (resolved {resolved_output_root})"
+        )
+    return result_dir
+
+
 TOP_RESULT_KEYS = frozenset(
     {
         "schema", "schema_version", "artifact_schema_identity_sha256", "protocol_identity_sha256",
@@ -374,6 +408,8 @@ def verify_result_bundle(bundle_dir: Path) -> dict[str, Any]:
 __all__ = [
     "DfpPhase1aReportError",
     "TOP_RESULT_KEYS",
+    "RESULT_BUNDLE_DIRNAME",
+    "resolve_result_bundle_dir",
     "validate_result_structure",
     "install_result_bundle",
     "verify_result_bundle",

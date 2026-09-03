@@ -36,7 +36,12 @@ import src.dfp_phase1a_artifact_schema as sch
 import src.dfp_phase1a_checkpoint as ckpt
 import src.dfp_phase1a_execute as ex
 import src.dfp_phase1a_report as report
-from src.dfp_phase1a_preflight import PreflightContext, PreflightTrace
+from src.dfp_phase1a_preflight import (
+    EXECUTION_ACTION_FINALIZE_ONLY,
+    EXECUTION_ACTION_PROCESS,
+    PreflightContext,
+    PreflightTrace,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 CLASS_COUNT = 4
@@ -140,13 +145,22 @@ def _build_synthetic_v2_checkpoint(
 def _build_preflight_context(
     *, output_root: Path, expected_count: int, class_count: int, selected_ids: tuple[str, ...],
     next_dataset_index: int, completed_image_ids: tuple[str, ...], checkpoint_arrays=None, mode: str = "resume",
+    execution_action: str | None = None,
 ) -> PreflightContext:
     """Directly construct a :class:`PreflightContext` (a plain frozen
     dataclass with no validation of its own) -- bypassing
     ``run_preflight``'s real Phase A/B/C ordering entirely, exactly the
     way these tests must: every field ``execute_run``/
     ``_install_final_result`` actually READS is set correctly; every
-    other field is a well-formed placeholder execute_run never inspects."""
+    other field is a well-formed placeholder execute_run never inspects.
+    ``execution_action`` defaults to exactly what the real
+    ``run_phase_c`` would decide for a checkpoint at this
+    next_dataset_index/expected_count (finalize_only iff they're equal)
+    -- callers needing to test a mismatch between the label and the
+    numeric fields (see the internal-consistency assertion in
+    ``execute_run``) pass it explicitly."""
+    if execution_action is None:
+        execution_action = EXECUTION_ACTION_FINALIZE_ONLY if next_dataset_index == expected_count else EXECUTION_ACTION_PROCESS
     return PreflightContext(
         run_mode="coco_stuff_500", dataset_key="coco_stuff", expected_count=expected_count, class_count=class_count,
         class_names_digest=_PLACEHOLDER_SHA256, selected_ids=selected_ids, selected_ids_digest=_PLACEHOLDER_SHA256,
@@ -155,16 +169,16 @@ def _build_preflight_context(
         bridge_checkpoint_sha256=_PLACEHOLDER_SHA256, required_ancestor_commit=_PLACEHOLDER_COMMIT,
         source_commit=_PLACEHOLDER_COMMIT, evaluator_identity_name="e12-matched-k11-k12-t320",
         dataset_root=Path("/nonexistent/unused-by-finalize-only-path"), output_root=output_root, mode=mode,
-        next_dataset_index=next_dataset_index, completed_image_ids=completed_image_ids,
+        execution_action=execution_action, next_dataset_index=next_dataset_index, completed_image_ids=completed_image_ids,
         checkpoint_sha256=None, per_image_stats_manifest_sha256=None, checkpoint_arrays=checkpoint_arrays,
     )
 
 
-def _make_context(checkpoints_dir: Path, *, expected_count: int, class_count: int, selected_ids, next_dataset_index, completed_image_ids) -> ex.ExecutionContext:
+def _make_context(checkpoints_dir: Path, *, expected_count: int, class_count: int, selected_ids, next_dataset_index, completed_image_ids, execution_action: str | None = None) -> ex.ExecutionContext:
     preflight = _build_preflight_context(
         output_root=checkpoints_dir, expected_count=expected_count, class_count=class_count,
         selected_ids=tuple(selected_ids), next_dataset_index=next_dataset_index,
-        completed_image_ids=tuple(completed_image_ids),
+        completed_image_ids=tuple(completed_image_ids), execution_action=execution_action,
     )
     return ex.ExecutionContext(preflight=preflight, device="cpu", repo_root=ROOT, trace=PreflightTrace())
 

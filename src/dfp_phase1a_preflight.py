@@ -39,6 +39,7 @@ from src.dfp_phase1a_artifact_schema import (
 )
 from src.dfp_phase1a_artifact_schema import validate_static_configuration as validate_artifact_schema_configuration
 from src.dfp_phase1a_checkpoint import (
+    PER_IMAGE_STATS_SCHEMA_VARIANT_V2,
     DfpPhase1aCheckpointError,
     validate_resume_state,
 )
@@ -51,7 +52,7 @@ from src.dfp_phase1a_qualitative_selection import (
     DfpPhase1aQualitativeReportError,
 )
 from src.dfp_phase1a_qualitative_selection import validate_static_configuration as validate_qualitative_configuration
-from src.dfp_phase1a_report import DfpPhase1aReportError, verify_result_bundle
+from src.dfp_phase1a_report import DfpPhase1aReportError, resolve_result_bundle_dir, verify_result_bundle
 from src.dfp_phase1a_subset_manifest import (
     ADE20K_CLASS_COUNT,
     COCO_STUFF_ANNOTATION_SUFFIX,
@@ -547,10 +548,26 @@ def validate_model_evaluator_binding(root: Path, dataset_key: str, *, check_git:
 # Phase C: resume/result validation. Still no model/CUDA entry point.
 # ---------------------------------------------------------------------------
 
+# The execution action a driver must take, decided ONCE here and carried
+# unchanged through PreflightContext -- never re-inferred downstream from
+# a single numeric equality. EXECUTION_ACTION_PROCESS covers both fresh
+# (process from index 0) and a normal incomplete resume (process from
+# next_dataset_index): there is scientific work left to do, and the
+# frozen meaning of an incomplete/resumable checkpoint is completely
+# unchanged. EXECUTION_ACTION_FINALIZE_ONLY is the ONE new, narrow state
+# this repair adds: a checkpoint that is already scientifically complete
+# (every image processed, every array validated, canonical ID order
+# confirmed) but whose result bundle was never installed -- SLURM job
+# 21063877's exact recovery scenario. It never implies a single image
+# will be read, decoded, or reprocessed.
+EXECUTION_ACTION_PROCESS = "process"
+EXECUTION_ACTION_FINALIZE_ONLY = "finalize_only"
+
 
 @dataclass(frozen=True)
 class PhaseCResult:
     mode: str
+    execution_action: str
     next_dataset_index: int
     completed_image_ids: tuple[str, ...]
     checkpoint_sha256: str | None
@@ -564,16 +581,22 @@ def run_phase_c(
 ) -> PhaseCResult:
     """Ordered Phase C: decide the exact fresh/resume mode, validate the
     checkpoint/per-image-stats/NPZ chain exactly once via
-    :func:`dfp_phase1a_checkpoint.validate_resume_state`, reject an
-    already-complete resume, and validate result-artifact policy. Never
-    creates a checkpoint or result artifact."""
+    :func:`dfp_phase1a_checkpoint.validate_resume_state`, decide the
+    exact execution action (process, or -- for the one narrow case of a
+    complete-but-unfinalized checkpoint with no existing result
+    destination -- finalize_only), and validate result-artifact policy.
+    Never creates a checkpoint or result artifact."""
     _trace(trace, "phase_c.decide_fresh_or_resume")
     if mode not in ("fresh", "resume"):
         raise DfpPhase1aPreflightError(f"mode must be exactly 'fresh' or 'resume', got {mode!r}")
 
     checkpoints_dir = Path(checkpoints_dir)
     checkpoint_path = checkpoints_dir / checkpoint_filename
-    result_path = checkpoints_dir / "result.json"
+    # The SAME authoritative destination _install_final_result installs
+    # to and verifies -- resolved once, from the single shared function
+    # in src.dfp_phase1a_report, never a separately hardcoded or
+    # independently re-derived path (see that function's own docstring).
+    result_dir = resolve_result_bundle_dir(checkpoints_dir)
 
     _trace(trace, "phase_c.checkpoint_or_absence")
     if mode == "fresh":
@@ -582,9 +605,9 @@ def run_phase_c(
                 f"fresh mode requested but a checkpoint already exists at {checkpoint_path}; "
                 "pass an explicit fresh-overwrite authorization or use resume mode"
             )
-        if result_path.exists() and not allow_fresh_overwrite:
+        if result_dir.exists() and not allow_fresh_overwrite:
             raise DfpPhase1aPreflightError(
-                f"fresh mode requested but a final result already exists at {result_path}; "
+                f"fresh mode requested but a final result already exists at {result_dir}; "
                 "pass an explicit fresh-overwrite authorization or use resume mode"
             )
         _trace(trace, "phase_c.completed_id_prefix")
@@ -594,8 +617,8 @@ def run_phase_c(
         _trace(trace, "phase_c.result_policy")
         _trace(trace, "phase_c.build_context")
         return PhaseCResult(
-            mode="fresh", next_dataset_index=0, completed_image_ids=(), checkpoint_sha256=None,
-            per_image_stats_manifest_sha256=None, arrays=None,
+            mode="fresh", execution_action=EXECUTION_ACTION_PROCESS, next_dataset_index=0, completed_image_ids=(),
+            checkpoint_sha256=None, per_image_stats_manifest_sha256=None, arrays=None,
         )
 
     # mode == "resume"
@@ -618,19 +641,57 @@ def run_phase_c(
 
     _trace(trace, "phase_c.reject_already_complete_resume")
     if not resume_result["resumable"]:
-        raise DfpPhase1aPreflightError(
-            f"checkpoint at {checkpoint_path} is already marked complete; resume mode requires an incomplete, "
-            "resumable checkpoint (use fresh mode with an explicit overwrite authorization to redo a run)"
-        )
-
-    _trace(trace, "phase_c.result_policy")
-    if result_path.exists():
-        try:
-            result_summary = verify_result_bundle(checkpoints_dir)
-        except DfpPhase1aReportError as error:
-            raise DfpPhase1aPreflightError(f"existing result at {result_path} failed verification: {error}") from error
-        if result_summary["result"]["final"]:
-            raise DfpPhase1aPreflightError(f"a final result already exists at {result_path}; resuming an already-finalized run is refused")
+        # A complete checkpoint is NEVER image-resumable -- this meaning
+        # is completely unchanged, and every scientific/structural
+        # invariant this state's own eligibility requires (schema,
+        # counts, canonical completed-ID order, all 122 v2 arrays, every
+        # digest) has ALREADY been verified above, unconditionally, by
+        # validate_resume_state -- nothing here relaxes what "verified"
+        # means. What changes is which OUTCOME a verified-consistent
+        # complete checkpoint receives: it may still be eligible for the
+        # separate, narrower finalize_only action (install/verify the
+        # already-complete checkpoint's result bundle, processing zero
+        # images) -- the real gap SLURM job 21063877 exposed -- rather
+        # than an unconditional rejection.
+        checkpoint = resume_result["checkpoint"]
+        if resume_result["per_image_stats_schema_variant"] != PER_IMAGE_STATS_SCHEMA_VARIANT_V2:
+            raise DfpPhase1aPreflightError(
+                f"checkpoint at {checkpoint_path} is already marked complete; resume mode requires an incomplete, "
+                "resumable checkpoint (use fresh mode with an explicit overwrite authorization to redo a run) -- "
+                "a complete non-v2 checkpoint is never eligible for finalize-only recovery"
+            )
+        if checkpoint["final_result_produced"]:
+            raise DfpPhase1aPreflightError(
+                f"checkpoint at {checkpoint_path} is complete and already records a final result "
+                "(final_result_produced=true); resuming or re-finalizing an already-finalized run is refused"
+            )
+        _trace(trace, "phase_c.result_policy")
+        if result_dir.exists():
+            try:
+                result_summary = verify_result_bundle(result_dir)
+            except DfpPhase1aReportError as error:
+                raise DfpPhase1aPreflightError(
+                    f"checkpoint at {checkpoint_path} is complete and unfinalized, but the result destination "
+                    f"{result_dir} already exists and failed verification: {error} -- refusing finalize-only "
+                    "recovery over an unverifiable existing destination"
+                ) from error
+            if result_summary["result"]["final"]:
+                raise DfpPhase1aPreflightError(f"a final result already exists at {result_dir}; resuming an already-finalized run is refused")
+            raise DfpPhase1aPreflightError(
+                f"a result bundle exists at {result_dir} but does not declare itself final; refusing "
+                "finalize-only recovery over an ambiguous existing destination"
+            )
+        execution_action = EXECUTION_ACTION_FINALIZE_ONLY
+    else:
+        execution_action = EXECUTION_ACTION_PROCESS
+        _trace(trace, "phase_c.result_policy")
+        if result_dir.exists():
+            try:
+                result_summary = verify_result_bundle(result_dir)
+            except DfpPhase1aReportError as error:
+                raise DfpPhase1aPreflightError(f"existing result at {result_dir} failed verification: {error}") from error
+            if result_summary["result"]["final"]:
+                raise DfpPhase1aPreflightError(f"a final result already exists at {result_dir}; resuming an already-finalized run is refused")
 
     completed_ids = tuple(resume_result["checkpoint"]["completed_image_ids"])
     arrays = resume_result["arrays"]
@@ -643,6 +704,7 @@ def run_phase_c(
     _trace(trace, "phase_c.build_context")
     return PhaseCResult(
         mode="resume",
+        execution_action=execution_action,
         next_dataset_index=resume_result["next_dataset_index"],
         completed_image_ids=completed_ids,
         checkpoint_sha256=sha256_file(checkpoint_path),
@@ -686,6 +748,7 @@ class PreflightContext:
     dataset_root: Path
     output_root: Path
     mode: str
+    execution_action: str
     next_dataset_index: int
     completed_image_ids: tuple[str, ...]
     checkpoint_sha256: str | None
@@ -701,10 +764,12 @@ class PreflightContext:
             {
                 "run_mode": self.run_mode,
                 "mode": self.mode,
+                "execution_action": self.execution_action,
                 "expected_count": self.expected_count,
                 "class_count": self.class_count,
                 "next_dataset_index": self.next_dataset_index,
                 "completed_count": len(self.completed_image_ids),
+                "images_to_process": self.expected_count - self.next_dataset_index,
                 "evaluator_identity_name": self.evaluator_identity_name,
                 "source_commit": self.source_commit,
             }
@@ -751,6 +816,7 @@ def run_preflight(
         dataset_root=phase_b.dataset_root,
         output_root=phase_b.output_root,
         mode=phase_c.mode,
+        execution_action=phase_c.execution_action,
         next_dataset_index=phase_c.next_dataset_index,
         completed_image_ids=phase_c.completed_image_ids,
         checkpoint_sha256=phase_c.checkpoint_sha256,
@@ -778,6 +844,8 @@ __all__ = [
     "validate_output_root_safety",
     "validate_model_evaluator_binding",
     "run_phase_b",
+    "EXECUTION_ACTION_PROCESS",
+    "EXECUTION_ACTION_FINALIZE_ONLY",
     "PhaseCResult",
     "run_phase_c",
     "PreflightContext",

@@ -211,6 +211,7 @@ import src.dfp_phase1a_artifact_schema as artifact_schema
 import src.dfp_phase1a_checkpoint as checkpoint_mod
 from src.dfp_phase1a_identity import DfpPhase1aIdentityError, load_identity as load_protocol_identity
 from src.dfp_phase1a_preflight import (
+    EXECUTION_ACTION_FINALIZE_ONLY,
     DfpPhase1aPreflightError,
     PreflightContext,
     PreflightTrace,
@@ -260,32 +261,16 @@ therefore never caught here."""
 # ---------------------------------------------------------------------------
 
 
-_RESULT_BUNDLE_DIRNAME = "result"  # fixed, deterministic -- never CLI-selected, never inferred from any artifact
-
-
-def _resolve_result_bundle_dir(output_root: Path) -> Path:
-    """The one authoritative final-result-bundle destination for a given
-    run output root: ``output_root / "result"`` -- a fixed subdirectory
-    name, never the output root itself (which already exists once any
-    checkpoint has been written, and ``install_result_bundle`` refuses
-    to install over an existing destination), never a new CLI-selected
-    or hand-typed path. Defensively confirms the lexically-resolved
-    result path still lands inside the lexically-resolved output root
-    (the same containment shape ``src.dataset_image_identity.
-    reconcile_canonical_image_id`` already uses) -- unreachable under
-    normal construction (the child is a literal, non-symlink path
-    component appended to ``output_root``), but fails closed rather
-    than silently trusting it if ``output_root`` itself ever resolves
-    somewhere unexpected."""
-    result_dir = output_root / _RESULT_BUNDLE_DIRNAME
-    resolved_result_dir = result_dir.resolve(strict=False)
-    resolved_output_root = output_root.resolve(strict=False)
-    if not (resolved_result_dir == resolved_output_root or resolved_output_root in resolved_result_dir.parents):
-        raise DfpPhase1aExecuteError(
-            f"result bundle directory {result_dir} (resolved {resolved_result_dir}) does not resolve inside "
-            f"the run output root {output_root} (resolved {resolved_output_root})"
-        )
-    return result_dir
+# The authoritative final-result-bundle destination lives in
+# src.dfp_phase1a_report (the module that owns install_result_bundle/
+# verify_result_bundle and the whole "what is a result bundle" concept)
+# -- src.dfp_phase1a_preflight's finalize-only eligibility check (Phase
+# C) needs the IDENTICAL derivation to decide whether a destination is
+# already occupied, and a shared, single-source-of-truth function is
+# the only way both modules can never independently drift. Re-exported
+# under the historical private name so existing call sites/tests in
+# this module are unaffected by the move.
+from src.dfp_phase1a_report import resolve_result_bundle_dir as _resolve_result_bundle_dir
 
 
 class ExecutionContext:
@@ -1019,18 +1004,28 @@ def execute_run(context: ExecutionContext) -> dict[str, Any]:
     preflight = context.preflight
 
     # Finalize-only recovery (closes the real gap SLURM job 21063877
-    # exposed): a checkpoint whose next_dataset_index already equals
-    # expected_count has nothing left to process -- the per-image loop
-    # below would already iterate zero times -- but reaching that empty
-    # loop still cost a full model build, weight load, CUDA init, and
-    # dataset construction on every retry. Checked here, BEFORE any of
-    # that, using only the already-validated preflight fields (no new
-    # state, no new flag): if the checkpoint is already complete,
-    # finalize directly. install_result_bundle/verify_result_bundle
+    # exposed): Phase C (src.dfp_phase1a_preflight.run_phase_c) has
+    # ALREADY decided the exact execution action -- explicit, recorded
+    # once in the PreflightContext -- never re-inferred here from a
+    # single numeric equality. EXECUTION_ACTION_FINALIZE_ONLY is granted
+    # ONLY for a checkpoint that is scientifically complete (every image
+    # processed, every one of the 122 v2 arrays validated, canonical ID
+    # order confirmed, no existing result destination) -- Phase C's own
+    # eligibility predicate is the sole authority for this decision; this
+    # function only acts on it. Reaching this branch means the per-image
+    # loop below would already iterate zero times, but reaching that
+    # empty loop would still cost a full model build, weight load, CUDA
+    # init, and dataset construction on every retry -- checked here,
+    # BEFORE any of that. install_result_bundle/verify_result_bundle
     # re-derive everything they need from the checkpoint, per-image-
     # stats manifest, and NPZ already on disk -- no image is read,
     # decoded, or reprocessed.
-    if preflight.next_dataset_index == preflight.expected_count:
+    if preflight.execution_action == EXECUTION_ACTION_FINALIZE_ONLY:
+        assert preflight.next_dataset_index == preflight.expected_count, (
+            "internal error: Phase C granted finalize_only for a preflight whose next_dataset_index "
+            "does not equal expected_count -- this must never happen; refusing to enter the finalize "
+            "path against an inconsistent context rather than silently trusting the action label alone"
+        )
         _install_final_result(context)
         return {
             "images_completed": len(preflight.completed_image_ids),
