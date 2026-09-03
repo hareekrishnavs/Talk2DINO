@@ -58,13 +58,72 @@ need to pass it.
   command, this analysis code's own SHA-256, a UTC timestamp explicitly
   marked non-scientific, and every generated output's SHA-256.
 
+## Boundary-mass reframe trigger
+
+`gate1_analysis.json`'s `boundary_reframe_trigger` (and the "Boundary
+Reframing Trigger" section of `gate1_report.md`) enforces — never
+computes — the frozen `[gate_expectations].boundary_mass_reframe_threshold`
+/ `boundary_mass_reframe_consequence` pair, read live from
+`evaluation_identities/e13_dfp_phase1a_protocol.toml` (never a hardcoded
+literal; a tampered threshold, wrong type, or altered consequence string
+is rejected by `src.dfp_phase1a_identity.load_identity` before this
+analysis ever runs).
+
+- **Numerator/denominator**: `sum(harmful_boundary_pixel_count) /
+  sum(harmful_pixel_count)` across the dataset, both already-persisted v2
+  scalars. `harmful_boundary_pixel_count + harmful_interior_pixel_count ==
+  harmful_pixel_count` is verified (by `build_boundary_concentration`)
+  before the trigger is ever evaluated. This is the *harmful-washout*
+  boundary concentration specifically — never derived from the
+  all-disputes `disputed_boundary_pixel_count`.
+- **Strict comparison**: the frozen consequence text reads "if >70% ...",
+  so the comparison is strict `observed_fraction > threshold` — a fraction
+  exactly equal to the threshold does **not** fire.
+- **Three statuses**: `FIRED` (fraction > threshold), `NOT_FIRED` (fraction
+  <= threshold), `UNVERIFIABLE` (see zero-harmful below). These are the
+  only values `trigger_status` ever takes.
+- **Zero-harmful behavior**: if the dataset-level total of
+  `harmful_pixel_count` is 0, the fraction is mathematically undefined —
+  the trigger never divides by zero, never emits NaN/Infinity anywhere in
+  `gate1_analysis.json` (`harmful_washout_boundary_fraction_of_harmful` is
+  JSON `null` in this case), sets `trigger_status = "UNVERIFIABLE"`, and
+  sets `phase1b_evaluation_ready = false`.
+- **Never reverses the Gate-1 decision**: `affects_oracle_headroom_gate`
+  is always `false`. The oracle/recovery headroom gate
+  (`G_oracle_unary >= 2.0pp AND G_recover >= 1.0pp`) is computed from
+  `[gate_contract]` alone and is never read or altered by this trigger —
+  `PROCEED_TO_PHASE_1B` stands regardless of the boundary-trigger outcome.
+- **Why Phase-1B evaluation is nevertheless blocked when fired**: the
+  frozen consequence is that Boundary IoU "becomes the primary improvement
+  metric and mIoU becomes secondary/preservation" once the trigger fires.
+  Since `[boundary_iou].implementation_source_status` remains
+  `not_yet_bound` (this repair implements no Boundary IoU value, chooses
+  no boundary width, and binds nothing), evaluating Phase 1B against its
+  own required primary metric is not yet possible — hence
+  `phase1b_evaluation_ready = false` and `required_next_step =
+  "BIND_BOUNDARY_IOU"` whenever the trigger fires. When it does not fire,
+  mIoU alone remains sufficient for evaluation and
+  `phase1b_evaluation_ready = true`.
+- **mIoU stays valid, just secondary when fired**: nothing about this
+  trigger revises any previously reported mIoU/horizon/oracle value —
+  those numbers are unchanged (see the *Known, explicitly disclosed
+  limitations* below for what remains unreported). Once fired, mIoU is
+  reframed as a secondary/preservation measurement for Phase 1B, not
+  discarded or recomputed.
+
+This document does not define — and this repair does not implement — any
+Boundary IoU morphology, boundary width, padding, or ignore-handling
+convention; those remain an explicit, separate, not-yet-authorized task.
+
 ## Known, explicitly disclosed limitations
 
 - **Boundary IoU is never computed** — `[boundary_iou].
   implementation_source_status` is frozen as `not_yet_bound`. Only
   boundary/interior pixel-COUNT ratios are reported (disputed and
   harmful-washout only; beneficial/third-label boundary splits are not
-  persisted separately).
+  persisted separately). See *Boundary-mass reframe trigger* above for how
+  the 70% harmful-washout boundary-concentration threshold is enforced and
+  reported without computing an IoU value.
 - **Q_w distributions are percentiles of per-image summaries**, not a
   true pooled per-window percentile (only each image's own mean/
   median/p90/p95/p99/maximum of `|Q_w|` is persisted, never raw

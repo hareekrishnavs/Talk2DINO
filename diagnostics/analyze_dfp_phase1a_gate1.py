@@ -31,8 +31,11 @@ import subprocess
 from src.dfp_phase1a_gate1_analysis import (
     DfpPhase1aGate1AnalysisError,
     GATE_PROCEED, GATE_STOP,
+    BOUNDARY_TRIGGER_FIRED,
+    BOUNDARY_TRIGGER_UNVERIFIABLE,
     apply_gate1_decision,
     build_boundary_concentration,
+    build_boundary_reframe_trigger,
     build_component_structure,
     build_compute_projection,
     build_dispute_accounting,
@@ -103,6 +106,7 @@ def run_gate1_analysis(*, result_dir: Path, output_dir: Path, repo_root: Path, r
     components = build_component_structure(source.arrays)
     reversion = build_reversion_coherence(source.arrays)
     boundary = build_boundary_concentration(source.arrays)
+    boundary_trigger = build_boundary_reframe_trigger(boundary, protocol_identity)
     compute_projection = build_compute_projection(source.arrays)
     qualitative = build_qualitative_selection(source, requested_count_per_category=requested_count_per_category)
     gate = apply_gate1_decision(oracle, protocol_identity)
@@ -136,6 +140,7 @@ def run_gate1_analysis(*, result_dir: Path, output_dir: Path, repo_root: Path, r
         "component_structure": components,
         "reversion_coherence": reversion,
         "boundary_concentration": boundary,
+        "boundary_reframe_trigger": boundary_trigger,
         "compute_projection": compute_projection,
         "gate1_decision": gate,
         "variant_dataset_level_metrics": {
@@ -204,17 +209,52 @@ def run_gate1_analysis(*, result_dir: Path, output_dir: Path, repo_root: Path, r
     return analysis
 
 
+def _boundary_trigger_narrative(trigger: dict) -> str:
+    """Dynamic narrative sourced only from the boundary_trigger record's own
+    fields -- the FIRED-case wording mirrors the frozen consequence text but
+    is generated from the live observed fraction/threshold, never a bare
+    hardcoded percentage."""
+    status = trigger["trigger_status"]
+    if status == BOUNDARY_TRIGGER_UNVERIFIABLE:
+        return (
+            f"The boundary-mass trigger is **UNVERIFIABLE**: {trigger['unverifiable_reason']}."
+        )
+    pct = trigger["harmful_washout_boundary_fraction_of_harmful"] * 100.0
+    threshold_pct = trigger["boundary_mass_reframe_threshold"] * 100.0
+    if status == BOUNDARY_TRIGGER_FIRED:
+        return (
+            f"The boundary-mass trigger **fired**: {pct:.2f}% of harmful-washout pixels fall inside the "
+            f"frozen boundary band, exceeding the preregistered {threshold_pct:.0f}% threshold. Boundary IoU "
+            "must therefore be bound and used as the primary Phase-1B improvement metric; mIoU remains a "
+            "secondary/preservation metric."
+        )
+    return (
+        f"The boundary-mass trigger did **not** fire: {pct:.2f}% of harmful-washout pixels fall inside the "
+        f"frozen boundary band, at or below the preregistered {threshold_pct:.0f}% threshold. mIoU remains the "
+        "primary Phase-1B improvement metric under this check."
+    )
+
+
 def _render_markdown_report(source, analysis: dict, qualitative: dict) -> str:
     gate = analysis["gate1_decision"]
     oracle = analysis["oracle_analysis"]
     dispute = analysis["dispute_accounting"]
     persistence = analysis["persistence_baseline"]
     boundary = analysis["boundary_concentration"]
+    boundary_trigger = analysis["boundary_reframe_trigger"]
     compute = analysis["compute_projection"]
     lines = []
     lines.append("# DFP Phase 1A Gate-1 Analysis: COCO-Stuff 500\n")
     lines.append("## 1. Executive verdict\n")
     lines.append(f"**{gate['decision']}**\n\n{gate['rationale']}\n\n{gate['scope_note']}\n")
+    lines.append(
+        f"\nBOUNDARY TRIGGER: {boundary_trigger['trigger_status']}\n\n"
+        + (
+            "NEXT PREREQUISITE: BIND BOUNDARY IOU\n"
+            if boundary_trigger["trigger_status"] == BOUNDARY_TRIGGER_FIRED
+            else f"NEXT PREREQUISITE: {boundary_trigger['required_next_step'] or 'NONE'}\n"
+        )
+    )
     lines.append("## 2. Source verification\n")
     lines.append(f"- Result path: `{source.result_dir}`\n- Image count: {source.image_count}\n- Class count: {source.class_count}\n"
                   f"- Schema: `{source.stats_manifest['schema']}` v{source.stats_manifest['schema_version']}\n"
@@ -267,16 +307,58 @@ def _render_markdown_report(source, analysis: dict, qualitative: dict) -> str:
     lines.append("## 12. Gate-1 decision table\n")
     for k, v in gate["criteria"].items():
         lines.append(f"- {k}: {v}\n")
-    lines.append("## 13. Limitations\n")
+    lines.append("## 13. Boundary Reframing Trigger\n")
+    lines.append(
+        f"- harmful-washout boundary pixels: {boundary['harmful_washout_boundary_pixel_count']}\n"
+        f"- harmful-washout total pixels: {boundary_trigger['harmful_washout_pixel_total']}\n"
+        f"- observed fraction: {boundary_trigger['harmful_washout_boundary_fraction_of_harmful']!r}"
+        + (
+            f" ({boundary_trigger['harmful_washout_boundary_fraction_of_harmful'] * 100.0:.2f}%)\n"
+            if boundary_trigger["harmful_washout_boundary_fraction_of_harmful"] is not None else "\n"
+        )
+        + f"- frozen threshold: {boundary_trigger['boundary_mass_reframe_threshold']!r} ({boundary_trigger['boundary_mass_reframe_threshold'] * 100.0:.0f}%)\n"
+        f"- comparison: observed {boundary_trigger['comparison_operator']} threshold\n"
+        f"- trigger status: **{boundary_trigger['trigger_status']}**\n"
+        f"- Boundary IoU authority status: `{boundary_trigger['boundary_iou_authority_status']}`\n"
+        f"- frozen consequence: {boundary_trigger['boundary_mass_reframe_consequence']}\n"
+        f"- primary Phase-1B metric: {boundary_trigger['primary_phase1b_metric']}\n"
+        f"- secondary Phase-1B metric: {boundary_trigger['secondary_phase1b_metric']}\n"
+        f"- required next step: {boundary_trigger['required_next_step']}\n"
+        f"- affects oracle/recovery headroom gate: {boundary_trigger['affects_oracle_headroom_gate']}\n"
+        f"- Phase-1B evaluation ready: {boundary_trigger['phase1b_evaluation_ready']}\n\n"
+        f"{_boundary_trigger_narrative(boundary_trigger)}\n"
+    )
+    lines.append("## 14. Limitations\n")
     lines.append("- Boundary IoU is unavailable (`implementation_source_status = not_yet_bound`); only boundary/interior pixel-count ratios are reported.\n"
                  "- `revert_set_fragmentation` qualitative category is deferred (not reconstructable from persisted scalars).\n"
                  "- Qualitative panel rendering is deferred (raw prediction/label pixel data is excluded by design from the v2 schema).\n"
                  "- Q_w distributions are percentiles of per-image summaries, not a true pooled per-window percentile.\n"
                  "- Active-component count R_w in isolation is not reconstructable (only R_w*|Q_w| is persisted).\n"
                  "- This Gate-1 predicate is evaluated on coco_stuff_500 only; ade20k_500 has not been run, so no cross-dataset claim is made.\n")
-    lines.append("## 14. Scope statement\n")
+    lines.append("## 15. Scope statement\n")
     lines.append("This is a stratified 500-image feasibility analysis (Phase 1A diagnostic), not the final 5,000-image paper evaluation. "
                  "No claim of a deployable method is made anywhere in this report.\n")
+    lines.append("## 16. Final decision\n")
+    lines.append(
+        f"Scientific headroom decision:\n**{gate['decision']}**\n\n"
+        "Evaluation prerequisite:\n"
+        + (
+            "**BLOCKED_UNTIL_BOUNDARY_IOU_IS_BOUND**\n\n"
+            if boundary_trigger["trigger_status"] == BOUNDARY_TRIGGER_FIRED
+            else "**NONE_FROM_THIS_CHECK**\n\n"
+        )
+        + (
+            "The boundary-mass trigger does not reverse the oracle/recovery headroom gate above -- it constrains "
+            "only what Phase 1B must optimize against and whether Phase-1B evaluation may begin. No deployable "
+            "Phase 1B method exists yet; this report makes no such claim.\n\n"
+        )
+        + f"BOUNDARY TRIGGER: {boundary_trigger['trigger_status']}\n\n"
+        + (
+            "NEXT PREREQUISITE: BIND BOUNDARY IOU\n"
+            if boundary_trigger["trigger_status"] == BOUNDARY_TRIGGER_FIRED
+            else f"NEXT PREREQUISITE: {boundary_trigger['required_next_step'] or 'NONE'}\n"
+        )
+    )
     return "\n".join(lines)
 
 

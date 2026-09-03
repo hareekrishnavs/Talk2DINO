@@ -32,6 +32,20 @@ PIXEL COUNTS (``disputed_boundary_pixel_count``, ``disputed_interior_
 pixel_count``, ``harmful_boundary_pixel_count``, ``harmful_interior_
 pixel_count``) are reported -- concentration ratios, never an IoU.
 
+**Boundary-mass reframe trigger.** ``[gate_expectations].
+boundary_mass_reframe_threshold`` (frozen at exactly ``0.70``) and its
+paired ``boundary_mass_reframe_consequence`` string are read live from the
+protocol identity (never hand-copied) and compared, with the identity's
+own strict-greater-than wording ("if >70% ..."), against the already-
+reported ``harmful_washout_boundary_fraction_of_harmful``. This produces
+an explicit ``FIRED``/``NOT_FIRED``/``UNVERIFIABLE`` record
+(``build_boundary_reframe_trigger``) -- it never computes Boundary IoU,
+never chooses a boundary width, and never alters the oracle/recovery gate
+decision; it only states, when fired, that Boundary IoU must become the
+primary Phase-1B improvement metric (mIoU secondary/preservation) and
+that Phase-1B evaluation is therefore not ready until Boundary IoU is
+bound.
+
 **Gate-1 scope note.** ``[gate_contract]`` is defined over a PAIR of
 datasets (coco_stuff_500, ade20k_500): "neither/exactly-one/both pass"
 outcomes are inherently cross-dataset. This module analyzes exactly ONE
@@ -592,6 +606,112 @@ def build_boundary_concentration(arrays: Mapping[str, np.ndarray]) -> dict[str, 
 
 
 # ---------------------------------------------------------------------------
+# Section 9.G.2: boundary-mass reframe trigger (comparison + consequence
+# only -- never computes Boundary IoU, never chooses a boundary width).
+# ---------------------------------------------------------------------------
+
+# Documentation copy of the live [gate_expectations].boundary_mass_reframe_
+# threshold -- cross-checked against the live protocol identity below and
+# never used on its own; the identity's own value is authoritative. This
+# mirrors the same defensive pattern already used for ORACLE_UNARY_GATE_
+# THRESHOLD_PP / RECOVER_GATE_THRESHOLD_PP above.
+BOUNDARY_MASS_REFRAME_THRESHOLD = 0.70  # [gate_expectations].boundary_mass_reframe_threshold
+
+BOUNDARY_TRIGGER_FIRED = "FIRED"
+BOUNDARY_TRIGGER_NOT_FIRED = "NOT_FIRED"
+BOUNDARY_TRIGGER_UNVERIFIABLE = "UNVERIFIABLE"
+
+REQUIRED_NEXT_STEP_BIND_BOUNDARY_IOU = "BIND_BOUNDARY_IOU"
+
+
+def build_boundary_reframe_trigger(
+    boundary_concentration: Mapping[str, Any], protocol_identity: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Enforces (never computes) the frozen ``[gate_expectations].
+    boundary_mass_reframe_threshold`` / ``boundary_mass_reframe_consequence``
+    pair against the already-reconstructed ``harmful_washout_boundary_
+    fraction_of_harmful`` (itself already partition-checked by
+    ``build_boundary_concentration``: harmful_boundary + harmful_interior ==
+    harmful_pixel_count). This function adds no new pixel-level computation,
+    only a threshold comparison and a report of the preregistered
+    consequence -- it never computes Boundary IoU, never chooses a boundary
+    width, and never touches the oracle/recovery gate.
+
+    The threshold and its consequence text are read live from
+    ``protocol_identity`` (never a bare literal); ``load_identity`` has
+    already validated ``boundary_mass_reframe_threshold`` to equal exactly
+    0.70 and ``boundary_mass_reframe_consequence`` to equal its exact frozen
+    string, so a tampered identity never reaches this function at all. The
+    comparison is strict ``>``, matching the identity's own wording
+    ("if >70% of harmful-washout mass ...").
+    """
+    expectations = protocol_identity["gate_expectations"]
+    threshold = float(expectations["boundary_mass_reframe_threshold"])
+    if threshold != BOUNDARY_MASS_REFRAME_THRESHOLD:
+        raise DfpPhase1aGate1AnalysisError(
+            "live [gate_expectations].boundary_mass_reframe_threshold disagrees with this module's own "
+            "hardcoded documentation copy -- the live identity is authoritative; this module's constant "
+            "must be updated to match, not silently overridden"
+        )
+    consequence = expectations["boundary_mass_reframe_consequence"]
+    boundary_iou_authority_status = protocol_identity["boundary_iou"]["implementation_source_status"]
+
+    harmful_boundary = boundary_concentration["harmful_washout_boundary_pixel_count"]
+    harmful_interior = boundary_concentration["harmful_washout_interior_pixel_count"]
+    harmful_total = harmful_boundary + harmful_interior
+
+    if harmful_total == 0:
+        return {
+            "harmful_washout_boundary_fraction_of_harmful": None,
+            "harmful_washout_pixel_total": 0,
+            "boundary_mass_reframe_threshold": threshold,
+            "comparison_operator": ">",
+            "trigger_status": BOUNDARY_TRIGGER_UNVERIFIABLE,
+            "boundary_iou_authority_status": boundary_iou_authority_status,
+            "boundary_mass_reframe_consequence": consequence,
+            "primary_phase1b_metric": None,
+            "secondary_phase1b_metric": None,
+            "required_next_step": None,
+            "affects_oracle_headroom_gate": False,
+            "phase1b_evaluation_ready": False,
+            "unverifiable_reason": (
+                "boundary concentration cannot be evaluated because no harmful-washout pixels exist in this "
+                "result (harmful_pixel_count total == 0); the trigger is neither fired nor not-fired, it is undefined"
+            ),
+        }
+
+    observed_fraction = harmful_boundary / harmful_total
+    fired = observed_fraction > threshold
+    trigger_status = BOUNDARY_TRIGGER_FIRED if fired else BOUNDARY_TRIGGER_NOT_FIRED
+
+    return {
+        "harmful_washout_boundary_fraction_of_harmful": observed_fraction,
+        "harmful_washout_pixel_total": harmful_total,
+        "boundary_mass_reframe_threshold": threshold,
+        "comparison_operator": ">",
+        "trigger_status": trigger_status,
+        "boundary_iou_authority_status": boundary_iou_authority_status,
+        "boundary_mass_reframe_consequence": consequence,
+        "primary_phase1b_metric": "Boundary IoU" if fired else "mIoU",
+        "secondary_phase1b_metric": "mIoU preservation" if fired else None,
+        "required_next_step": REQUIRED_NEXT_STEP_BIND_BOUNDARY_IOU if fired else None,
+        # The frozen consequence text ("Boundary IoU becomes the primary improvement
+        # metric and mIoU becomes secondary/preservation") never mentions the oracle-
+        # unary/recover thresholds or the PROCEED/STOP decision -- it constrains only
+        # what Phase 1B must optimize and evaluate against, never the Gate-1 headroom
+        # verdict itself.
+        "affects_oracle_headroom_gate": False,
+        # Phase-1B evaluation cannot proceed against a metric ([boundary_iou].
+        # implementation_source_status == "not_yet_bound") that is not implemented.
+        # When the trigger has not fired, Boundary IoU is not required as the primary
+        # metric, so mIoU alone is sufficient and evaluation readiness is unaffected
+        # by this particular check.
+        "phase1b_evaluation_ready": not fired,
+        "unverifiable_reason": None,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Section 9.H: Phase-1B compute projection (persisted per-image aggregates).
 # ---------------------------------------------------------------------------
 
@@ -791,9 +911,13 @@ __all__ = [
     "build_component_structure",
     "build_reversion_coherence",
     "build_boundary_concentration",
+    "build_boundary_reframe_trigger",
     "build_compute_projection",
     "build_qualitative_selection",
     "apply_gate1_decision",
     "GATE_PROCEED", "GATE_STOP", "GATE_INCONCLUSIVE",
     "ORACLE_UNARY_GATE_THRESHOLD_PP", "RECOVER_GATE_THRESHOLD_PP",
+    "BOUNDARY_MASS_REFRAME_THRESHOLD",
+    "BOUNDARY_TRIGGER_FIRED", "BOUNDARY_TRIGGER_NOT_FIRED", "BOUNDARY_TRIGGER_UNVERIFIABLE",
+    "REQUIRED_NEXT_STEP_BIND_BOUNDARY_IOU",
 ]

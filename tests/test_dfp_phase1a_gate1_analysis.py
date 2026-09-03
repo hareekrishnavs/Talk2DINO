@@ -11,6 +11,8 @@ from __future__ import annotations
 import datetime
 import io
 import json
+import math
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -407,7 +409,7 @@ def test_gate_thresholds_at_exact_boundary_pass():
 # ---------------------------------------------------------------------------
 
 
-def _build_full_synthetic_bundle(tmp_path: Path) -> Path:
+def _build_full_synthetic_bundle(tmp_path: Path, *, harmful_all_boundary: bool = True, dirname: str = "e2e") -> Path:
     n = 4
     ids = _ids(n)
     a = _zero_v2_arrays(n, CLASS_COUNT)
@@ -447,10 +449,21 @@ def _build_full_synthetic_bundle(tmp_path: Path) -> Path:
     a["beneficial_pixel_count"] = np.array([2, 0, 1, 1], dtype=np.int64)
     a["third_label_pixel_count"] = np.array([1, 0, 0, 0], dtype=np.int64)
     a["dispute_pixel_count"] = a["harmful_pixel_count"] + a["beneficial_pixel_count"] + a["third_label_pixel_count"]
-    a["disputed_boundary_pixel_count"] = a["dispute_pixel_count"]
-    a["disputed_interior_pixel_count"] = np.zeros(n, dtype=np.int64)
-    a["harmful_boundary_pixel_count"] = a["harmful_pixel_count"]
-    a["harmful_interior_pixel_count"] = np.zeros(n, dtype=np.int64)
+    if harmful_all_boundary:
+        a["disputed_boundary_pixel_count"] = a["dispute_pixel_count"]
+        a["disputed_interior_pixel_count"] = np.zeros(n, dtype=np.int64)
+        a["harmful_boundary_pixel_count"] = a["harmful_pixel_count"]
+        a["harmful_interior_pixel_count"] = np.zeros(n, dtype=np.int64)
+    else:
+        # move only the harmful-washout share of each image's disputed
+        # pixels to the interior, keeping beneficial/third-label disputed
+        # pixels on the boundary -- disputed_boundary/interior must still
+        # sum to dispute_pixel_count and each must dominate its harmful
+        # sub-component (src.dfp_phase1a_checkpoint's own v2 relational checks).
+        a["disputed_interior_pixel_count"] = a["harmful_pixel_count"].copy()
+        a["disputed_boundary_pixel_count"] = a["dispute_pixel_count"] - a["harmful_pixel_count"]
+        a["harmful_boundary_pixel_count"] = np.zeros(n, dtype=np.int64)
+        a["harmful_interior_pixel_count"] = a["harmful_pixel_count"]
     for h in (16, 32, 64):
         a[f"persistence_h{h}_harmful_reverted_count"] = a["harmful_pixel_count"].copy()
         a[f"persistence_h{h}_beneficial_reverted_count"] = a["beneficial_pixel_count"].copy()
@@ -480,7 +493,7 @@ def _build_full_synthetic_bundle(tmp_path: Path) -> Path:
     a["total_baseline_recurrence_flops"] = np.full(n, 1000, dtype=np.int64)
     a["total_projected_recurrence_flops"] = np.full(n, 100, dtype=np.int64)
 
-    return _finalize(tmp_path, a, n=n, ids=ids, class_count=CLASS_COUNT, dirname="e2e")
+    return _finalize(tmp_path, a, n=n, ids=ids, class_count=CLASS_COUNT, dirname=dirname)
 
 
 def test_end_to_end_synthetic_bundle_all_sections(tmp_path):
@@ -682,3 +695,312 @@ def test_memory_error_propagates():
             raise MemoryError()
         except g1.DfpPhase1aGate1AnalysisError:
             pytest.fail("MemoryError must never be caught by the domain error handler")
+
+
+# ---------------------------------------------------------------------------
+# Boundary-mass reframe trigger (narrow repair): enforces (never computes)
+# the frozen [gate_expectations].boundary_mass_reframe_threshold /
+# boundary_mass_reframe_consequence pair against the already-reconstructed
+# harmful_washout_boundary_fraction_of_harmful. No Boundary IoU value is
+# ever produced anywhere below.
+# ---------------------------------------------------------------------------
+
+
+def _boundary_concentration(harmful_boundary: int, harmful_interior: int) -> dict:
+    """A minimal, valid boundary_concentration record -- exactly the shape
+    build_boundary_concentration returns -- built directly so these tests
+    can hit exact fractions a full confusion-matrix fixture could not
+    conveniently reach. harmful_boundary/harmful_interior are taken as
+    already partition-checked (build_boundary_concentration itself is
+    covered separately by test_boundary_partition_rejects_broken_
+    harmful_split / test_boundary_trigger_rejects_broken_harmful_
+    partition_upstream)."""
+    total = harmful_boundary + harmful_interior
+    return {
+        "disputed_boundary_fraction_of_disputed": float("nan"),
+        "harmful_washout_boundary_fraction_of_harmful": (harmful_boundary / total) if total > 0 else float("nan"),
+        "harmful_washout_boundary_pixel_count": harmful_boundary,
+        "harmful_washout_interior_pixel_count": harmful_interior,
+        "limitation": "test fixture",
+    }
+
+
+def test_boundary_trigger_below_threshold_not_fired():
+    boundary = _boundary_concentration(harmful_boundary=50, harmful_interior=50)  # 0.50
+    result = g1.build_boundary_reframe_trigger(boundary, _protocol())
+    assert result["trigger_status"] == g1.BOUNDARY_TRIGGER_NOT_FIRED
+    assert result["primary_phase1b_metric"] == "mIoU"
+    assert result["secondary_phase1b_metric"] is None
+    assert result["required_next_step"] is None
+    assert result["phase1b_evaluation_ready"] is True
+    assert result["affects_oracle_headroom_gate"] is False
+
+
+def test_boundary_trigger_exactly_at_threshold_is_not_fired_under_strict_greater_than():
+    # 70/100 rounds to the exact same float64 value as the frozen 0.70 threshold.
+    boundary = _boundary_concentration(harmful_boundary=70, harmful_interior=30)
+    result = g1.build_boundary_reframe_trigger(boundary, _protocol())
+    assert result["harmful_washout_boundary_fraction_of_harmful"] == 0.70
+    assert result["harmful_washout_boundary_fraction_of_harmful"] == result["boundary_mass_reframe_threshold"]
+    # The frozen consequence text says "if >70%" (strict greater-than) --
+    # equality to the threshold must NOT fire.
+    assert result["trigger_status"] == g1.BOUNDARY_TRIGGER_NOT_FIRED
+
+
+def test_boundary_trigger_one_representable_value_above_threshold_fires():
+    # math.nextafter(0.70, 1.0) is the smallest float64 strictly greater
+    # than the frozen threshold; .as_integer_ratio() gives an exact integer
+    # pixel-count pair whose true division reproduces it exactly.
+    above = math.nextafter(0.70, 1.0)
+    num, den = above.as_integer_ratio()
+    boundary = _boundary_concentration(harmful_boundary=num, harmful_interior=den - num)
+    result = g1.build_boundary_reframe_trigger(boundary, _protocol())
+    assert result["harmful_washout_boundary_fraction_of_harmful"] == above
+    assert result["trigger_status"] == g1.BOUNDARY_TRIGGER_FIRED
+
+
+def test_boundary_trigger_real_style_fraction_fires():
+    # The exact real COCO-Stuff-500 production harmful boundary/interior
+    # pixel counts (independently verified earlier): fraction =
+    # 0.9765451809541299.
+    boundary = _boundary_concentration(harmful_boundary=5126246, harmful_interior=123123)
+    result = g1.build_boundary_reframe_trigger(boundary, _protocol())
+    assert result["harmful_washout_boundary_fraction_of_harmful"] == pytest.approx(0.9765451809541299, abs=1e-15)
+    assert result["trigger_status"] == g1.BOUNDARY_TRIGGER_FIRED
+    assert result["primary_phase1b_metric"] == "Boundary IoU"
+    assert result["secondary_phase1b_metric"] == "mIoU preservation"
+    assert result["required_next_step"] == g1.REQUIRED_NEXT_STEP_BIND_BOUNDARY_IOU
+    assert result["phase1b_evaluation_ready"] is False
+    assert result["affects_oracle_headroom_gate"] is False
+    assert result["boundary_iou_authority_status"] == "not_yet_bound"
+
+
+def test_boundary_trigger_zero_harmful_pixels_is_unverifiable():
+    boundary = _boundary_concentration(harmful_boundary=0, harmful_interior=0)
+    result = g1.build_boundary_reframe_trigger(boundary, _protocol())
+    assert result["trigger_status"] == g1.BOUNDARY_TRIGGER_UNVERIFIABLE
+    assert result["harmful_washout_boundary_fraction_of_harmful"] is None  # JSON null, never NaN
+    assert result["phase1b_evaluation_ready"] is False
+    assert result["primary_phase1b_metric"] is None
+    assert result["required_next_step"] is None
+    assert result["unverifiable_reason"] is not None
+    # never a float NaN leaking through the Python object either
+    assert not isinstance(result["harmful_washout_boundary_fraction_of_harmful"], float)
+
+
+def test_boundary_trigger_zero_harmful_pixels_serializes_without_nan(tmp_path):
+    boundary = _boundary_concentration(harmful_boundary=0, harmful_interior=0)
+    result = g1.build_boundary_reframe_trigger(boundary, _protocol())
+    text = cli._sanitize_for_json({"boundary_reframe_trigger": result})
+    raw = json.dumps(text, allow_nan=False)  # raises ValueError if any NaN/Infinity survived
+    assert '"harmful_washout_boundary_fraction_of_harmful":null' in raw.replace(" ", "")
+
+
+def test_boundary_trigger_rejects_broken_harmful_partition_upstream():
+    # The trigger is only ever built from a boundary_concentration dict that
+    # build_boundary_concentration itself already partition-checked -- a
+    # broken partition is rejected upstream and never reaches the trigger
+    # comparison at all.
+    n = 1
+    a = _zero_v2_arrays(n, CLASS_COUNT)
+    a["harmful_pixel_count"] = np.array([10], dtype=np.int64)
+    a["harmful_boundary_pixel_count"] = np.array([3], dtype=np.int64)
+    a["harmful_interior_pixel_count"] = np.array([3], dtype=np.int64)  # 3+3 != 10
+    with pytest.raises(g1.DfpPhase1aGate1AnalysisError, match="boundary/interior partition"):
+        g1.build_boundary_concentration(a)
+
+
+def _protocol_toml_text() -> str:
+    from src.dfp_phase1a_identity import IDENTITY_RELATIVE_PATH
+    return (ROOT / IDENTITY_RELATIVE_PATH).read_text()
+
+
+def _write_tampered_protocol(tmp_path: Path, old: str, new: str, *, name: str) -> Path:
+    text = _protocol_toml_text()
+    assert old in text, "fixture assumption about the frozen protocol text is stale -- update this test"
+    text = text.replace(old, new, 1)
+    dest = tmp_path / name
+    dest.write_text(text)
+    return dest
+
+
+@pytest.mark.parametrize("replacement,label", [
+    ("boundary_mass_reframe_threshold = true", "bool"),
+    ("boundary_mass_reframe_threshold = 1", "integer"),
+    ('boundary_mass_reframe_threshold = "0.70"', "numeric_string"),
+    ("boundary_mass_reframe_threshold = nan", "nan"),
+    ("boundary_mass_reframe_threshold = inf", "infinity"),
+])
+def test_boundary_threshold_wrong_type_rejected_before_analysis(tmp_path, replacement, label):
+    from src.dfp_phase1a_identity import load_identity, DfpPhase1aIdentityError
+    tampered = _write_tampered_protocol(
+        tmp_path, "boundary_mass_reframe_threshold = 0.70", replacement, name=f"tampered_{label}.toml",
+    )
+    with pytest.raises(DfpPhase1aIdentityError):
+        load_identity(path=tampered)
+
+
+def test_boundary_expectation_field_missing_is_rejected_before_analysis(tmp_path):
+    from src.dfp_phase1a_identity import load_identity, DfpPhase1aIdentityError
+    text = _protocol_toml_text()
+    assert "boundary_mass_reframe_threshold = 0.70\n" in text
+    text = text.replace("boundary_mass_reframe_threshold = 0.70\n", "", 1)
+    tampered = tmp_path / "missing_field_protocol.toml"
+    tampered.write_text(text)
+    with pytest.raises(DfpPhase1aIdentityError):
+        load_identity(path=tampered)
+
+
+def test_boundary_consequence_text_altered_is_rejected(tmp_path):
+    from src.dfp_phase1a_identity import load_identity, DfpPhase1aIdentityError
+    tampered = _write_tampered_protocol(
+        tmp_path,
+        'boundary_mass_reframe_consequence = "if >70% of harmful-washout mass lies in the primary boundary band, '
+        'Boundary IoU becomes the primary improvement metric and mIoU becomes secondary/preservation"',
+        'boundary_mass_reframe_consequence = "some other, unfrozen text"',
+        name="tampered_consequence.toml",
+    )
+    with pytest.raises(DfpPhase1aIdentityError):
+        load_identity(path=tampered)
+
+
+def test_boundary_trigger_threshold_disagreement_with_module_constant_raises(monkeypatch):
+    boundary = _boundary_concentration(harmful_boundary=50, harmful_interior=50)
+    protocol = dict(_protocol())
+    protocol["gate_expectations"] = dict(protocol["gate_expectations"])
+    protocol["gate_expectations"]["boundary_mass_reframe_threshold"] = 0.5  # disagrees with the module constant
+    with pytest.raises(g1.DfpPhase1aGate1AnalysisError, match="boundary_mass_reframe_threshold"):
+        g1.build_boundary_reframe_trigger(boundary, protocol)
+
+
+def test_report_boundary_trigger_appears_in_executive_and_final_sections(tmp_path):
+    result_dir = _build_full_synthetic_bundle(tmp_path, dirname="md_sections")
+    out = tmp_path / "gate1_md_out"
+    rc = cli.main(["--result-bundle", str(result_dir), "--output-dir", str(out), "--expected-image-count", "4"])
+    assert rc == 0
+    text = (out / "gate1_report.md").read_text()
+    assert "## 13. Boundary Reframing Trigger" in text
+    exec_section = text.split("## 2. Source verification")[0]
+    assert "## 16. Final decision" in text
+    final_section = text.split("## 16. Final decision")[1]
+    assert "BOUNDARY TRIGGER:" in exec_section
+    assert "NEXT PREREQUISITE:" in exec_section
+    assert "BOUNDARY TRIGGER:" in final_section
+    assert "NEXT PREREQUISITE:" in final_section
+    assert "Scientific headroom decision:" in final_section
+    assert "Evaluation prerequisite:" in final_section
+
+
+def test_gate1_verdict_unaffected_by_boundary_trigger_status(tmp_path):
+    protocol = _protocol()
+
+    fired_dir = _build_full_synthetic_bundle(tmp_path, harmful_all_boundary=True, dirname="fired")
+    source_fired = g1.load_gate1_source(fired_dir, expected_image_count=4)
+    vm_fired = g1.compute_all_variant_metrics(source_fired.arrays, source_fired.class_count)
+    oracle_fired = g1.build_oracle_analysis(vm_fired)
+    boundary_fired = g1.build_boundary_concentration(source_fired.arrays)
+    trigger_fired = g1.build_boundary_reframe_trigger(boundary_fired, protocol)
+    gate_fired = g1.apply_gate1_decision(oracle_fired, protocol)
+
+    not_fired_dir = _build_full_synthetic_bundle(tmp_path, harmful_all_boundary=False, dirname="notfired")
+    source_not_fired = g1.load_gate1_source(not_fired_dir, expected_image_count=4)
+    vm_not_fired = g1.compute_all_variant_metrics(source_not_fired.arrays, source_not_fired.class_count)
+    oracle_not_fired = g1.build_oracle_analysis(vm_not_fired)
+    boundary_not_fired = g1.build_boundary_concentration(source_not_fired.arrays)
+    trigger_not_fired = g1.build_boundary_reframe_trigger(boundary_not_fired, protocol)
+    gate_not_fired = g1.apply_gate1_decision(oracle_not_fired, protocol)
+
+    # Only the boundary inputs differ between the two fixtures (harmful
+    # pixels moved from boundary to interior); every oracle/horizon input is
+    # identical, so the two trigger statuses must differ while the gate
+    # decision (computed from oracle alone) must be identical.
+    assert trigger_fired["trigger_status"] == g1.BOUNDARY_TRIGGER_FIRED
+    assert trigger_not_fired["trigger_status"] == g1.BOUNDARY_TRIGGER_NOT_FIRED
+    assert gate_fired["decision"] == gate_not_fired["decision"]
+    assert gate_fired == gate_not_fired
+
+
+def test_no_boundary_iou_value_is_ever_generated(tmp_path):
+    result_dir = _build_full_synthetic_bundle(tmp_path, dirname="no_iou")
+    out = tmp_path / "gate1_no_iou_out"
+    rc = cli.main(["--result-bundle", str(result_dir), "--output-dir", str(out), "--expected-image-count", "4"])
+    assert rc == 0
+    doc = json.loads((out / "gate1_analysis.json").read_text())
+
+    def _keys(d, prefix=""):
+        if isinstance(d, dict):
+            for k, v in d.items():
+                path = f"{prefix}.{k}" if prefix else k
+                yield path
+                yield from _keys(v, path)
+        elif isinstance(d, list):
+            for i, v in enumerate(d):
+                yield from _keys(v, f"{prefix}[{i}]")
+
+    boundary_iou_keys = [k for k in _keys(doc) if "boundary_iou" in k.split(".")[-1]]
+    assert boundary_iou_keys == ["boundary_reframe_trigger.boundary_iou_authority_status"], boundary_iou_keys
+    assert doc["boundary_reframe_trigger"]["boundary_iou_authority_status"] == "not_yet_bound"
+    raw = (out / "gate1_analysis.json").read_text()
+    assert "boundary_iou_score" not in raw and "boundary_iou_value" not in raw
+
+
+def test_boundary_trigger_no_effect_on_other_analysis_sections(tmp_path):
+    result_dir = _build_full_synthetic_bundle(tmp_path, dirname="no_effect")
+    out = tmp_path / "gate1_no_effect_out"
+    rc = cli.main(["--result-bundle", str(result_dir), "--output-dir", str(out), "--expected-image-count", "4"])
+    assert rc == 0
+    doc = json.loads((out / "gate1_analysis.json").read_text())
+    assert set(doc.keys()) >= {
+        "horizon_table", "dispute_accounting", "oracle_analysis", "persistence_baseline",
+        "component_structure", "reversion_coherence", "boundary_concentration", "boundary_reframe_trigger",
+        "compute_projection", "gate1_decision", "variant_dataset_level_metrics",
+    }
+    trigger = doc["boundary_reframe_trigger"]
+    assert set(trigger.keys()) == {
+        "harmful_washout_boundary_fraction_of_harmful", "harmful_washout_pixel_total",
+        "boundary_mass_reframe_threshold", "comparison_operator", "trigger_status",
+        "boundary_iou_authority_status", "boundary_mass_reframe_consequence",
+        "primary_phase1b_metric", "secondary_phase1b_metric", "required_next_step",
+        "affects_oracle_headroom_gate", "phase1b_evaluation_ready", "unverifiable_reason",
+    }
+
+
+@pytest.mark.skipif(not os.environ.get("DFP_PHASE1A_OUTPUT_ROOT"), reason="requires DFP_PHASE1A_OUTPUT_ROOT")
+def test_real_production_result_scientific_values_and_boundary_trigger_unchanged():
+    """Read-only regression fixture against the real, finalized COCO-Stuff-
+    500 production result. Never writes to the production directory. The
+    production path is taken ONLY from DFP_PHASE1A_OUTPUT_ROOT (never
+    hardcoded here), matching the convention already used by
+    test_dfp_phase1a_preflight_finalize.py::
+    test_real_production_checkpoint_reaches_ready_to_finalize."""
+    production_dir = Path(os.environ["DFP_PHASE1A_OUTPUT_ROOT"]) / "coco_stuff_500" / "result"
+    if not production_dir.exists():
+        pytest.skip("production result not present in this environment")
+    before = {p.name: p.read_bytes() for p in production_dir.iterdir()}
+
+    source = g1.load_gate1_source(production_dir)
+    vm = g1.compute_all_variant_metrics(source.arrays, source.class_count)
+    oracle = g1.build_oracle_analysis(vm)
+    boundary = g1.build_boundary_concentration(source.arrays)
+    protocol = _protocol()
+    trigger = g1.build_boundary_reframe_trigger(boundary, protocol)
+
+    # Pre-existing scientific values, at full stored precision -- must
+    # remain byte-for-byte the values independently verified before this
+    # repair (this repair adds a report, it changes no computation).
+    assert vm["t0"].metrics.mIoU == 29.357779515515865
+    assert vm["t320"].metrics.mIoU == 31.2070844148295
+    assert oracle["mIoU_oracle_o_p"] == 33.75174297429137
+    assert oracle["G_recover_pp"] == pytest.approx(2.5446585594618690, abs=1e-9)
+
+    assert trigger["trigger_status"] == g1.BOUNDARY_TRIGGER_FIRED
+    assert trigger["harmful_washout_boundary_fraction_of_harmful"] == 0.9765451809541299
+    assert trigger["boundary_mass_reframe_threshold"] == 0.70
+    assert trigger["primary_phase1b_metric"] == "Boundary IoU"
+    assert trigger["secondary_phase1b_metric"] == "mIoU preservation"
+    assert trigger["required_next_step"] == g1.REQUIRED_NEXT_STEP_BIND_BOUNDARY_IOU
+    assert trigger["phase1b_evaluation_ready"] is False
+    assert trigger["affects_oracle_headroom_gate"] is False
+
+    after = {p.name: p.read_bytes() for p in production_dir.iterdir()}
+    assert before == after
