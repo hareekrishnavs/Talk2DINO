@@ -33,10 +33,16 @@ COVER_DR_PACKAGE_PATH = ROOT / "src/open_vocabulary_segmentation/models/dinotext
 
 
 def _install_segmentation_package_stub() -> None:
-    """Give ``segmentation.evaluation`` a real package context pointing at
-    the actual directory on disk, so file-based module loads below share
-    classes with each other (both resolve the geometry module by the same
-    dotted name)."""
+    """Give the CANONICAL ``segmentation``/``segmentation.evaluation`` a
+    real package context pointing at the actual directory on disk. Used
+    ONLY by ``_load_dinotext_seg_module`` below (production-integration
+    section), which loads ``dinotext_seg.py`` under the canonical
+    ``segmentation.evaluation.dinotext_seg`` name and needs this package
+    context for ITS OWN relative-import resolution -- kept exactly as it
+    always was. Never used for ``sliding_window_geometry``/``window_cache``
+    below (see ``_install_private_segmentation_stub``), so it carries no
+    class-identity risk of its own: these are empty namespace placeholders
+    with no class definitions."""
     if "segmentation" not in sys.modules:
         segmentation = types.ModuleType("segmentation")
         segmentation.__path__ = [str(EVAL_DIR.parent)]
@@ -45,6 +51,37 @@ def _install_segmentation_package_stub() -> None:
         evaluation = types.ModuleType("segmentation.evaluation")
         evaluation.__path__ = [str(EVAL_DIR)]
         sys.modules["segmentation.evaluation"] = evaluation
+
+
+_PRIVATE_PREFIX = "segmentation_under_test__image_window_cache"
+
+
+def _install_private_segmentation_stub(prefix: str) -> None:
+    """Same package-context trick as ``_install_segmentation_package_stub``
+    above, but under a PRIVATE, test-file-unique top-level name -- never
+    ``segmentation``/``segmentation.evaluation`` -- so that ``geometry``
+    and ``wc`` below (which mutually relatively-import each other:
+    ``window_cache.py`` does ``from .sliding_window_geometry import
+    SlidingWindowPlan``) resolve to the SAME class as each other while
+    NEVER touching, reading, or replacing the canonical
+    ``segmentation.evaluation.sliding_window_geometry`` sys.modules entry
+    production code (e.g. src/dfp_phase1a_horizon_stitching.py) captures
+    its own SlidingWindowPlan reference from. A collision here previously
+    broke unrelated DFP Phase 1A driver tests whenever both were
+    collected in the same pytest process: production code that had
+    already captured the canonical class saw a LATER-loaded, distinct
+    class object with the same name once this file's module-scope load
+    overwrote the canonical entry, and its own
+    isinstance(plan, SlidingWindowPlan) check then failed even though the
+    object was visibly the "right" class."""
+    if prefix not in sys.modules:
+        top = types.ModuleType(prefix)
+        top.__path__ = [str(EVAL_DIR.parent)]
+        sys.modules[prefix] = top
+    if f"{prefix}.evaluation" not in sys.modules:
+        evaluation = types.ModuleType(f"{prefix}.evaluation")
+        evaluation.__path__ = [str(EVAL_DIR)]
+        sys.modules[f"{prefix}.evaluation"] = evaluation
 
 
 def _load(name: str, path: Path):
@@ -56,8 +93,17 @@ def _load(name: str, path: Path):
 
 
 _install_segmentation_package_stub()
-geometry = _load("segmentation.evaluation.sliding_window_geometry", GEOMETRY_PATH)
-wc = _load("segmentation.evaluation.window_cache", CACHE_PATH)
+_install_private_segmentation_stub(_PRIVATE_PREFIX)
+geometry = _load(f"{_PRIVATE_PREFIX}.evaluation.sliding_window_geometry", GEOMETRY_PATH)
+# window_cache.py's own `from .sliding_window_geometry import
+# SlidingWindowPlan` resolves relative to ITS OWN __package__, derived
+# from the dotted name it is loaded under here -- since that matches
+# `geometry`'s own dotted name exactly, Python's import machinery finds
+# `geometry` already cached and reuses it directly (no re-execution, no
+# second class): `wc.SlidingWindowPlan is geometry.SlidingWindowPlan`
+# holds, verified by this file's own tests below, with the canonical
+# sys.modules key never touched by either load.
+wc = _load(f"{_PRIVATE_PREFIX}.evaluation.window_cache", CACHE_PATH)
 
 SpatialSize = geometry.SpatialSize
 SlidingWindowPlan = geometry.SlidingWindowPlan
@@ -926,10 +972,23 @@ def _load_dinotext_seg_module():
     utils_stub = types.ModuleType("utils")
     utils_stub.get_logger = lambda: types.SimpleNamespace(info=lambda *_a: None)
 
-    names = ("mmcv", "utils")
+    # dinotext_seg.py's own `from .sliding_window_geometry import
+    # SlidingWindowPlan` (a real, unavoidable relative import inside
+    # dinotext_seg.py itself, since it's loaded here under the CANONICAL
+    # "segmentation.evaluation.dinotext_seg" name) will resolve through
+    # sys.modules["segmentation.evaluation.sliding_window_geometry"] --
+    # which this file's own geometry/wc pair above deliberately never
+    # populates (see _install_private_segmentation_stub). Saving and
+    # restoring that key here too (mirroring tests/test_rwr_integration.py
+    # and tests/test_sliding_window_geometry.py's own equivalent
+    # dinotext_seg loaders) ensures whatever fresh class dinotext_seg's
+    # own import creates is NEVER left behind afterward, and never
+    # silently reuses a stale/foreign one.
+    names = ("mmcv", "utils", "segmentation.evaluation.sliding_window_geometry")
     previous = {n: sys.modules.get(n) for n in names}
     sys.modules.update({"mmcv": mmcv_stub, "utils": utils_stub})
     sys.modules.pop("segmentation.evaluation.dinotext_seg", None)
+    sys.modules.pop("segmentation.evaluation.sliding_window_geometry", None)
     try:
         spec = importlib.util.spec_from_file_location(
             "segmentation.evaluation.dinotext_seg", SEGMENTATION_PATH

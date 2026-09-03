@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
-"""DFP Phase 1A Step 12: unified CLI for CPU-only preflight orchestration.
+"""DFP Phase 1A Step 12: unified CLI for CPU-only preflight orchestration,
+plus (Step 11) the production COCO-Stuff-500 execution driver.
 
-Every subcommand here is verification/preflight only. This CLI exposes
-NO command that performs model inference, constructs a model or dataset
-object, loads weights through torch, initializes CUDA, runs propagation,
-or submits a job -- that is out of scope for Step 12 by design (see
-``docs/dfp_phase1a_preflight.md``).
+Every subcommand except ``execute`` is verification/preflight only: no
+model inference, no dataset/model object construction, no torch weight
+load, no CUDA init, no job submission. ``execute`` is the one command
+that performs real work -- but only after its own call into
+``src.dfp_phase1a_execute.build_execution_context`` (the full ordered
+Phase A/B/C preflight, plus this driver's additive v1-resume-rejection/
+v2-only gate) has already returned successfully; see that module's
+docstring for the exact heavy-import boundary.
 
 Every check is delegated to the already-committed, already-verified
 Step 1-11 validators; this file adds only CLI plumbing and the ordered
-Phase A/B/C composition in ``src/dfp_phase1a_preflight.py``. Nothing here
-imports ``torch`` at module scope.
+Phase A/B/C composition in ``src/dfp_phase1a_preflight.py`` /
+``src/dfp_phase1a_execute.py``. Nothing here imports ``torch`` at module
+scope -- importing ``src.dfp_phase1a_execute`` itself never imports
+torch (every torch/model import in that module is deferred into a
+function body, past the heavy-import boundary).
 
 Subcommands
 -----------
@@ -28,6 +35,9 @@ verify-result             verify an installed final-result bundle.
 verify-qualitative-report verify an installed qualitative-report bundle.
 preflight                 run the full ordered Phase A/B/C preflight for
                           one run and print a single PASS/READY summary.
+execute                   run the production COCO-Stuff-500 execution
+                          driver (fresh or resume); always runs the full
+                          preflight first; performs real model inference.
 """
 
 from __future__ import annotations
@@ -45,6 +55,12 @@ from src.dfp_phase1a_artifact_schema import DfpPhase1aArtifactSchemaError
 from src.dfp_phase1a_checkpoint import (
     DfpPhase1aCheckpointError,
     validate_checkpoint_structure,
+)
+from src.dfp_phase1a_execute import (
+    DfpPhase1aExecuteError,
+    RUN_NAME as _EXECUTE_RUN_NAME,
+    build_execution_context,
+    execute_run,
 )
 from src.dfp_phase1a_identity import DfpPhase1aIdentityError
 from src.dfp_phase1a_identity import validate_static_configuration as validate_protocol_configuration
@@ -73,6 +89,7 @@ from src.dfp_phase1a_subset_manifest import (
 from src.matched_k11_k12_identity import MatchedK11K12Error
 
 _KNOWN_ERRORS = (
+    DfpPhase1aExecuteError,
     DfpPhase1aPreflightError,
     DfpPhase1aIdentityError,
     DfpPhase1aArtifactSchemaError,
@@ -238,8 +255,23 @@ def _cmd_preflight(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_execute(args: argparse.Namespace) -> int:
+    repo_root = Path(args.repo_root).resolve()
+    context = build_execution_context(
+        run=args.run, mode=args.mode, output_root=Path(args.output_root), device=args.device, repo_root=repo_root,
+    )
+    summary = execute_run(context)
+    status = "COMPLETE" if summary["complete"] else "OK"
+    print(f"DFP PHASE 1A EXECUTE {status}: {summary['images_completed']}/{summary['expected_count']} images completed")
+    print(f"# run={args.run} mode={args.mode} device={args.device} output_root={args.output_root}", file=sys.stderr)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Unified CPU-only DFP Phase 1A CLI: verification and ordered preflight only")
+    parser = argparse.ArgumentParser(
+        description="Unified DFP Phase 1A CLI: verification and ordered preflight (every subcommand except 'execute'), "
+        "plus the production COCO-Stuff-500 execution driver ('execute')",
+    )
     parser.add_argument("--repo-root", type=Path, default=_REPO_ROOT)
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -284,6 +316,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--probe-output-writeable", action="store_true", help="create+remove a uniquely named temp file to prove writeability")
     p.add_argument("--no-git-check", action="store_true")
 
+    p = sub.add_parser(
+        "execute",
+        help="run the production COCO-Stuff-500 execution driver (real model inference; always preflights first)",
+    )
+    p.add_argument("--run", choices=(_EXECUTE_RUN_NAME,), required=True, help="exact frozen run name; only 'coco_stuff_500' is implemented")
+    p.add_argument("--mode", choices=("fresh", "resume"), required=True)
+    p.add_argument("--output-root", type=str, required=True)
+    p.add_argument("--device", choices=("cpu", "cuda"), required=True)
+
     return parser
 
 
@@ -296,6 +337,7 @@ _DISPATCH = {
     "verify-result": _cmd_verify_result,
     "verify-qualitative-report": _cmd_verify_qualitative_report,
     "preflight": _cmd_preflight,
+    "execute": _cmd_execute,
 }
 
 

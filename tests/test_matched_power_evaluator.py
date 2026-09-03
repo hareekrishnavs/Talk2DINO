@@ -73,7 +73,13 @@ def _load_cover_dr_package():
 
 
 _install_segmentation_package_stub()
-geometry = _load("segmentation.evaluation.sliding_window_geometry", GEOMETRY_PATH)
+# PRIVATE test-only module name -- never the canonical "segmentation.
+# evaluation.sliding_window_geometry" -- see tests/test_image_window_
+# cache.py's own comment at its equivalent load site for the full
+# rationale (this file's isolated load previously overwrote the
+# canonical sys.modules entry, breaking unrelated production isinstance
+# checks whenever both were collected in the same pytest process).
+geometry = _load("sliding_window_geometry_under_test__matched_power_evaluator", GEOMETRY_PATH)
 cover_dr = _load_cover_dr_package()
 
 SpatialSize = geometry.SpatialSize

@@ -763,16 +763,30 @@ def _validate_per_image_stats_v2_relations(arrays: Mapping[str, np.ndarray], *, 
             "evaluated_pixel_count+ignore_pixel_count for at least one image"
         )
 
+    # Reversion coherence's reverted-pixel set is the committed
+    # [reversion_coherence] authority's own definition -- harmful washout
+    # (baseline T320, fallback T0) -- entirely independent of horizon-32
+    # persistence, which remains its own separate diagnostic (persistence_
+    # h32_{harmful,beneficial,third_label}_reverted_count are never
+    # consulted here). reversion_component_sizes_flat's per-image segment
+    # sum must therefore equal harmful_pixel_count exactly: zero harmful
+    # pixels imply an empty segment and zero components; nonzero harmful
+    # pixels require a nonempty set of positive component sizes summing
+    # exactly to the harmful count.
     reversion_segment_sums = _segment_sums(arrays["reversion_component_sizes_flat"], reversion_offsets)
-    h32_total_reverted = (
-        arrays["persistence_h32_harmful_reverted_count"]
-        + arrays["persistence_h32_beneficial_reverted_count"]
-        + arrays["persistence_h32_third_label_reverted_count"]
-    )
-    if not np.array_equal(reversion_segment_sums, h32_total_reverted):
+    if not np.array_equal(reversion_segment_sums, harmful):
         raise DfpPhase1aCheckpointError(
-            "per-image-stats-v2 reversion_component_sizes_flat per-image segment sum disagrees with the "
-            "persistence_h32 reverted-pixel counts for at least one image"
+            "per-image-stats-v2 reversion_component_sizes_flat per-image segment sum disagrees with "
+            "harmful_pixel_count for at least one image"
+        )
+    zero_harmful = harmful == 0
+    if np.any(zero_harmful & (reversion_counts != 0)):
+        raise DfpPhase1aCheckpointError(
+            "per-image-stats-v2 reversion_component_count must be zero for at least one image with zero harmful_pixel_count"
+        )
+    if np.any((~zero_harmful) & (reversion_counts == 0)):
+        raise DfpPhase1aCheckpointError(
+            "per-image-stats-v2 reversion_component_count must be positive for at least one image with nonzero harmful_pixel_count"
         )
 
 
@@ -1152,6 +1166,153 @@ def generate_and_install_checkpoint(
     return checkpoint_path
 
 
+# ---------------------------------------------------------------------------
+# v2 atomic generation-and-install -- the exact same architecture as
+# generate_and_install_checkpoint above (unpredictable generation names,
+# full self-verify-then-atomic-pointer-install, orphan cleanup, ambiguous-
+# post-replace reconciliation, never deleting a generation an installed
+# checkpoint could reference), rediscovering nothing: only the schema
+# name/version/member-set/loader/class_count plumbing differs. The v1
+# function above is completely UNCHANGED and remains the only writer a v1
+# caller can ever reach -- this is a separate, explicit v2 entry point,
+# never a version-branch inside the v1 function, so v1 behavior can never
+# be altered by this addition.
+#
+# Why this exists: the DFP Phase 1A execution driver
+# (src/dfp_phase1a_execute.py's _write_checkpoint) only ever produces v2
+# per-image-stats rows (the driver is v2-only by construction -- see
+# build_execution_context's own v1-resume-rejection/v2-only gate), so it
+# needs a v2-schema counterpart to the v1 writer above to persist them;
+# without it, the driver would have no way to durably checkpoint its own
+# output. This is a formally in-scope, additive sibling of the frozen v1
+# writer -- never a modification to it -- with its own dedicated
+# checkpoint-infrastructure test coverage in
+# tests/test_dfp_phase1a_artifacts_v2.py (end-to-end install/resume,
+# every progress state from zero-row through the real 500-image complete
+# total, v1/v2 cross-feeding rejection, malformed-member/offset/flat-
+# length/reversion-relation rejection with no partial write, the full
+# transaction-reconciliation matrix mirroring the v1 writer's own A-F
+# regression tests, and KeyboardInterrupt/SystemExit/MemoryError
+# propagation), matching this function's own docstring below exactly.
+# ---------------------------------------------------------------------------
+
+
+def generate_and_install_checkpoint_v2(
+    *, checkpoints_dir: Path, checkpoint_filename: str, checkpoint_fields: Mapping[str, Any],
+    arrays: Mapping[str, np.ndarray], image_ids: Sequence[str], class_count: int,
+) -> Path:
+    """v2 counterpart of :func:`generate_and_install_checkpoint`: writes a
+    new v2 per-image-stats NPZ (the exact closed 122-member set, schema
+    ``PER_IMAGE_STATS_SCHEMA_NAME_V2``/``PER_IMAGE_STATS_SCHEMA_VERSION_V2``)
+    + manifest generation under unpredictable task-specific names,
+    self-verifies the complete candidate via :func:`load_per_image_stats_npz_v2`
+    (including a full round-trip re-load and every v2 relational check --
+    see :func:`_validate_per_image_stats_v2_relations`), then atomically
+    installs the checkpoint document referencing it last. Identical
+    atomicity/reconciliation/orphan-cleanup contract to the v1 writer;
+    see its own docstring for the complete guarantee. ``class_count`` is
+    required explicitly (v1 has no class-shaped members, so its writer
+    never needed one) and must equal ``checkpoint_fields["class_count"]``."""
+    checkpoints_dir = Path(checkpoints_dir)
+    checkpoints_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = checkpoints_dir / checkpoint_filename
+
+    image_count = len(image_ids)
+    if class_count != checkpoint_fields["class_count"]:
+        raise DfpPhase1aCheckpointError(
+            f"class_count argument ({class_count}) disagrees with checkpoint_fields['class_count'] "
+            f"({checkpoint_fields['class_count']})"
+        )
+    for name, array in arrays.items():
+        validate_per_image_stats_array_v2(name, array, image_count=image_count, class_count=class_count)
+    if set(arrays) != ALL_NPZ_MEMBER_NAMES_V2:
+        missing = ALL_NPZ_MEMBER_NAMES_V2 - set(arrays)
+        unexpected = set(arrays) - ALL_NPZ_MEMBER_NAMES_V2
+        raise DfpPhase1aCheckpointError(f"generation arrays disagree with the authoritative v2 schema (missing={sorted(missing)}, unexpected={sorted(unexpected)})")
+    _validate_per_image_stats_v2_relations(dict(arrays), image_count=image_count, class_count=class_count)
+
+    next_index = checkpoint_fields["next_dataset_index"]
+    run_mode = checkpoint_fields["run_mode"]
+    generation_nonce = secrets.token_hex(16)
+    stem = f"dfp_phase1a_per_image_stats_v2_{run_mode}_{next_index:06d}_{generation_nonce}"
+    npz_filename = f"{stem}.npz"
+    manifest_filename = f"{stem}.json"
+    npz_path = checkpoints_dir / npz_filename
+    manifest_path = checkpoints_dir / manifest_filename
+
+    generated_paths: list[Path] = []
+    pointer_install_attempted = False
+    try:
+        temp_npz = checkpoints_dir / f".tmp-v2-{generation_nonce}.npz"
+        np.savez(temp_npz, allow_pickle=False, **{name: arrays[name] for name in ALL_NPZ_MEMBER_NAMES_V2})
+        written = temp_npz if temp_npz.suffix == ".npz" else temp_npz.with_suffix(temp_npz.suffix + ".npz")
+        generated_paths.append(written)
+        import os
+
+        os.replace(written, npz_path)
+        generated_paths.remove(written)
+        generated_paths.append(npz_path)
+
+        # Self-verify: re-hash and fully re-load the just-installed v2 NPZ
+        # (closed member set, every dtype/rank/shape/offset/relational
+        # invariant -- see load_per_image_stats_npz_v2).
+        npz_sha256 = sha256_file(npz_path)
+        load_per_image_stats_npz_v2(npz_path, expected_sha256=npz_sha256, image_count=image_count, class_count=class_count)
+
+        stats_manifest = {
+            "schema": PER_IMAGE_STATS_SCHEMA_NAME_V2, "schema_version": PER_IMAGE_STATS_SCHEMA_VERSION_V2,
+            "npz_filename": npz_filename, "npz_sha256": npz_sha256, "run_mode": run_mode,
+            "class_count": checkpoint_fields["class_count"], "class_names_digest": checkpoint_fields["class_names_digest"],
+            "image_count": image_count, "image_ids": list(image_ids),
+        }
+        validate_per_image_stats_manifest_structure(stats_manifest)
+        write_json_atomically(manifest_path, stats_manifest, label="per-image-stats manifest")
+        generated_paths.append(manifest_path)
+        manifest_sha256 = sha256_file(manifest_path)
+
+        new_checkpoint = dict(checkpoint_fields)
+        new_checkpoint["per_image_stats_manifest_relative_path"] = manifest_filename
+        new_checkpoint["per_image_stats_manifest_sha256"] = manifest_sha256
+        new_checkpoint["generation_nonce"] = generation_nonce
+        _require_closed_mapping(new_checkpoint, TOP_CHECKPOINT_KEYS, "generated checkpoint")
+
+        validate_checkpoint_structure(
+            new_checkpoint,
+            artifact_schema_identity_sha256=new_checkpoint["artifact_schema_identity_sha256"],
+            protocol_identity_sha256=new_checkpoint["protocol_identity_sha256"],
+            subset_manifest_sha256=new_checkpoint["subset_manifest_sha256"],
+            bridge_checkpoint_sha256=new_checkpoint["bridge_checkpoint_sha256"],
+            required_ancestor_commit=new_checkpoint["required_ancestor_commit"],
+        )
+        validate_checkpoint_against_per_image_stats(new_checkpoint, stats_manifest)
+
+        pointer_install_attempted = True
+        write_json_atomically(checkpoint_path, new_checkpoint, label="checkpoint")
+    except Exception as original_error:
+        if not pointer_install_attempted:
+            for path in generated_paths:
+                path.unlink(missing_ok=True)
+            raise
+
+        try:
+            if checkpoint_path.exists():
+                installed_checkpoint = parse_strict_json_document(checkpoint_path, label="checkpoint")
+                installed_nonce = installed_checkpoint.get("generation_nonce")
+            else:
+                installed_nonce = None
+        except Exception:
+            raise original_error
+
+        if installed_nonce == generation_nonce:
+            raise original_error
+
+        for path in generated_paths:
+            path.unlink(missing_ok=True)
+        raise original_error
+
+    return checkpoint_path
+
+
 __all__ = [
     "DfpPhase1aCheckpointError",
     "TOP_CHECKPOINT_KEYS",
@@ -1172,4 +1333,5 @@ __all__ = [
     "build_zero_row_arrays_v2",
     "validate_resume_state",
     "generate_and_install_checkpoint",
+    "generate_and_install_checkpoint_v2",
 ]

@@ -6,9 +6,10 @@ persistence, confusion, global unary components, reversion coherence)
 actually consumes, and freezes, additively, the authority that pins
 which resolution that analysis happens in and exactly which rescale
 operation it goes through first. **No real diagnostic run has occurred
-under this authority.** The still-partial execution driver
-(`src/dfp_phase1a_execute.py`) is unaffected by this module and remains
-its own, separately blocked task.
+under this authority.** The execution driver (`src/dfp_phase1a_execute.py`)
+now uses this module for its score-rescale/component/source-mass stages
+(see "Driver integration status" below) but remains its own, separately
+incomplete, uncommitted task.
 
 ## The final-resolution analysis domain
 
@@ -142,10 +143,37 @@ proof across all four ambient modes (normal, `no_grad()`,
 `set_grad_enabled(False)`, `inference_mode()`), including tensors
 created directly under `inference_mode()`.
 
+## Driver integration status
+
+`src/dfp_phase1a_execute.py` now uses this authority directly for its
+score-rescale, component-construction, and component-source-mass stages:
+every T0/T16/T32/T64/T320 field goes through `apply_final_rescale_forward`
+with the committed `[final_resolution_analysis]` contract; global unary
+components are built from the final `ori_shape` T0 field only; component
+source mass uses `build_final_stitching_pullback_plan` /
+`iter_image_final_soft_memberships` directly on those same final-
+resolution component IDs, with no resampling anywhere; reversion
+coherence uses `AnalysisContract.reversion_connectivity` /
+`reversion_small_component_threshold_pixels` (harmful washout, T320
+baseline, T0 fallback) with no duplicated literal. All of this is proven
+by `tests/test_dfp_phase1a_execute.py` against a small synthetic
+fixture, including a call-order GT-isolation proof and a T320-vs-real-
+evaluator equality check.
+
+**Resolved:** `src/dfp_phase1a_checkpoint.py`'s relational validator now
+requires `reversion_component_sizes_flat`'s per-image segment sum to
+equal `harmful_pixel_count` exactly (zero harmful pixels imply an empty
+segment and zero components; nonzero harmful pixels require positive
+sizes summing exactly to the harmful count) -- horizon-32 persistence
+counts are never consulted for this relation, matching this authority.
+The Phase 1B compute projection also now uses the persisted final-
+resolution `components` and their exact composed memberships directly
+(never a separately recomputed inference-resolution partition).
+
 ## Status
 
-This is authority and infrastructure only. No real dataset has been
-touched, no model has been loaded, no CUDA device has been initialized,
-and no Phase 1A diagnostic result exists yet. The production execution
-driver that will eventually call this module remains a separate,
-explicitly stopped task.
+No real dataset has been touched, no model has been loaded, no CUDA
+device has been initialized, and no Phase 1A diagnostic result exists
+yet. The execution driver remains a partial, multi-step implementation
+-- this integration step closed its temporary resolution/reconciliation
+choices, but the driver is not complete, staged, or committed.

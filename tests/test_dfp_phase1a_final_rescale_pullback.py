@@ -9,11 +9,31 @@ components or memberships in this module."""
 from __future__ import annotations
 
 import ast
+import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
 import torch
+
+ROOT = Path(__file__).resolve().parent.parent
+
+# Canonical import path, matching production code (src/dfp_phase1a_
+# horizon_stitching.py, src/dfp_phase1a_execute.py) and every other DFP
+# test file that touches this module (test_dfp_phase1a_stitching_
+# pullback.py, test_dfp_phase1a_soft_membership.py, test_dfp_phase1a_
+# horizon_stitching.py): the bare `segmentation.evaluation.sliding_
+# window_geometry` path, never the dotted `src.open_vocabulary_
+# segmentation.segmentation...` alias -- importing the SAME physical
+# module under two different qualified names creates two distinct class
+# objects in sys.modules, which breaks isinstance checks (e.g.
+# stitch_dfp_phase1a_horizons's own `isinstance(plan, SlidingWindowPlan)`)
+# for any other test file that later receives a plan built under the
+# other name in the same pytest process. This file previously had no
+# sys.path entry for src/open_vocabulary_segmentation at all, which is
+# exactly why it used the dotted alias -- the fix is to set up the same
+# path entry those other files already use, not to keep the alias.
+sys.path.insert(0, str(ROOT / "src/open_vocabulary_segmentation"))
 
 from src.dfp_phase1a_final_rescale_pullback import (
     DfpFinalResolutionContract,
@@ -33,9 +53,7 @@ from src.dfp_phase1a_stitching_pullback import (
     build_stitching_pullback_plan,
     validate_conservation,
 )
-from src.open_vocabulary_segmentation.segmentation.evaluation.sliding_window_geometry import SlidingWindowPlan, SpatialSize
-
-ROOT = Path(__file__).resolve().parent.parent
+from segmentation.evaluation.sliding_window_geometry import SlidingWindowPlan, SpatialSize  # noqa: E402
 
 CONTRACT_TRUE_AC = DfpFinalResolutionContract(
     align_corners=True, antialias=False, interpolation_mode="bilinear",
@@ -339,3 +357,144 @@ def test_rejects_wrong_window_plan_image_size():
             torch.zeros(1, 3, 3, dtype=torch.float64), window_plan=plan, window_index=0,
             img_shape=(99, 99), ori_shape=(3, 3), contract=CONTRACT_TRUE_AC,
         )
+
+
+# ---------------------------------------------------------------------------
+# SlidingWindowPlan import-identity regression: this file previously
+# imported SlidingWindowPlan via the non-canonical dotted alias
+# `src.open_vocabulary_segmentation.segmentation.evaluation.sliding_
+# window_geometry` (fixed above to the canonical bare `segmentation.
+# evaluation.sliding_window_geometry`, matching production code and
+# every other DFP test file). Importing the SAME physical module under
+# two different qualified names makes Python instantiate it TWICE,
+# producing two genuinely distinct class objects that share a name --
+# `isinstance(plan, SlidingWindowPlan)` then silently disagrees
+# depending on which import path built `plan`, exactly the failure mode
+# an earlier independent verification reproduced: six
+# test_dfp_phase1a_execute.py slow tests failed with
+# "DfpPhase1aHorizonStitchingError: plan must be a SlidingWindowPlan"
+# ONLY when the full DFP+DFP1B suite ran as one combined pytest process
+# (never in isolation), traced to exactly this dual-import split.
+# ---------------------------------------------------------------------------
+
+
+def test_sliding_window_plan_single_canonical_import_source():
+    """Static source audit: no DFP-scoped source, test, or diagnostics
+    file may import SlidingWindowPlan (or anything else from that
+    module) via the dotted `src.open_vocabulary_segmentation.
+    segmentation...` alias -- only the canonical bare `segmentation.
+    evaluation.sliding_window_geometry` path. A permanent regression
+    guard for the exact bug described above, independent of collection
+    order or which test happens to run first."""
+    forbidden = "src.open_vocabulary_segmentation.segmentation.evaluation.sliding_window_geometry"
+    forbidden_slash = "src/open_vocabulary_segmentation/segmentation/evaluation/sliding_window_geometry"
+
+    def _non_docstring_string_hits(source: str, path) -> list[str]:
+        """AST-precise scan: forbidden-substring hits inside CODE string
+        literals (e.g. a dynamically-generated subprocess script, or a
+        forbidden import statement itself) only -- never inside a
+        module/function/class docstring, which legitimately DISCUSSES
+        this exact historical bug and its fix in prose (this very test's
+        own docstring, and this file's module docstring, included).
+        Mirrors test_dfp_phase1a_execute.py's own AST-precise deleted-
+        path check, which hit and fixed the identical false-positive
+        pitfall for a different forbidden-string check."""
+        tree = ast.parse(source, filename=str(path))
+        docstring_ids: set[int] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.body:
+                first = node.body[0]
+                if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str):
+                    docstring_ids.add(id(first.value))
+        hits = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstring_ids:
+                normalized = node.value.replace("/", ".")
+                if forbidden in node.value or forbidden_slash.replace("/", ".") in normalized:
+                    hits.append(node.value)
+        return hits
+
+    scanned = 0
+    for pattern in ("dfp_phase1a_*.py", "dfp_phase1b_*.py"):
+        for path in sorted((ROOT / "src").glob(pattern)):
+            scanned += 1
+            source = path.read_text()
+            tree = ast.parse(source, filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.Import, ast.ImportFrom)):
+                    module_name = getattr(node, "module", None) or ""
+                    names = [module_name] + [getattr(a, "name", "") for a in node.names]
+                    assert not any(forbidden in n for n in names), f"{path}: imports SlidingWindowPlan via the non-canonical dotted alias ({module_name!r})"
+            assert not _non_docstring_string_hits(source, path), f"{path}: contains the non-canonical dotted alias in a CODE string literal"
+    this_file = Path(__file__).resolve()
+    for pattern in ("test_dfp_phase1a_*.py", "test_dfp_phase1b_*.py"):
+        for path in sorted((ROOT / "tests").glob(pattern)):
+            scanned += 1
+            source = path.read_text()
+            tree = ast.parse(source, filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.Import, ast.ImportFrom)):
+                    module_name = getattr(node, "module", None) or ""
+                    names = [module_name] + [getattr(a, "name", "") for a in node.names]
+                    assert not any(forbidden in n for n in names), f"{path}: imports via the non-canonical dotted alias ({module_name!r})"
+            if path.resolve() == this_file:
+                # This file's own regression-guard code (this function)
+                # necessarily assigns the forbidden strings themselves to
+                # `forbidden`/`forbidden_slash` above -- a legitimate,
+                # singular, self-referential exception; every OTHER file
+                # (including this one's own production import statements,
+                # already checked above) is still fully scanned.
+                continue
+            # also catch the alias if it is ever constructed as a plain
+            # CODE string (e.g. inside a dynamically-generated subprocess
+            # script literal) rather than a real import statement --
+            # never a docstring's own explanatory prose.
+            hits = _non_docstring_string_hits(source, path)
+            assert not hits, f"{path}: contains the non-canonical dotted sliding_window_geometry alias in a CODE string literal: {hits}"
+    assert scanned > 10, "the glob patterns above matched suspiciously few files -- audit may be silently skipping the DFP tree"
+
+
+def test_sliding_window_plan_not_double_imported_in_this_session():
+    """Dynamic collection-time check: by the time this test runs, pytest
+    has already imported every collected test module in this session. If
+    any DFP test file still used the dotted alias, its module would
+    already be sitting in sys.modules under that separate key -- assert
+    it is not."""
+    dotted_key = "src.open_vocabulary_segmentation.segmentation.evaluation.sliding_window_geometry"
+    assert dotted_key not in sys.modules, (
+        f"{dotted_key} is present in sys.modules during this test session -- some file imported "
+        "SlidingWindowPlan under the non-canonical dotted alias, which creates a second, distinct class object"
+    )
+    # Positive control: the canonical bare-path module IS present (this
+    # file itself imports it at module scope, above).
+    assert "segmentation.evaluation.sliding_window_geometry" in sys.modules
+
+
+def test_sliding_window_plan_canonical_identity_survives_full_tree_collection():
+    """Direct regression proof for the repository-wide collection-time
+    collision this repair closes: tests/test_image_window_cache.py,
+    tests/test_matched_power_evaluator.py, tests/test_trust_centrality_
+    harness.py, tests/test_t4_audit.py, and tests/test_trust_centrality_
+    diagnostics.py each used to load sliding_window_geometry.py via
+    ``importlib.util.spec_from_file_location`` under the CANONICAL
+    module name ``segmentation.evaluation.sliding_window_geometry`` (to
+    avoid segmentation.evaluation/__init__.py's own real mmcv/mmseg-
+    dependent imports), unconditionally overwriting sys.modules's
+    canonical entry with a freshly-executed, class-identity-distinct
+    module at collection time -- silently invalidating whichever
+    SlidingWindowPlan class production code (src/dfp_phase1a_horizon_
+    stitching.py, imported earlier) had already captured into its own
+    namespace, and breaking its own isinstance(plan, SlidingWindowPlan)
+    check for the rest of the pytest session. All five now load under a
+    private, per-file test-only name instead (never touching the
+    canonical sys.modules key), and this test's own assertions hold
+    regardless of collection order or how much of the wider test tree
+    has already been collected/imported by the time it runs."""
+    from segmentation.evaluation.sliding_window_geometry import SlidingWindowPlan as CanonicalPlan
+    from src.dfp_phase1a_horizon_stitching import SlidingWindowPlan as CapturedPlan
+
+    assert CanonicalPlan is CapturedPlan, (
+        "src.dfp_phase1a_horizon_stitching's own captured SlidingWindowPlan is no longer identical to a fresh "
+        "canonical import -- something replaced the canonical sys.modules entry after horizon_stitching's own import"
+    )
+    assert sys.modules["segmentation.evaluation.sliding_window_geometry"].SlidingWindowPlan is CanonicalPlan

@@ -31,6 +31,10 @@ COVER_DR_PACKAGE_PATH = ROOT / "src/open_vocabulary_segmentation/models/dinotext
 
 
 def _install_segmentation_package_stub() -> None:
+    """Canonical "segmentation"/"segmentation.evaluation" package context
+    -- used ONLY by ``_dinotext_seg_module`` below, never by the
+    geometry/window_cache/t4_audit/trust_centrality_diagnostics chain
+    (see ``_install_private_segmentation_stub``)."""
     if "segmentation" not in sys.modules:
         segmentation = types.ModuleType("segmentation")
         segmentation.__path__ = [str(EVAL_DIR.parent)]
@@ -39,6 +43,31 @@ def _install_segmentation_package_stub() -> None:
         evaluation = types.ModuleType("segmentation.evaluation")
         evaluation.__path__ = [str(EVAL_DIR)]
         sys.modules["segmentation.evaluation"] = evaluation
+
+
+_PRIVATE_PREFIX = "segmentation_under_test__trust_centrality_diagnostics"
+
+
+def _install_private_segmentation_stub(prefix: str) -> None:
+    """Same package-context trick as ``_install_segmentation_package_stub``
+    above, but under a PRIVATE, test-file-unique top-level name -- never
+    "segmentation"/"segmentation.evaluation" -- so geometry/wc/t4/tcd
+    below (which mutually relatively-import each other) all resolve to
+    the SAME classes as each other while NEVER touching, reading, or
+    replacing the canonical ``segmentation.evaluation.sliding_window_
+    geometry`` sys.modules entry production code (e.g. src/dfp_phase1a_
+    horizon_stitching.py) captures its own SlidingWindowPlan reference
+    from. A collision here previously broke unrelated DFP Phase 1A
+    driver tests whenever both were collected in the same pytest
+    process."""
+    if prefix not in sys.modules:
+        top = types.ModuleType(prefix)
+        top.__path__ = [str(EVAL_DIR.parent)]
+        sys.modules[prefix] = top
+    if f"{prefix}.evaluation" not in sys.modules:
+        evaluation = types.ModuleType(f"{prefix}.evaluation")
+        evaluation.__path__ = [str(EVAL_DIR)]
+        sys.modules[f"{prefix}.evaluation"] = evaluation
 
 
 def _load(name: str, path: Path):
@@ -50,10 +79,15 @@ def _load(name: str, path: Path):
 
 
 _install_segmentation_package_stub()
-geometry = _load("segmentation.evaluation.sliding_window_geometry", GEOMETRY_PATH)
-wc = _load("segmentation.evaluation.window_cache", CACHE_PATH)
-t4 = _load("segmentation.evaluation.t4_audit", AUDIT_PATH)
-tcd = _load("segmentation.evaluation.trust_centrality_diagnostics", DIAG_PATH)
+_install_private_segmentation_stub(_PRIVATE_PREFIX)
+# PRIVATE, test-file-unique dotted names throughout -- never the
+# canonical "segmentation.evaluation.*" -- see
+# _install_private_segmentation_stub's own docstring for the full
+# rationale.
+geometry = _load(f"{_PRIVATE_PREFIX}.evaluation.sliding_window_geometry", GEOMETRY_PATH)
+wc = _load(f"{_PRIVATE_PREFIX}.evaluation.window_cache", CACHE_PATH)
+t4 = _load(f"{_PRIVATE_PREFIX}.evaluation.t4_audit", AUDIT_PATH)
+tcd = _load(f"{_PRIVATE_PREFIX}.evaluation.trust_centrality_diagnostics", DIAG_PATH)
 
 SpatialSize = geometry.SpatialSize
 SlidingWindowPlan = geometry.SlidingWindowPlan
@@ -597,9 +631,20 @@ def _dinotext_seg_module():
     mmcv_stub.Config = Config
     utils_stub = types.ModuleType("utils")
     utils_stub.get_logger = lambda: types.SimpleNamespace(info=lambda *_a: None)
-    previous = {n: sys.modules.get(n) for n in ("mmcv", "utils")}
+    # dinotext_seg.py's own `from .sliding_window_geometry import
+    # SlidingWindowPlan` (loaded here under the CANONICAL "segmentation.
+    # evaluation.dinotext_seg" name) resolves through sys.modules
+    # ["segmentation.evaluation.sliding_window_geometry"] -- which this
+    # file's own geometry/wc/t4/tcd chain above deliberately never
+    # populates (see _install_private_segmentation_stub). Saving/
+    # restoring that key here too (mirroring tests/test_rwr_integration.py
+    # and tests/test_sliding_window_geometry.py's own equivalent
+    # dinotext_seg loaders) ensures whatever fresh class dinotext_seg's
+    # own import creates is never left behind afterward.
+    previous = {n: sys.modules.get(n) for n in ("mmcv", "utils", "segmentation.evaluation.sliding_window_geometry")}
     sys.modules.update({"mmcv": mmcv_stub, "utils": utils_stub})
     sys.modules.pop("segmentation.evaluation.dinotext_seg", None)
+    sys.modules.pop("segmentation.evaluation.sliding_window_geometry", None)
     try:
         spec = importlib.util.spec_from_file_location("segmentation.evaluation.dinotext_seg", SEGMENTATION_PATH)
         module = importlib.util.module_from_spec(spec)

@@ -721,8 +721,10 @@ def test_cli_verify_model_binding_coco_stuff():
 def test_cli_no_run_evaluate_pilot_full_command_exposed():
     """Checks the CLI's own exact dispatchable subcommand set (not raw
     --help text, which legitimately contains --run as an ARGUMENT name of
-    the preflight subcommand) -- no top-level subcommand named run/
-    evaluate/pilot/full exists."""
+    the preflight/execute subcommands) -- no top-level subcommand named
+    run/evaluate/pilot/full exists (the production execution command is
+    deliberately named ``execute``, added by the DFP Phase 1A Step 11
+    production execution driver -- see src/dfp_phase1a_execute.py)."""
     import importlib.util
 
     spec = importlib.util.spec_from_file_location("run_dfp_phase1a_dispatch_probe", CLI)
@@ -732,7 +734,7 @@ def test_cli_no_run_evaluate_pilot_full_command_exposed():
     assert forbidden.isdisjoint(module._DISPATCH.keys())
     expected = {
         "verify-protocol", "verify-subset", "verify-source-binding", "verify-model-binding",
-        "verify-checkpoint", "verify-result", "verify-qualitative-report", "preflight",
+        "verify-checkpoint", "verify-result", "verify-qualitative-report", "preflight", "execute",
     }
     assert set(module._DISPATCH.keys()) == expected
 

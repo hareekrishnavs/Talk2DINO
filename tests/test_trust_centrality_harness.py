@@ -34,6 +34,10 @@ DIAG_PATH = EVAL_DIR / "trust_centrality_diagnostics.py"
 
 
 def _install_segmentation_package_stub() -> None:
+    """Canonical "segmentation"/"segmentation.evaluation" package context
+    -- kept for any dinotext_seg-style loader elsewhere in this file,
+    never used by the geometry/window_cache/t4_audit/trust_centrality_*
+    chain (see ``_install_private_segmentation_stub``)."""
     if "segmentation" not in sys.modules:
         segmentation = types.ModuleType("segmentation")
         segmentation.__path__ = [str(EVAL_DIR.parent)]
@@ -42,6 +46,31 @@ def _install_segmentation_package_stub() -> None:
         evaluation = types.ModuleType("segmentation.evaluation")
         evaluation.__path__ = [str(EVAL_DIR)]
         sys.modules["segmentation.evaluation"] = evaluation
+
+
+_PRIVATE_PREFIX = "segmentation_under_test__trust_centrality_harness"
+
+
+def _install_private_segmentation_stub(prefix: str) -> None:
+    """Same package-context trick as ``_install_segmentation_package_stub``
+    above, but under a PRIVATE, test-file-unique top-level name -- never
+    "segmentation"/"segmentation.evaluation" -- so geometry/wc/t4/tcd/h
+    below (which mutually relatively-import each other all the way down
+    the chain) all resolve to the SAME classes as each other while NEVER
+    touching, reading, or replacing the canonical ``segmentation.
+    evaluation.sliding_window_geometry`` sys.modules entry production
+    code (e.g. src/dfp_phase1a_horizon_stitching.py) captures its own
+    SlidingWindowPlan reference from. A collision here previously broke
+    unrelated DFP Phase 1A driver tests whenever both were collected in
+    the same pytest process."""
+    if prefix not in sys.modules:
+        top = types.ModuleType(prefix)
+        top.__path__ = [str(EVAL_DIR.parent)]
+        sys.modules[prefix] = top
+    if f"{prefix}.evaluation" not in sys.modules:
+        evaluation = types.ModuleType(f"{prefix}.evaluation")
+        evaluation.__path__ = [str(EVAL_DIR)]
+        sys.modules[f"{prefix}.evaluation"] = evaluation
 
 
 def _load(name: str, path: Path):
@@ -53,11 +82,16 @@ def _load(name: str, path: Path):
 
 
 _install_segmentation_package_stub()
-geometry = _load("segmentation.evaluation.sliding_window_geometry", GEOMETRY_PATH)
-wc = _load("segmentation.evaluation.window_cache", CACHE_PATH)
-t4 = _load("segmentation.evaluation.t4_audit", T4_AUDIT_PATH)
-tcd = _load("segmentation.evaluation.trust_centrality_diagnostics", DIAG_PATH)
-h = _load("segmentation.evaluation.trust_centrality_harness", HARNESS_PATH)
+_install_private_segmentation_stub(_PRIVATE_PREFIX)
+# PRIVATE, test-file-unique dotted names throughout -- never the
+# canonical "segmentation.evaluation.*" -- see
+# _install_private_segmentation_stub's own docstring for the full
+# rationale.
+geometry = _load(f"{_PRIVATE_PREFIX}.evaluation.sliding_window_geometry", GEOMETRY_PATH)
+wc = _load(f"{_PRIVATE_PREFIX}.evaluation.window_cache", CACHE_PATH)
+t4 = _load(f"{_PRIVATE_PREFIX}.evaluation.t4_audit", T4_AUDIT_PATH)
+tcd = _load(f"{_PRIVATE_PREFIX}.evaluation.trust_centrality_diagnostics", DIAG_PATH)
+h = _load(f"{_PRIVATE_PREFIX}.evaluation.trust_centrality_harness", HARNESS_PATH)
 
 try:
     import mmseg  # noqa: F401

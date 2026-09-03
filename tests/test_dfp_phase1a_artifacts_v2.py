@@ -14,13 +14,32 @@ per-variant confusion-statistic identities and row sums, offset-diff-
 vs-scalar-count agreement, flat-length-vs-offset agreement, segment-sum
 reconstruction), zero-progress support without ``np.stack([])``,
 v1/v2 coexistence (each independently loadable/verifiable, v1 fully
-unmodified), and a full NPZ write/round-trip/load cycle.
+unmodified), a full NPZ write/round-trip/load cycle, and (see "v2
+checkpoint writer" below) the dedicated atomic-generation/self-verify/
+orphan-cleanup/reconciliation/resume coverage for
+``generate_and_install_checkpoint_v2`` -- the v2 sibling of Step 10's
+own ``generate_and_install_checkpoint``, required by the execution
+driver's checkpoint-write path (``src/dfp_phase1a_execute.py``'s
+``_write_checkpoint``) to persist a v2 per-image-stats row set. It is
+an ADDITIVE sibling, architecturally identical to the frozen v1 writer
+(see that function's own docstring in ``src/dfp_phase1a_checkpoint.py``
+for the full atomicity/reconciliation contract this mirrors): same
+unpredictable generation naming, same self-verify-then-atomic-pointer-
+install order, same orphan-cleanup-on-pre-replace-failure, same
+ambiguous-post-replace-nonce-reconciliation, same never-delete-a-pre-
+existing-generation guarantee -- only the schema name/version/member-
+set/loader/``class_count`` plumbing differs, and it never touches or
+alters the v1 writer's own code path.
 
 CPU-only throughout. No real dataset, no model construction, no CUDA
 initialization, no graph/recurrence execution."""
 
 from __future__ import annotations
 
+import copy
+import datetime
+import hashlib
+import json
 from pathlib import Path
 
 import numpy as np
@@ -41,6 +60,17 @@ COCO_CLASS_COUNT = 171
 @pytest.fixture(scope="module")
 def artifact_identity():
     return sch.load_identity(repo_root=ROOT)
+
+
+@pytest.fixture(scope="module")
+def schema_summary():
+    return sch.validate_static_configuration(repo_root=ROOT)
+
+
+@pytest.fixture(scope="module")
+def coco_selected_ids():
+    manifest = json.loads((ROOT / "evaluation_subsets/dfp_phase1a_coco_stuff_500.json").read_text())
+    return manifest["selected_ids"], manifest["selected_ids_digest"]
 
 
 def _random_row_partition(rng: np.random.Generator, total: int, k: int) -> np.ndarray:
@@ -126,7 +156,6 @@ def _make_v2_arrays(n: int, *, class_count: int = COCO_CLASS_COUNT, seed: int = 
     arrays["harmful_boundary_pixel_count"] = harmful_boundary
     arrays["harmful_interior_pixel_count"] = harmful_interior
 
-    h32_total_reverted = np.zeros(n, dtype=np.int64)
     for horizon in sch.PERSISTENCE_HORIZONS_V2:
         h_harmful = np.array([int(rng.integers(0, int(harmful[i]) + 1)) for i in range(n)], dtype=np.int64)
         h_beneficial = np.array([int(rng.integers(0, int(beneficial[i]) + 1)) for i in range(n)], dtype=np.int64)
@@ -134,8 +163,10 @@ def _make_v2_arrays(n: int, *, class_count: int = COCO_CLASS_COUNT, seed: int = 
         arrays[f"persistence_h{horizon}_harmful_reverted_count"] = h_harmful
         arrays[f"persistence_h{horizon}_beneficial_reverted_count"] = h_beneficial
         arrays[f"persistence_h{horizon}_third_label_reverted_count"] = h_third_label
-        if horizon == 32:
-            h32_total_reverted = h_harmful + h_beneficial + h_third_label
+    # Deliberately randomized independently of `harmful` above (bounded
+    # only by harmful[i], never made equal to it) -- proves reversion
+    # coherence's own fixture below is not silently piggy-backing on
+    # persistence_h32 by construction.
 
     # Ground truth does not vary with the prediction variant -- generated
     # ONCE per image and shared (as an independent copy) across every
@@ -189,7 +220,7 @@ def _make_v2_arrays(n: int, *, class_count: int = COCO_CLASS_COUNT, seed: int = 
     reversion_size_parts = []
     perimeter = np.zeros(n, dtype=np.int64)
     for i in range(n):
-        total_reverted = int(h32_total_reverted[i])
+        total_reverted = int(harmful[i])
         if total_reverted == 0:
             reversion_component_count[i] = 0
             reversion_size_parts.append(np.zeros(0, dtype=np.int64))
@@ -857,9 +888,15 @@ def test_independent_reconstruction_from_hand_built_multi_image_fixture():
     arrays["component_pixel_areas_flat"] = np.array([64, 8, 56], dtype=np.int64)
     arrays["component_patch_equivalent_areas_flat"] = np.array([64.0, 8.0, 56.0], dtype=np.float64)
     arrays["component_source_mass_flat"] = np.array([1.0, 1.0, 1.0], dtype=np.float64)
-    arrays["reversion_component_count"] = np.array([0, 0], dtype=np.int64)
-    arrays["reversion_perimeter"] = np.array([0, 0], dtype=np.int64)
-    arrays["reversion_component_offsets"] = np.array([0, 0, 0], dtype=np.int64)
+    # Reversion coherence (committed [reversion_coherence] authority):
+    # the reverted-pixel set is harmful washout, GT(x)==a(x) and
+    # GT(x)!=b(x) -- exactly dispute1.harmful (the solid 8x4 rectangle,
+    # 32 pixels, one connected component under 8-connectivity, perimeter
+    # 20) and dispute2.harmful (empty: image 2 is a pure third-label
+    # transition, harmful_count=0).
+    arrays["reversion_component_count"] = np.array([1, 0], dtype=np.int64)
+    arrays["reversion_perimeter"] = np.array([20, 0], dtype=np.int64)
+    arrays["reversion_component_offsets"] = np.array([0, 1, 1], dtype=np.int64)
 
     # Every other prediction variant's confusion arrays are set equal to
     # the T0 stats (a harmless placeholder that still satisfies every
@@ -887,11 +924,7 @@ def test_independent_reconstruction_from_hand_built_multi_image_fixture():
         arrays[sch.confusion_member_name_v2(variant, "predicted_pixels")] = _stack(per_image[0].predicted_pixels, per_image[1].predicted_pixels)
         arrays[sch.confusion_member_name_v2(variant, "ground_truth_pixels")] = _stack(per_image[0].ground_truth_pixels, per_image[1].ground_truth_pixels)
 
-    # reversion_component_sizes_flat is already the correct zero-length
-    # array (no image has any h32-reverted pixels in this fixture) via
-    # build_zero_row_arrays_v2's own n==0 default, resized implicitly by
-    # nothing needing to change it here.
-    arrays["reversion_component_sizes_flat"] = np.zeros(0, dtype=np.int64)
+    arrays["reversion_component_sizes_flat"] = np.array([32], dtype=np.int64)
 
     assert set(arrays) == sch.ALL_NPZ_MEMBER_NAMES_V2, sorted(sch.ALL_NPZ_MEMBER_NAMES_V2 ^ set(arrays))
     _validate_all_v2(arrays, image_count=n, class_count=class_count)
@@ -934,3 +967,635 @@ def test_v1_and_v2_npz_are_independently_loadable_side_by_side(tmp_path):
     np.savez(v2_path, allow_pickle=False, **v2_arrays)
     v2_loaded = ckpt.load_per_image_stats_npz_v2(v2_path, expected_sha256=sch.sha256_file(v2_path), image_count=n, class_count=COCO_CLASS_COUNT)
     assert set(v2_loaded) == sch.ALL_NPZ_MEMBER_NAMES_V2
+
+
+# ---------------------------------------------------------------------------
+# v2 checkpoint writer (generate_and_install_checkpoint_v2): dedicated
+# atomic-generation/self-verify/orphan-cleanup/reconciliation/resume
+# coverage, mirroring test_dfp_phase1a_artifacts.py's own v1-writer
+# coverage member-for-member (see that file's _make_fields/_install/
+# _snapshot/test_A..F for the exact behavior this reproduces against the
+# v2 writer instead).
+# ---------------------------------------------------------------------------
+
+
+def _make_fields_v2(*, schema_summary, artifact_identity, selected_ids, selected_ids_digest, n: int, complete: bool = False) -> dict:
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    return {
+        "schema": sch.CHECKPOINT_SCHEMA_NAME, "schema_version": sch.CHECKPOINT_SCHEMA_VERSION,
+        "artifact_schema_identity_sha256": sch.sha256_file(ROOT / sch.IDENTITY_RELATIVE_PATH),
+        "protocol_identity_sha256": schema_summary["protocol_identity_sha256"],
+        "subset_manifest_sha256": schema_summary["coco_stuff_manifest_sha256"], "selected_ids_digest": selected_ids_digest,
+        "run_mode": "coco_stuff_500", "image_count_expected": n if complete else len(selected_ids),
+        "class_count": artifact_identity["dataset_binding"]["coco_stuff_class_count"],
+        "class_names_digest": artifact_identity["dataset_binding"]["coco_stuff_class_names_digest"],
+        "horizon_order": list(sch.HORIZON_ORDER), "source_commit": "a" * 40,
+        "required_ancestor_commit": artifact_identity["parent_identity_binding"]["required_ancestor_commit"],
+        "bridge_checkpoint_sha256": schema_summary["bridge_checkpoint_sha256"], "next_dataset_index": n,
+        "completed_image_ids": list(selected_ids[:n]), "images_completed_count": n, "total_windows_processed": n * 4,
+        "complete": complete, "final_result_produced": False, "created_at_utc": now, "updated_at_utc": now,
+    }
+
+
+def _install_v2(tmp_path, *, schema_summary, artifact_identity, selected_ids, selected_ids_digest, n: int, complete: bool = False, seed: int = 0, class_count: int = COCO_CLASS_COUNT):
+    fields = _make_fields_v2(
+        schema_summary=schema_summary, artifact_identity=artifact_identity, selected_ids=selected_ids,
+        selected_ids_digest=selected_ids_digest, n=n, complete=complete,
+    )
+    arrays = _make_v2_arrays(n, class_count=class_count, seed=seed)
+    checkpoints_dir = tmp_path / "checkpoints"
+    ckpt.generate_and_install_checkpoint_v2(
+        checkpoints_dir=checkpoints_dir, checkpoint_filename="checkpoint.json", checkpoint_fields=fields,
+        arrays=arrays, image_ids=selected_ids[:n], class_count=class_count,
+    )
+    return checkpoints_dir
+
+
+def _snapshot_v2(cp_dir):
+    files = sorted(p.name for p in cp_dir.iterdir())
+    hashes = {name: hashlib.sha256((cp_dir / name).read_bytes()).hexdigest() for name in files}
+    return files, hashes
+
+
+def _fully_reverify_v2(checkpoints_dir, *, class_count=COCO_CLASS_COUNT):
+    checkpoint = json.loads((checkpoints_dir / "checkpoint.json").read_text())
+    stats_manifest_path = checkpoints_dir / checkpoint["per_image_stats_manifest_relative_path"]
+    stats_manifest = json.loads(stats_manifest_path.read_text())
+    assert sch.sha256_file(stats_manifest_path) == checkpoint["per_image_stats_manifest_sha256"]
+    assert stats_manifest["schema"] == sch.PER_IMAGE_STATS_SCHEMA_NAME_V2
+    assert stats_manifest["schema_version"] == sch.PER_IMAGE_STATS_SCHEMA_VERSION_V2
+    ckpt.validate_checkpoint_against_per_image_stats(checkpoint, stats_manifest)
+    npz_path = checkpoints_dir / stats_manifest["npz_filename"]
+    ckpt.load_per_image_stats_npz_v2(
+        npz_path, expected_sha256=stats_manifest["npz_sha256"], image_count=stats_manifest["image_count"], class_count=class_count,
+    )
+    return checkpoint, stats_manifest
+
+
+def test_v2_writer_end_to_end_install_and_resume(tmp_path, schema_summary, artifact_identity, coco_selected_ids):
+    selected_ids, digest = coco_selected_ids
+    checkpoints_dir = _install_v2(tmp_path, schema_summary=schema_summary, artifact_identity=artifact_identity, selected_ids=selected_ids, selected_ids_digest=digest, n=3)
+    result = ckpt.validate_resume_state(checkpoints_dir=checkpoints_dir, checkpoint_filename="checkpoint.json", repo_root=ROOT)
+    assert result["next_dataset_index"] == 3
+    assert result["resumable"] is True
+    assert result["run_mode"] == "coco_stuff_500"
+    assert result["per_image_stats_schema_variant"] == ckpt.PER_IMAGE_STATS_SCHEMA_VARIANT_V2
+    assert set(result["arrays"]) == sch.ALL_NPZ_MEMBER_NAMES_V2
+
+
+@pytest.mark.parametrize("n,label", [(0, "zero-progress"), (1, "one-row"), (3, "middle-prefix")], ids=["zero", "one", "middle"])
+def test_v2_writer_progress_states(tmp_path, schema_summary, artifact_identity, coco_selected_ids, n, label):
+    selected_ids, digest = coco_selected_ids
+    checkpoints_dir = _install_v2(tmp_path, schema_summary=schema_summary, artifact_identity=artifact_identity, selected_ids=selected_ids, selected_ids_digest=digest, n=n, complete=False)
+    result = ckpt.validate_resume_state(checkpoints_dir=checkpoints_dir, checkpoint_filename="checkpoint.json", repo_root=ROOT)
+    assert result["next_dataset_index"] == n
+    assert result["resumable"] is True
+    for name in sch.SCALAR_INT64_MEMBER_NAMES_V2:
+        assert result["arrays"][name].shape == (n,)
+
+
+def test_v2_writer_final_minus_one_state(tmp_path, schema_summary, artifact_identity, coco_selected_ids):
+    """One row shy of the real, frozen 500-image COCO-Stuff subset --
+    ``validate_resume_state`` re-derives ``image_count_expected`` from
+    the actual committed subset manifest unconditionally (see its own
+    step 4), so an authentic "final-minus-one" fixture must use the
+    real total rather than an artificially shrunk one."""
+    selected_ids, digest = coco_selected_ids
+    n = len(selected_ids) - 1
+    checkpoints_dir = _install_v2(tmp_path, schema_summary=schema_summary, artifact_identity=artifact_identity, selected_ids=selected_ids, selected_ids_digest=digest, n=n, complete=False, seed=70)
+    result = ckpt.validate_resume_state(checkpoints_dir=checkpoints_dir, checkpoint_filename="checkpoint.json", repo_root=ROOT)
+    assert result["next_dataset_index"] == n and result["resumable"] is True
+
+
+def test_v2_writer_complete_state(tmp_path, schema_summary, artifact_identity, coco_selected_ids):
+    """The full, real 500-image total, complete=True -- resumable must
+    be False and the row count must match the frozen subset exactly."""
+    selected_ids, digest = coco_selected_ids
+    n = len(selected_ids)
+    checkpoints_dir = _install_v2(tmp_path, schema_summary=schema_summary, artifact_identity=artifact_identity, selected_ids=selected_ids, selected_ids_digest=digest, n=n, complete=True, seed=71)
+    result = ckpt.validate_resume_state(checkpoints_dir=checkpoints_dir, checkpoint_filename="checkpoint.json", repo_root=ROOT)
+    assert result["next_dataset_index"] == n and result["resumable"] is False
+
+
+def test_v2_writer_manifest_and_npz_filenames_use_the_frozen_v2_prefix(tmp_path, schema_summary, artifact_identity, coco_selected_ids):
+    selected_ids, digest = coco_selected_ids
+    checkpoints_dir = _install_v2(tmp_path, schema_summary=schema_summary, artifact_identity=artifact_identity, selected_ids=selected_ids, selected_ids_digest=digest, n=2, seed=80)
+    checkpoint = json.loads((checkpoints_dir / "checkpoint.json").read_text())
+    manifest_name = checkpoint["per_image_stats_manifest_relative_path"]
+    stats_manifest = json.loads((checkpoints_dir / manifest_name).read_text())
+    npz_name = stats_manifest["npz_filename"]
+    assert manifest_name.startswith("dfp_phase1a_per_image_stats_v2_coco_stuff_500_")
+    assert npz_name.startswith("dfp_phase1a_per_image_stats_v2_coco_stuff_500_")
+    assert checkpoint["generation_nonce"] in manifest_name
+    assert checkpoint["generation_nonce"] in npz_name
+
+
+def test_v2_writer_rejects_class_count_mismatch(tmp_path, schema_summary, artifact_identity, coco_selected_ids):
+    selected_ids, digest = coco_selected_ids
+    fields = _make_fields_v2(schema_summary=schema_summary, artifact_identity=artifact_identity, selected_ids=selected_ids, selected_ids_digest=digest, n=2)
+    arrays = _make_v2_arrays(2, seed=81)
+    with pytest.raises(ckpt.DfpPhase1aCheckpointError, match="class_count"):
+        ckpt.generate_and_install_checkpoint_v2(
+            checkpoints_dir=tmp_path / "checkpoints", checkpoint_filename="checkpoint.json", checkpoint_fields=fields,
+            arrays=arrays, image_ids=selected_ids[:2], class_count=COCO_CLASS_COUNT + 1,
+        )
+    assert not (tmp_path / "checkpoints").exists() or list((tmp_path / "checkpoints").iterdir()) == []
+
+
+def test_v2_writer_rejects_v1_arrays_cross_feeding(tmp_path, schema_summary, artifact_identity, coco_selected_ids):
+    """v1's strict subset of members must be rejected by the v2 writer --
+    the v2 writer accepts only the exact closed v2 member set."""
+    selected_ids, digest = coco_selected_ids
+    fields = _make_fields_v2(schema_summary=schema_summary, artifact_identity=artifact_identity, selected_ids=selected_ids, selected_ids_digest=digest, n=2)
+    rng = np.random.default_rng(82)
+    v1_arrays: dict[str, np.ndarray] = {}
+    for name in sch.INT64_MEMBER_NAMES:
+        v1_arrays[name] = np.arange(2, dtype=np.int64) if name == "dataset_indices" else rng.integers(0, 100, size=2).astype(np.int64)
+    base = np.sort(rng.random((2, 5)), axis=1)
+    for i, name in enumerate(("q_w_median", "q_w_p90", "q_w_p95", "q_w_p99", "q_w_maximum")):
+        v1_arrays[name] = base[:, i]
+    v1_arrays["q_w_mean"] = rng.random(2)
+    # Per-array validation runs (and fails) BEFORE the membership-set
+    # ("missing"/"unexpected") check ever runs -- the first v1-only
+    # member v1 happens to iterate to is rejected outright as unknown to
+    # the v2 schema. Either diagnostic proves the same thing: the v2
+    # writer never silently widens to accept a v1 array set.
+    with pytest.raises(ckpt.DfpPhase1aCheckpointError, match="not part of the authoritative schema|missing"):
+        ckpt.generate_and_install_checkpoint_v2(
+            checkpoints_dir=tmp_path / "checkpoints", checkpoint_filename="checkpoint.json", checkpoint_fields=fields,
+            arrays=v1_arrays, image_ids=selected_ids[:2], class_count=COCO_CLASS_COUNT,
+        )
+
+
+def test_v1_writer_rejects_v2_arrays_cross_feeding(tmp_path, schema_summary, artifact_identity, coco_selected_ids):
+    """Symmetric control: v2's superset of members must be rejected by
+    the unmodified v1 writer -- proves v1 is genuinely untouched, not
+    silently widened to also accept v2 rows."""
+    selected_ids, digest = coco_selected_ids
+    fields = _make_fields_v2(schema_summary=schema_summary, artifact_identity=artifact_identity, selected_ids=selected_ids, selected_ids_digest=digest, n=2)
+    v2_arrays = _make_v2_arrays(2, seed=83)
+    with pytest.raises(ckpt.DfpPhase1aCheckpointError, match="not part of the authoritative schema|unexpected"):
+        ckpt.generate_and_install_checkpoint(
+            checkpoints_dir=tmp_path / "checkpoints", checkpoint_filename="checkpoint.json", checkpoint_fields=fields,
+            arrays=v2_arrays, image_ids=selected_ids[:2],
+        )
+
+
+@pytest.mark.parametrize(
+    "corrupt_name,corrupt_fn,match",
+    [
+        ("bad_dtype", lambda a: {**a, "window_count": a["window_count"].astype(np.float32)}, "int64"),
+        ("bad_offsets", lambda a: {**a, "component_offsets": a["component_offsets"] + 1}, "component_offsets"),
+        ("bad_flat_length", lambda a: {**a, "component_pixel_areas_flat": np.concatenate([a["component_pixel_areas_flat"], [1]])}, "component_pixel_areas_flat"),
+        ("bad_reversion_relation", lambda a: {**a, "reversion_component_sizes_flat": a["reversion_component_sizes_flat"] + 1 if a["reversion_component_sizes_flat"].size else a["reversion_component_sizes_flat"]}, "reversion_component_sizes_flat|harmful_pixel_count"),
+    ],
+)
+def test_v2_writer_malformed_arrays_fail_cleanly_and_preserve_previous(tmp_path, schema_summary, artifact_identity, coco_selected_ids, corrupt_name, corrupt_fn, match):
+    selected_ids, digest = coco_selected_ids
+    checkpoints_dir = _install_v2(tmp_path, schema_summary=schema_summary, artifact_identity=artifact_identity, selected_ids=selected_ids, selected_ids_digest=digest, n=2, seed=90)
+    before_files, before_hashes = _snapshot_v2(checkpoints_dir)
+
+    good = _make_v2_arrays(3, seed=91)
+    # reversion sizes must be nonempty to exercise the reversion-relation
+    # corruption meaningfully; regenerate with a different seed until true
+    # if the drawn fixture happened to have zero harmful pixels everywhere.
+    tries = 0
+    while corrupt_name == "bad_reversion_relation" and good["reversion_component_sizes_flat"].size == 0 and tries < 20:
+        tries += 1
+        good = _make_v2_arrays(3, seed=91 + tries)
+    broken = corrupt_fn(good)
+    fields = _make_fields_v2(schema_summary=schema_summary, artifact_identity=artifact_identity, selected_ids=selected_ids, selected_ids_digest=digest, n=3)
+
+    with pytest.raises(ckpt.DfpPhase1aCheckpointError, match=match):
+        ckpt.generate_and_install_checkpoint_v2(
+            checkpoints_dir=checkpoints_dir, checkpoint_filename="checkpoint.json", checkpoint_fields=fields,
+            arrays=broken, image_ids=selected_ids[:3], class_count=COCO_CLASS_COUNT,
+        )
+
+    after_files, after_hashes = _snapshot_v2(checkpoints_dir)
+    assert before_files == after_files
+    assert before_hashes == after_hashes
+    assert not any(".tmp" in n for n in after_files)
+
+
+def test_v2_writer_does_not_mutate_input_fields_or_arrays(tmp_path, schema_summary, artifact_identity, coco_selected_ids):
+    selected_ids, digest = coco_selected_ids
+    fields = _make_fields_v2(schema_summary=schema_summary, artifact_identity=artifact_identity, selected_ids=selected_ids, selected_ids_digest=digest, n=2)
+    fields_before = copy.deepcopy(fields)
+    arrays = _make_v2_arrays(2, seed=92)
+    arrays_before = {name: arr.copy() for name, arr in arrays.items()}
+    ckpt.generate_and_install_checkpoint_v2(
+        checkpoints_dir=tmp_path / "checkpoints", checkpoint_filename="checkpoint.json", checkpoint_fields=fields,
+        arrays=arrays, image_ids=selected_ids[:2], class_count=COCO_CLASS_COUNT,
+    )
+    assert fields == fields_before
+    for name, arr in arrays.items():
+        np.testing.assert_array_equal(arr, arrays_before[name])
+
+
+def test_v2_writer_generation_success_installs_exactly_one_new_generation(tmp_path, schema_summary, artifact_identity, coco_selected_ids):
+    selected_ids, digest = coco_selected_ids
+    checkpoints_dir = _install_v2(tmp_path, schema_summary=schema_summary, artifact_identity=artifact_identity, selected_ids=selected_ids, selected_ids_digest=digest, n=2, seed=100)
+    before_files, _ = _snapshot_v2(checkpoints_dir)
+
+    new_fields = _make_fields_v2(schema_summary=schema_summary, artifact_identity=artifact_identity, selected_ids=selected_ids, selected_ids_digest=digest, n=3)
+    new_arrays = _make_v2_arrays(3, seed=101)
+    ckpt.generate_and_install_checkpoint_v2(
+        checkpoints_dir=checkpoints_dir, checkpoint_filename="checkpoint.json", checkpoint_fields=new_fields,
+        arrays=new_arrays, image_ids=selected_ids[:3], class_count=COCO_CLASS_COUNT,
+    )
+
+    after_files, _ = _snapshot_v2(checkpoints_dir)
+    new_files = set(after_files) - set(before_files)
+    npz_new = [f for f in new_files if f.endswith(".npz")]
+    json_new = [f for f in new_files if f.endswith(".json")]
+    assert len(npz_new) == 1 and len(json_new) == 1
+    assert not any(".tmp" in name for name in after_files)
+    checkpoint = json.loads((checkpoints_dir / "checkpoint.json").read_text())
+    assert checkpoint["per_image_stats_manifest_relative_path"] == json_new[0]
+    stats_manifest = json.loads((checkpoints_dir / json_new[0]).read_text())
+    assert stats_manifest["npz_filename"] == npz_new[0]
+    assert stats_manifest["schema"] == sch.PER_IMAGE_STATS_SCHEMA_NAME_V2
+
+
+@pytest.mark.parametrize(
+    "exc_factory",
+    [
+        lambda: OSError("simulated disk-full during v2 checkpoint-pointer install"),
+        lambda: ValueError("simulated serialization ValueError during v2 checkpoint-pointer install"),
+        lambda: ckpt.DfpPhase1aCheckpointError("simulated domain error during v2 checkpoint-pointer install"),
+        lambda: MemoryError("simulated MemoryError during v2 checkpoint-pointer install"),
+    ],
+    ids=["OSError", "ValueError", "DomainError", "MemoryError"],
+)
+def test_v2_writer_pointer_write_failure_matrix_preserves_old_and_cleans_new(tmp_path, schema_summary, artifact_identity, coco_selected_ids, exc_factory):
+    """Mirrors test_pointer_write_failure_matrix_preserves_old_and_cleans_new
+    for the v1 writer: every one of these (all ``Exception`` subclasses,
+    so the writer's own ``except Exception`` reconciliation handler
+    actually runs) must propagate completely unchanged (never wrapped,
+    never swallowed), and must leave the previous checkpoint and its own
+    generation byte-identical with no orphan .tmp/generation residue.
+    ``MemoryError`` is included here (it subclasses ``Exception``); see
+    ``test_v2_writer_keyboard_interrupt_and_system_exit_propagate_uncaught``
+    below for ``KeyboardInterrupt``/``SystemExit``, which are
+    ``BaseException`` subclasses the writer's handler structurally
+    cannot catch at all -- propagation is proven, but orphan cleanup is
+    not (and must not be) claimed for them."""
+    selected_ids, digest = coco_selected_ids
+    checkpoints_dir = _install_v2(tmp_path, schema_summary=schema_summary, artifact_identity=artifact_identity, selected_ids=selected_ids, selected_ids_digest=digest, n=2, seed=110)
+    before_files, before_hashes = _snapshot_v2(checkpoints_dir)
+
+    new_fields = _make_fields_v2(schema_summary=schema_summary, artifact_identity=artifact_identity, selected_ids=selected_ids, selected_ids_digest=digest, n=3)
+    new_fields_before = copy.deepcopy(new_fields)
+    new_arrays = _make_v2_arrays(3, seed=111)
+
+    original = ckpt.write_json_atomically
+    call_count = {"n": 0}
+    exc_instance = exc_factory()
+
+    def selective_fail(path, doc, *, label):
+        call_count["n"] += 1
+        if call_count["n"] == 2:  # 1st call = per-image-stats manifest (succeeds); 2nd = checkpoint pointer
+            raise exc_instance
+        return original(path, doc, label=label)
+
+    ckpt.write_json_atomically = selective_fail
+    try:
+        with pytest.raises(type(exc_instance)) as excinfo:
+            ckpt.generate_and_install_checkpoint_v2(
+                checkpoints_dir=checkpoints_dir, checkpoint_filename="checkpoint.json", checkpoint_fields=new_fields,
+                arrays=new_arrays, image_ids=selected_ids[:3], class_count=COCO_CLASS_COUNT,
+            )
+        assert excinfo.value is exc_instance
+    finally:
+        ckpt.write_json_atomically = original
+
+    after_files, after_hashes = _snapshot_v2(checkpoints_dir)
+    assert before_files == after_files
+    assert before_hashes == after_hashes
+    assert not any(".tmp" in name for name in after_files)
+    assert new_fields == new_fields_before
+    _fully_reverify_v2(checkpoints_dir)
+
+
+@pytest.mark.parametrize(
+    "exc_factory", [lambda: KeyboardInterrupt("simulated Ctrl-C during v2 checkpoint-pointer install"), lambda: SystemExit("simulated exit during v2 checkpoint-pointer install")],
+    ids=["KeyboardInterrupt", "SystemExit"],
+)
+def test_v2_writer_keyboard_interrupt_and_system_exit_propagate_uncaught(tmp_path, schema_summary, artifact_identity, coco_selected_ids, exc_factory):
+    """KeyboardInterrupt/SystemExit are BaseException subclasses, so the
+    writer's own ``except Exception as original_error:`` clause cannot
+    (and must not be made to) catch them: they must propagate completely
+    unhandled, exactly as raised, with the OLD checkpoint pointer itself
+    never overwritten (checkpoint.json content unchanged) -- but, unlike
+    a genuine ``Exception``, orphan generation-file cleanup does not run
+    for these (the handler that performs it is never entered), which is
+    the correct, deliberate consequence of never trapping Ctrl-C/exit
+    for cleanup purposes, not a defect."""
+    selected_ids, digest = coco_selected_ids
+    checkpoints_dir = _install_v2(tmp_path, schema_summary=schema_summary, artifact_identity=artifact_identity, selected_ids=selected_ids, selected_ids_digest=digest, n=2, seed=112)
+    old_checkpoint_bytes = (checkpoints_dir / "checkpoint.json").read_bytes()
+
+    new_fields = _make_fields_v2(schema_summary=schema_summary, artifact_identity=artifact_identity, selected_ids=selected_ids, selected_ids_digest=digest, n=3)
+    new_arrays = _make_v2_arrays(3, seed=113)
+
+    original = ckpt.write_json_atomically
+    call_count = {"n": 0}
+    exc_instance = exc_factory()
+
+    def selective_fail(path, doc, *, label):
+        call_count["n"] += 1
+        if call_count["n"] == 2:
+            raise exc_instance
+        return original(path, doc, label=label)
+
+    ckpt.write_json_atomically = selective_fail
+    try:
+        with pytest.raises(type(exc_instance)) as excinfo:
+            ckpt.generate_and_install_checkpoint_v2(
+                checkpoints_dir=checkpoints_dir, checkpoint_filename="checkpoint.json", checkpoint_fields=new_fields,
+                arrays=new_arrays, image_ids=selected_ids[:3], class_count=COCO_CLASS_COUNT,
+            )
+        assert excinfo.value is exc_instance
+    finally:
+        ckpt.write_json_atomically = original
+
+    # The OLD checkpoint pointer itself was never overwritten (its own
+    # os.replace never ran), so the previous, still-valid checkpoint and
+    # generation remain exactly as they were and continue to fully verify.
+    assert (checkpoints_dir / "checkpoint.json").read_bytes() == old_checkpoint_bytes
+    _fully_reverify_v2(checkpoints_dir)
+    result = ckpt.validate_resume_state(checkpoints_dir=checkpoints_dir, checkpoint_filename="checkpoint.json", repo_root=ROOT)
+    assert result["next_dataset_index"] == 2
+
+
+@pytest.mark.parametrize("target", ["np.savez", "write-manifest", "candidate-validation", "self-verification", "os.replace-npz"])
+def test_v2_writer_generation_failure_injection_matrix(tmp_path, schema_summary, artifact_identity, coco_selected_ids, target, monkeypatch):
+    selected_ids, digest = coco_selected_ids
+    checkpoints_dir = _install_v2(tmp_path, schema_summary=schema_summary, artifact_identity=artifact_identity, selected_ids=selected_ids, selected_ids_digest=digest, n=2, seed=120)
+    before_files, before_hashes = _snapshot_v2(checkpoints_dir)
+
+    new_fields = _make_fields_v2(schema_summary=schema_summary, artifact_identity=artifact_identity, selected_ids=selected_ids, selected_ids_digest=digest, n=3)
+    new_arrays = _make_v2_arrays(3, seed=121)
+
+    if target == "np.savez":
+        monkeypatch.setattr(ckpt.np, "savez", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("simulated np.savez failure")))
+    elif target == "write-manifest":
+        original = ckpt.write_json_atomically
+        state = {"n": 0}
+
+        def fail_first(path, doc, *, label):
+            state["n"] += 1
+            if state["n"] == 1:
+                raise RuntimeError("simulated manifest write failure")
+            return original(path, doc, label=label)
+
+        monkeypatch.setattr(ckpt, "write_json_atomically", fail_first)
+    elif target == "candidate-validation":
+        monkeypatch.setattr(ckpt, "validate_checkpoint_structure", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("simulated candidate validation failure")))
+    elif target == "self-verification":
+        monkeypatch.setattr(ckpt, "load_per_image_stats_npz_v2", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("simulated self-verification failure")))
+    elif target == "os.replace-npz":
+        import os as os_module
+
+        original_replace = os_module.replace
+        state = {"n": 0}
+
+        def fail_first_replace(*a, **kw):
+            state["n"] += 1
+            if state["n"] == 1:
+                raise OSError("simulated os.replace failure during NPZ install")
+            return original_replace(*a, **kw)
+
+        monkeypatch.setattr(os_module, "replace", fail_first_replace)
+
+    with pytest.raises(Exception):
+        ckpt.generate_and_install_checkpoint_v2(
+            checkpoints_dir=checkpoints_dir, checkpoint_filename="checkpoint.json", checkpoint_fields=new_fields,
+            arrays=new_arrays, image_ids=selected_ids[:3], class_count=COCO_CLASS_COUNT,
+        )
+
+    after_files, after_hashes = _snapshot_v2(checkpoints_dir)
+    assert before_files == after_files
+    assert before_hashes == after_hashes
+    assert not any(".tmp" in name for name in after_files)
+
+
+def test_v2_writer_B_post_replacement_memory_error(tmp_path, schema_summary, artifact_identity, coco_selected_ids):
+    """The pointer write's os.replace genuinely succeeds, then
+    MemoryError fires from post-replace bookkeeping: MemoryError must
+    propagate; the installed checkpoint must carry the CURRENT
+    generation and fully verify; nothing referenced is deleted."""
+    selected_ids, digest = coco_selected_ids
+    checkpoints_dir = _install_v2(tmp_path, schema_summary=schema_summary, artifact_identity=artifact_identity, selected_ids=selected_ids, selected_ids_digest=digest, n=2, seed=130)
+    old_checkpoint, _ = _fully_reverify_v2(checkpoints_dir)
+    old_generation_files = {p.name for p in checkpoints_dir.iterdir()} - {"checkpoint.json"}
+
+    new_fields = _make_fields_v2(schema_summary=schema_summary, artifact_identity=artifact_identity, selected_ids=selected_ids, selected_ids_digest=digest, n=3)
+    new_arrays = _make_v2_arrays(3, seed=131)
+
+    original = ckpt.write_json_atomically
+    call_count = {"n": 0}
+
+    def succeed_then_memory_error(path, doc, *, label):
+        call_count["n"] += 1
+        if call_count["n"] == 2:
+            original(path, doc, label=label)
+            raise MemoryError("simulated MemoryError from v2 post-replace bookkeeping")
+        return original(path, doc, label=label)
+
+    ckpt.write_json_atomically = succeed_then_memory_error
+    try:
+        with pytest.raises(MemoryError):
+            ckpt.generate_and_install_checkpoint_v2(
+                checkpoints_dir=checkpoints_dir, checkpoint_filename="checkpoint.json", checkpoint_fields=new_fields,
+                arrays=new_arrays, image_ids=selected_ids[:3], class_count=COCO_CLASS_COUNT,
+            )
+    finally:
+        ckpt.write_json_atomically = original
+
+    installed_checkpoint = json.loads((checkpoints_dir / "checkpoint.json").read_text())
+    assert installed_checkpoint["next_dataset_index"] == 3
+    assert installed_checkpoint != old_checkpoint
+    all_files = {p.name for p in checkpoints_dir.iterdir()}
+    assert old_generation_files <= all_files, "old generation files must never be deleted"
+    manifest_ref = installed_checkpoint["per_image_stats_manifest_relative_path"]
+    assert installed_checkpoint["generation_nonce"] in manifest_ref
+    _fully_reverify_v2(checkpoints_dir)
+    result = ckpt.validate_resume_state(checkpoints_dir=checkpoints_dir, checkpoint_filename="checkpoint.json", repo_root=ROOT)
+    assert result["next_dataset_index"] == 3
+    assert not any(".tmp" in n for n in all_files)
+
+
+def test_v2_writer_D_installed_pointer_still_references_old_generation(tmp_path, schema_summary, artifact_identity, coco_selected_ids):
+    selected_ids, digest = coco_selected_ids
+    checkpoints_dir = _install_v2(tmp_path, schema_summary=schema_summary, artifact_identity=artifact_identity, selected_ids=selected_ids, selected_ids_digest=digest, n=2, seed=140)
+    before_files, before_hashes = _snapshot_v2(checkpoints_dir)
+    old_checkpoint, _ = _fully_reverify_v2(checkpoints_dir)
+
+    new_fields = _make_fields_v2(schema_summary=schema_summary, artifact_identity=artifact_identity, selected_ids=selected_ids, selected_ids_digest=digest, n=3)
+    new_arrays = _make_v2_arrays(3, seed=141)
+
+    original = ckpt.write_json_atomically
+    call_count = {"n": 0}
+    injected = OSError("simulated failure, old v2 pointer never replaced")
+
+    def fail_leaving_old_intact(path, doc, *, label):
+        call_count["n"] += 1
+        if call_count["n"] == 2:
+            raise injected
+        return original(path, doc, label=label)
+
+    ckpt.write_json_atomically = fail_leaving_old_intact
+    try:
+        with pytest.raises(OSError):
+            ckpt.generate_and_install_checkpoint_v2(
+                checkpoints_dir=checkpoints_dir, checkpoint_filename="checkpoint.json", checkpoint_fields=new_fields,
+                arrays=new_arrays, image_ids=selected_ids[:3], class_count=COCO_CLASS_COUNT,
+            )
+    finally:
+        ckpt.write_json_atomically = original
+
+    after_files, after_hashes = _snapshot_v2(checkpoints_dir)
+    assert before_files == after_files
+    assert before_hashes == after_hashes
+    reverified_checkpoint, _ = _fully_reverify_v2(checkpoints_dir)
+    assert reverified_checkpoint == old_checkpoint
+
+
+def test_v2_writer_E_reconciliation_itself_fails(tmp_path, schema_summary, artifact_identity, coco_selected_ids, monkeypatch):
+    selected_ids, digest = coco_selected_ids
+    checkpoints_dir = _install_v2(tmp_path, schema_summary=schema_summary, artifact_identity=artifact_identity, selected_ids=selected_ids, selected_ids_digest=digest, n=2, seed=150)
+
+    new_fields = _make_fields_v2(schema_summary=schema_summary, artifact_identity=artifact_identity, selected_ids=selected_ids, selected_ids_digest=digest, n=3)
+    new_arrays = _make_v2_arrays(3, seed=151)
+
+    original_write = ckpt.write_json_atomically
+    call_count = {"n": 0}
+    original_error = ValueError("original v2 pointer-write failure")
+
+    def fail_pointer_write(path, doc, *, label):
+        call_count["n"] += 1
+        if call_count["n"] == 2:
+            raise original_error
+        return original_write(path, doc, label=label)
+
+    def broken_reconciliation_read(*a, **kw):
+        raise RuntimeError("simulated reconciliation read failure -- must never be what propagates")
+
+    monkeypatch.setattr(ckpt, "write_json_atomically", fail_pointer_write)
+    monkeypatch.setattr(ckpt, "parse_strict_json_document", broken_reconciliation_read)
+
+    with pytest.raises(ValueError) as excinfo:
+        ckpt.generate_and_install_checkpoint_v2(
+            checkpoints_dir=checkpoints_dir, checkpoint_filename="checkpoint.json", checkpoint_fields=new_fields,
+            arrays=new_arrays, image_ids=selected_ids[:3], class_count=COCO_CLASS_COUNT,
+        )
+    assert excinfo.value is original_error
+
+    all_files = {p.name for p in checkpoints_dir.iterdir()}
+    npz_files = [f for f in all_files if f.endswith(".npz")]
+    json_gen_files = [f for f in all_files if f.endswith(".json") and f != "checkpoint.json"]
+    assert len(npz_files) == 2, "both the old and the (conservatively preserved) new generation NPZ must remain"
+    assert len(json_gen_files) == 2
+
+
+def test_v2_writer_F_fresh_checkpoint_pre_replace(tmp_path, schema_summary, artifact_identity, coco_selected_ids):
+    selected_ids, digest = coco_selected_ids
+    checkpoints_dir = tmp_path / "fresh_pre_replace_v2"
+    checkpoints_dir.mkdir()
+    fields = _make_fields_v2(schema_summary=schema_summary, artifact_identity=artifact_identity, selected_ids=selected_ids, selected_ids_digest=digest, n=2)
+    arrays = _make_v2_arrays(2, seed=160)
+
+    original = ckpt.write_json_atomically
+    call_count = {"n": 0}
+    injected = OSError("simulated failure before v2 checkpoint.json is ever created")
+
+    def fail_before_creation(path, doc, *, label):
+        call_count["n"] += 1
+        if call_count["n"] == 2:
+            raise injected
+        return original(path, doc, label=label)
+
+    ckpt.write_json_atomically = fail_before_creation
+    try:
+        with pytest.raises(OSError):
+            ckpt.generate_and_install_checkpoint_v2(
+                checkpoints_dir=checkpoints_dir, checkpoint_filename="checkpoint.json", checkpoint_fields=fields,
+                arrays=arrays, image_ids=selected_ids[:2], class_count=COCO_CLASS_COUNT,
+            )
+    finally:
+        ckpt.write_json_atomically = original
+
+    assert not (checkpoints_dir / "checkpoint.json").exists()
+    assert list(checkpoints_dir.iterdir()) == []
+
+
+def test_v2_writer_F_fresh_checkpoint_post_replace(tmp_path, schema_summary, artifact_identity, coco_selected_ids):
+    selected_ids, digest = coco_selected_ids
+    checkpoints_dir = tmp_path / "fresh_post_replace_v2"
+    checkpoints_dir.mkdir()
+    fields = _make_fields_v2(schema_summary=schema_summary, artifact_identity=artifact_identity, selected_ids=selected_ids, selected_ids_digest=digest, n=2)
+    arrays = _make_v2_arrays(2, seed=161)
+
+    original = ckpt.write_json_atomically
+    call_count = {"n": 0}
+
+    def succeed_then_error(path, doc, *, label):
+        call_count["n"] += 1
+        if call_count["n"] == 2:
+            original(path, doc, label=label)
+            raise RuntimeError("simulated post-replace failure on first-ever v2 checkpoint")
+        return original(path, doc, label=label)
+
+    ckpt.write_json_atomically = succeed_then_error
+    try:
+        with pytest.raises(RuntimeError):
+            ckpt.generate_and_install_checkpoint_v2(
+                checkpoints_dir=checkpoints_dir, checkpoint_filename="checkpoint.json", checkpoint_fields=fields,
+                arrays=arrays, image_ids=selected_ids[:2], class_count=COCO_CLASS_COUNT,
+            )
+    finally:
+        ckpt.write_json_atomically = original
+
+    assert (checkpoints_dir / "checkpoint.json").exists()
+    _fully_reverify_v2(checkpoints_dir)
+
+
+def test_v2_writer_full_122_member_fixture_with_harmful_diverging_from_all_t32_counts(tmp_path, schema_summary, artifact_identity, coco_selected_ids):
+    """Section-7-equivalent: a complete v2 install where harmful_pixel_
+    count differs from every T32 persistence count, reversion sizes sum
+    exactly to harmful, and the installed/resumed row round-trips."""
+    selected_ids, digest = coco_selected_ids
+    fields = _make_fields_v2(schema_summary=schema_summary, artifact_identity=artifact_identity, selected_ids=selected_ids, selected_ids_digest=digest, n=1)
+    arrays = _make_v2_arrays(1, seed=0)
+    arrays = dict(arrays)
+    arrays["harmful_pixel_count"] = np.array([13], dtype=np.int64)
+    arrays["beneficial_pixel_count"] = np.array([0], dtype=np.int64)
+    arrays["third_label_pixel_count"] = np.array([0], dtype=np.int64)
+    arrays["dispute_pixel_count"] = np.array([13], dtype=np.int64)
+    arrays["disputed_boundary_pixel_count"] = np.array([13], dtype=np.int64)
+    arrays["disputed_interior_pixel_count"] = np.array([0], dtype=np.int64)
+    arrays["harmful_boundary_pixel_count"] = np.array([13], dtype=np.int64)
+    arrays["harmful_interior_pixel_count"] = np.array([0], dtype=np.int64)
+    arrays["evaluated_pixel_count"] = np.maximum(arrays["evaluated_pixel_count"], np.array([20], dtype=np.int64))
+    for horizon in (16, 32, 64):
+        arrays[f"persistence_h{horizon}_harmful_reverted_count"] = np.array([4], dtype=np.int64)
+        arrays[f"persistence_h{horizon}_beneficial_reverted_count"] = np.array([0], dtype=np.int64)
+        arrays[f"persistence_h{horizon}_third_label_reverted_count"] = np.array([0], dtype=np.int64)
+    arrays["reversion_component_count"] = np.array([2], dtype=np.int64)
+    arrays["reversion_component_offsets"] = np.array([0, 2], dtype=np.int64)
+    arrays["reversion_component_sizes_flat"] = np.array([5, 8], dtype=np.int64)
+    assert int(arrays["reversion_component_sizes_flat"].sum()) == 13
+    assert 13 != (4 + 0 + 0)
+
+    checkpoints_dir = tmp_path / "checkpoints"
+    ckpt.generate_and_install_checkpoint_v2(
+        checkpoints_dir=checkpoints_dir, checkpoint_filename="checkpoint.json", checkpoint_fields=fields,
+        arrays=arrays, image_ids=selected_ids[:1], class_count=COCO_CLASS_COUNT,
+    )
+    checkpoint, stats_manifest = _fully_reverify_v2(checkpoints_dir)
+    result = ckpt.validate_resume_state(checkpoints_dir=checkpoints_dir, checkpoint_filename="checkpoint.json", repo_root=ROOT)
+    assert set(result["arrays"]) == sch.ALL_NPZ_MEMBER_NAMES_V2
+    assert int(result["arrays"]["harmful_pixel_count"][0]) == 13
+    assert int(result["arrays"]["reversion_component_sizes_flat"].sum()) == 13
