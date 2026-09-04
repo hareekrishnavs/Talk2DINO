@@ -640,6 +640,16 @@ def _validate_dataset_block(block: Mapping[str, Any], *, label: str) -> None:
 
 
 def _validate_graph_block(block: Mapping[str, Any]) -> None:
+    # Independently enforce a closed mapping before indexing any individual
+    # key -- this function is called directly by callers other than
+    # `load_identity()` (e.g. `src.dfp_phase1a_recurrence_capture.
+    # dfp_recurrence_contract_from_protocol`, reached from
+    # `src.dfp_phase1b_masked_forward.dfp_masked_forward_contract_from_
+    # protocol` with a caller-supplied in-memory mapping), so it must not
+    # rely on `load_identity()`'s own top-level closed-schema pass having
+    # already run first. Without this, a missing key leaks a raw
+    # `KeyError` and an unknown key is silently accepted.
+    _require_closed_mapping(block, SECTION_KEYS["graph"], "graph")
     if _require_exact_bool(block["directed"], "graph.directed") is not True:
         raise DfpPhase1aIdentityError("graph.directed must be true")
     if _require_exact_bool(block["row_stochastic"], "graph.row_stochastic") is not True:

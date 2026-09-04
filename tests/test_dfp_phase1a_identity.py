@@ -17,9 +17,11 @@ sys.path.insert(0, str(ROOT))
 
 import src.dfp_phase1a_identity as dfp_module  # noqa: E402
 from src.dfp_phase1a_identity import (  # noqa: E402
+    SECTION_KEYS,
     DfpPhase1aIdentityError,
     load_identity,
     validate_bridge_checkpoint_binding,
+    validate_graph_block,
     validate_static_configuration,
 )
 
@@ -565,3 +567,118 @@ def test_canonical_string_accepted_value_returned_byte_for_byte_unchanged():
         actual = identity["format_version"] if section == "format_version" else identity[section][field]
         assert actual == canonical
         assert type(actual) is str
+
+
+# ---------------------------------------------------------------------------
+# Direct `validate_graph_block` closed-schema enforcement (F1).
+#
+# Every other test in this file goes through the full `load_identity()`
+# path, whose own top-level loop already enforces a closed mapping for
+# every section BEFORE `_validate_graph_block` ever runs -- so those
+# tests cannot detect whether `validate_graph_block` is closed-schema-
+# safe *on its own*. It must be: `src.dfp_phase1a_recurrence_capture.
+# dfp_recurrence_contract_from_protocol` (reached from
+# `src.dfp_phase1b_masked_forward.dfp_masked_forward_contract_from_
+# protocol` with a caller-supplied in-memory mapping) calls
+# `validate_graph_block` directly, bypassing `load_identity()` entirely.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def valid_graph_block() -> dict:
+    identity = load_identity(IDENTITY_PATH, repo_root=ROOT)
+    return identity["graph"]
+
+
+def test_direct_validate_graph_block_accepts_canonical_block_without_mutation(valid_graph_block):
+    before = copy.deepcopy(valid_graph_block)
+    validate_graph_block(valid_graph_block)  # must not raise
+    assert valid_graph_block == before
+
+
+@pytest.mark.parametrize("key", sorted(SECTION_KEYS["graph"]))
+def test_direct_validate_graph_block_rejects_missing_key_domain_safe(valid_graph_block, key):
+    block = copy.deepcopy(valid_graph_block)
+    del block[key]
+    with pytest.raises(DfpPhase1aIdentityError, match=key) as excinfo:
+        validate_graph_block(block)
+    assert not isinstance(excinfo.value, KeyError)
+
+
+def test_direct_validate_graph_block_rejects_unknown_key(valid_graph_block):
+    block = copy.deepcopy(valid_graph_block)
+    block["unexpected_graph_field"] = 1
+    before = copy.deepcopy(block)
+    with pytest.raises(DfpPhase1aIdentityError, match="unexpected_graph_field"):
+        validate_graph_block(block)
+    assert block == before  # rejection must not mutate the caller's mapping
+
+
+def test_direct_validate_graph_block_rejects_multiple_unknown_keys_reporting_both(valid_graph_block):
+    block = copy.deepcopy(valid_graph_block)
+    block["extra_field_one"] = 1
+    block["extra_field_two"] = 2
+    with pytest.raises(DfpPhase1aIdentityError) as excinfo:
+        validate_graph_block(block)
+    assert "extra_field_one" in str(excinfo.value)
+    assert "extra_field_two" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("bad_container", [None, [1, 2], (1, 2), "not-a-mapping", 42])
+def test_direct_validate_graph_block_rejects_invalid_container_domain_safe(bad_container):
+    with pytest.raises(DfpPhase1aIdentityError):
+        validate_graph_block(bad_container)
+
+
+def test_direct_validate_graph_block_still_rejects_bool_as_int_for_directed(valid_graph_block):
+    block = copy.deepcopy(valid_graph_block)
+    block["directed"] = 1
+    with pytest.raises(DfpPhase1aIdentityError, match="exact boolean"):
+        validate_graph_block(block)
+
+
+def test_direct_validate_graph_block_still_rejects_int_as_float_for_affinity_power(valid_graph_block):
+    block = copy.deepcopy(valid_graph_block)
+    block["affinity_power"] = 3
+    with pytest.raises(DfpPhase1aIdentityError, match="exact"):
+        validate_graph_block(block)
+
+
+def test_direct_validate_graph_block_still_rejects_altered_directed(valid_graph_block):
+    block = copy.deepcopy(valid_graph_block)
+    block["directed"] = False
+    with pytest.raises(DfpPhase1aIdentityError):
+        validate_graph_block(block)
+
+
+def test_direct_validate_graph_block_still_rejects_altered_k_variant(valid_graph_block):
+    block = copy.deepcopy(valid_graph_block)
+    block["canonical_k_variant"] = 11
+    with pytest.raises(DfpPhase1aIdentityError):
+        validate_graph_block(block)
+
+
+def test_direct_validate_graph_block_still_rejects_altered_maximum_rank(valid_graph_block):
+    block = copy.deepcopy(valid_graph_block)
+    block["maximum_rank"] = 11
+    with pytest.raises(DfpPhase1aIdentityError):
+        validate_graph_block(block)
+
+
+def test_direct_validate_graph_block_still_rejects_altered_affinity_function(valid_graph_block):
+    block = copy.deepcopy(valid_graph_block)
+    block["affinity_function"] = "cosine_only"
+    with pytest.raises(DfpPhase1aIdentityError):
+        validate_graph_block(block)
+
+
+@pytest.mark.parametrize("exc_type", [KeyboardInterrupt, SystemExit, MemoryError])
+def test_direct_validate_graph_block_propagates_fatal_exceptions_from_closed_mapping_helper(
+    monkeypatch, valid_graph_block, exc_type,
+):
+    def raiser(*args, **kwargs):
+        raise exc_type("must propagate")
+
+    monkeypatch.setattr(dfp_module, "_require_closed_mapping", raiser)
+    with pytest.raises(exc_type):
+        validate_graph_block(valid_graph_block)
