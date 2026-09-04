@@ -3,6 +3,7 @@ matplotlib
 pyyaml
 requests
 scikit-image
+scikit-learn==1.8.0
 tqdm
 omegaconf
 einops

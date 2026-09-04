@@ -19,7 +19,7 @@ storage_representation_only = true
 
 [protocol_binding]
 protocol_identity_relative_path = "evaluation_identities/e15_dfp_phase1b_protocol.toml"
-protocol_identity_sha256 = "b3f165c9030200e8d988c65f2cc984804eb0ba7f60765d0193ff06c0aa897e7f"
+protocol_identity_sha256 = "98ba30d5268e3548892f80aeff6bdd7719ae9cc663243776746681091f5962fc"
 
 # ---------------------------------------------------------------------
 # Stage A: GT-free provenance feature artifact schema.

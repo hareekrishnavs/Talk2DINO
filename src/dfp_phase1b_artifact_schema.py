@@ -80,6 +80,7 @@ CANONICAL_VALUES: dict[str, object] = {
     'checkpoint_resume_schema.stage_b_checkpoint_binds_stage_a_final_digest': True,
     'checkpoint_resume_schema.writer_and_execution_driver_not_implemented_by_this_task': True,
     'checkpoint_resume_schema.zero_progress_arrays_valid_without_np_stack_of_empty': True,
+    'format_version': 'talk2dino-dfp-phase1b-artifacts-identity-v1',
     'identity.description': 'Storage-only artifact-schema authority for DFP Phase 1B: binds the frozen e15-dfp-phase1b-protocol identity, then defines the Stage-A GT-free provenance-feature artifact schema, the Stage-B evaluation-label artifact schema (binding the exact Stage-A digest), the fixed prediction-variant confusion-array naming convention (semantic and Boundary IoU), and the checkpoint/resume invariants for a future (not-yet-implemented) execution driver. Implements no evaluator, no inference, no masked propagation, and defines no scientific quantity.',
     'identity.name': 'e15-dfp-phase1b-artifacts',
     'identity.schema_name': 'talk2dino-dfp-phase1b-artifacts-identity-v1',
@@ -93,7 +94,7 @@ CANONICAL_VALUES: dict[str, object] = {
     'prediction_variants.original_ten_order_preserved': True,
     'prediction_variants.pamr_variants_appended_last': True,
     'protocol_binding.protocol_identity_relative_path': 'evaluation_identities/e15_dfp_phase1b_protocol.toml',
-    'protocol_binding.protocol_identity_sha256': 'b3f165c9030200e8d988c65f2cc984804eb0ba7f60765d0193ff06c0aa897e7f',
+    'protocol_binding.protocol_identity_sha256': '98ba30d5268e3548892f80aeff6bdd7719ae9cc663243776746681091f5962fc',
     'semantic_confusion_schema.cross_variant_relation': 'all variants must have identical per-class ground_truth_pixels',
     'semantic_confusion_schema.dtype': 'int64',
     'semantic_confusion_schema.member_name_pattern': 'semantic_{variant}_{stat}',
@@ -167,27 +168,27 @@ CANONICAL_VALUES: dict[str, object] = {
     'stage_b_schema.target_category_codes.third_label': 2,
 }
 
-TOP_KEYS = frozenset(['atomic_write_policy', 'boundary_confusion_schema', 'checkpoint_resume_schema', 'format_version', 'identity', 'path_policy', 'prediction_variants', 'protocol_binding', 'semantic_confusion_schema', 'stage_a_schema', 'stage_b_schema'])
+TOP_KEYS: frozenset[str] = frozenset(['atomic_write_policy', 'boundary_confusion_schema', 'checkpoint_resume_schema', 'format_version', 'identity', 'path_policy', 'prediction_variants', 'protocol_binding', 'semantic_confusion_schema', 'stage_a_schema', 'stage_b_schema'])
 
 SECTION_TREE: dict[str, frozenset[str]] = {
-    'identity': frozenset(['description', 'name', 'schema_name', 'schema_version', 'storage_representation_only']),
-    'protocol_binding': frozenset(['protocol_identity_relative_path', 'protocol_identity_sha256']),
-    'stage_a_schema': frozenset(['flat_disputed_pixel_members', 'gt_derived_array_forbidden', 'manifest_fields', 'relational_validation', 'schema_name', 'schema_version']),
-    'stage_a_schema.manifest_fields': frozenset(['canonical_image_ids', 'checkpoint_prefix', 'complete', 'component_count_per_image', 'dispute_count_per_image', 'dispute_offsets', 'fold_assignment', 'fold_assignment_digest', 'image_count', 'per_image_max_conservation_residual', 'per_image_mean_conservation_residual', 'per_image_projected_compute_fields', 'selected_ids_digest', 'total_processed_windows', 'window_count_per_image']),
-    'stage_a_schema.flat_disputed_pixel_members': frozenset(['conservation_residual', 'eta_net', 'final_pixel_linear_index', 'image_row_index', 'k_star', 'm0', 'm320', 'margin_change', 'n_positive_components', 'negative_evidence_sum', 'phi', 'positive_evidence_sum', 'propagated_class_b', 'sum_component_evidence', 't16_label', 't32_label', 't64_label', 'text_cosine_ab', 'top1_positive_share', 'top_positive_component_id', 'top_positive_evidence', 'unary_class_a']),
-    'stage_a_schema.relational_validation': frozenset(['conservation_tolerance_source', 'list']),
-    'stage_b_schema': frozenset(['binds_exact_stage_a_digest', 'diagnostic_prediction_members_optional', 'manifest_fields', 'per_pixel_members', 'relational_validation', 'schema_name', 'schema_version', 'target_category_codes']),
-    'stage_b_schema.target_category_codes': frozenset(['beneficial', 'harmful', 'third_label']),
-    'stage_b_schema.per_pixel_members': frozenset(['binary_eligible', 'boundary_interior_flag', 'fold_id', 'gt_class', 'harmful_binary_label', 'target_category', 'training_selection_flag']),
-    'stage_b_schema.diagnostic_prediction_members_optional': frozenset(['description', 'out_of_fold_cheap_control_risk', 'out_of_fold_provenance_augmented_risk']),
-    'stage_b_schema.manifest_fields': frozenset(['bootstrap_result_summary', 'fixed_single_feature_risk_orientations', 'per_fold_counts', 'per_image_target_counts']),
-    'stage_b_schema.relational_validation': frozenset(['list']),
-    'prediction_variants': frozenset(['count', 'names', 'original_ten_order_preserved', 'pamr_variants_appended_last']),
-    'semantic_confusion_schema': frozenset(['cross_variant_relation', 'dtype', 'member_name_pattern', 'relation', 'shape', 'stat_names', 'total_member_count', 'total_member_count_formula']),
+    'atomic_write_policy': frozenset(['checkpoint_install', 'result_install']),
     'boundary_confusion_schema': frozenset(['authority', 'cross_variant_relation', 'dtype', 'member_name_pattern', 'relation', 'shape', 'stat_names', 'total_member_count', 'total_member_count_formula']),
     'checkpoint_resume_schema': frozenset(['append_only_generation', 'atomic_pointer_update', 'complete_final_boolean_combinations_exact', 'each_installed_generation_self_verifies_before_pointer_replacement', 'final_result_installation_cpu_only_no_model_rebuild', 'orphan_generation_after_handled_failure_forbidden', 'reconcile_ambiguous_post_replace_failure_before_deleting_files', 'resume_equivalence_byte_identical_to_uninterrupted_execution', 'skip_duplicate_or_reorder_forbidden', 'source_manifest_prefix_must_match_first_completed_ids', 'stage_a_stage_b_have_distinct_completion_states', 'stage_b_cannot_start_until_stage_a_complete_and_sealed', 'stage_b_checkpoint_binds_stage_a_final_digest', 'writer_and_execution_driver_not_implemented_by_this_task', 'zero_progress_arrays_valid_without_np_stack_of_empty']),
+    'identity': frozenset(['description', 'name', 'schema_name', 'schema_version', 'storage_representation_only']),
     'path_policy': frozenset(['allowed_path_kinds', 'canonical_image_id_distinct_from_physical_filename', 'forbidden']),
-    'atomic_write_policy': frozenset(['checkpoint_install', 'result_install']),
+    'prediction_variants': frozenset(['count', 'names', 'original_ten_order_preserved', 'pamr_variants_appended_last']),
+    'protocol_binding': frozenset(['protocol_identity_relative_path', 'protocol_identity_sha256']),
+    'semantic_confusion_schema': frozenset(['cross_variant_relation', 'dtype', 'member_name_pattern', 'relation', 'shape', 'stat_names', 'total_member_count', 'total_member_count_formula']),
+    'stage_a_schema': frozenset(['flat_disputed_pixel_members', 'gt_derived_array_forbidden', 'manifest_fields', 'relational_validation', 'schema_name', 'schema_version']),
+    'stage_a_schema.flat_disputed_pixel_members': frozenset(['conservation_residual', 'eta_net', 'final_pixel_linear_index', 'image_row_index', 'k_star', 'm0', 'm320', 'margin_change', 'n_positive_components', 'negative_evidence_sum', 'phi', 'positive_evidence_sum', 'propagated_class_b', 'sum_component_evidence', 't16_label', 't32_label', 't64_label', 'text_cosine_ab', 'top1_positive_share', 'top_positive_component_id', 'top_positive_evidence', 'unary_class_a']),
+    'stage_a_schema.manifest_fields': frozenset(['canonical_image_ids', 'checkpoint_prefix', 'complete', 'component_count_per_image', 'dispute_count_per_image', 'dispute_offsets', 'fold_assignment', 'fold_assignment_digest', 'image_count', 'per_image_max_conservation_residual', 'per_image_mean_conservation_residual', 'per_image_projected_compute_fields', 'selected_ids_digest', 'total_processed_windows', 'window_count_per_image']),
+    'stage_a_schema.relational_validation': frozenset(['conservation_tolerance_source', 'list']),
+    'stage_b_schema': frozenset(['binds_exact_stage_a_digest', 'diagnostic_prediction_members_optional', 'manifest_fields', 'per_pixel_members', 'relational_validation', 'schema_name', 'schema_version', 'target_category_codes']),
+    'stage_b_schema.diagnostic_prediction_members_optional': frozenset(['description', 'out_of_fold_cheap_control_risk', 'out_of_fold_provenance_augmented_risk']),
+    'stage_b_schema.manifest_fields': frozenset(['bootstrap_result_summary', 'fixed_single_feature_risk_orientations', 'per_fold_counts', 'per_image_target_counts']),
+    'stage_b_schema.per_pixel_members': frozenset(['binary_eligible', 'boundary_interior_flag', 'fold_id', 'gt_class', 'harmful_binary_label', 'target_category', 'training_selection_flag']),
+    'stage_b_schema.relational_validation': frozenset(['list']),
+    'stage_b_schema.target_category_codes': frozenset(['beneficial', 'harmful', 'third_label']),
 }
 
 # ---------------------------------------------------------------------

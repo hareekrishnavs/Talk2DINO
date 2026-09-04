@@ -109,6 +109,20 @@ DFP selector.** Deterministic training subsampling (SHA-256 lowest-key
 retention, 4096 pixels per image per binary category) reduces fitting
 cost; held-out evaluation pixels are never subsampled.
 
+**Implementation version**: `scikit-learn==1.8.0`, frozen in
+`[diagnostic_model].scikit_learn_version` — the sole `scikit-learn`
+wheel the Alliance wheelhouse offers for this project's Python 3.11.5
+(`avail_wheels scikit-learn`, `cp311`, generic arch), compatible with
+the installed NumPy/SciPy constraints (the wheel requires
+`numpy>=1.24.1`, `scipy>=1.10.0`), and installability-verified in a
+disposable virtual environment before being frozen — never installed
+into the project environment by this freeze. `requirements.txt` is
+bound by path and SHA-256 (`authority_bindings.requirements_pin`), and
+the loader proves the frozen version string exactly equals the single
+`scikit-learn==X.Y.Z` line `requirements.txt` actually contains — not
+merely that both are non-empty. Selected before any Phase 1B result
+exists.
+
 ## Image-level paired bootstrap
 
 10,000 replicates, resampling unit = image, 500 image IDs with
@@ -197,11 +211,23 @@ this repository:
   (`apply_pamr`), which hardcodes `num_iter=10`,
   `dilations=[1,2,4,8,12,24]` independent of any YAML — confirmed via
   an exhaustive `grep -rn "PAMR("` across the whole repository.
-- **Activation authority**: `README.md`'s own officially-documented
-  ViT-Base COCO-Stuff reproduction command (`# COCOStuff` section),
-  which passes
+- **Activation authority (primary, code-level, immutable)**: the two
+  hardcoded parameters above were introduced by commit
+  `2988bcbeec08a58213e1b1960ba39731881f3d12` — confirmed (via
+  `git merge-base --is-ancestor`) to predate the first DFP-related
+  commit by roughly two months, and confirmed (via `git log --all -p`)
+  never modified since and never overridden by any YAML anywhere in
+  this repository's history. `eval_stuff_pamr.yml` remains the sole
+  `pamr: true` configuration under `configs/stuff/` and is bound
+  alongside the implementation as the inherited configuration.
+  **Corroborating evidence only**: at that same commit, this
+  repository's `README.md` documented a `# COCOStuff` reproduction
+  command passing
   `--eval_base src/open_vocabulary_segmentation/configs/stuff/eval_stuff_pamr.yml`
-  — the inherited configuration bound alongside the implementation.
+  (verifiable via `git show 2988bcbeec08a58213e1b1960ba39731881f3d12:README.md`).
+  That section was later removed by unrelated cleanup commits — the
+  **current** `README.md` no longer contains it, and this binding does
+  not claim otherwise.
 - **Insertion point**: applied to the soft, per-class score tensor
   after bilinear upsample to final output resolution, strictly before
   argmax; PAMR's own RGB input is the pipeline's own already-loaded,

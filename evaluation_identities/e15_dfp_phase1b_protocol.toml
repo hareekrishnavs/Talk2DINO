@@ -28,29 +28,39 @@ format_version = "talk2dino-dfp-phase1b-protocol-identity-v1"
 # identity loads.
 #
 # RGB/local-boundary baseline: see [rgb_local_boundary_baseline] below.
-# The historical Talk2DINO PAMR operator is now bound directly in this
-# identity (e15 was still uncommitted when this repair was made, so the
-# binding is applied in place rather than via a successor identity).
-# The bound configuration is the SOLE PAMR instantiation site anywhere
-# in this repository (src/open_vocabulary_segmentation/models/dinotext/
-# dinotext.py::apply_pamr, hardcoding num_iter=10, dilations=[1, 2, 4,
-# 8, 12, 24] -- never overridden by any YAML anywhere in this codebase),
-# activated for COCO-Stuff via the officially-documented reproduction
-# command in this repository's own top-level README.md ("# COCOStuff"
-# section: --eval_cfg .../stuff/dinotext_stuff_vitb_mlp_infonce.yml
-# --eval_base .../stuff/eval_stuff_pamr.yml). T0_PAMR/T320_PAMR apply
-# this SAME bound operator to DFP's own already-computed T0/T320 score
-# tensors (never a separate model re-evaluation) -- see
-# [pamr_variants] below.
+# The historical Talk2DINO PAMR operator is bound directly in this
+# identity. The bound configuration is the SOLE PAMR instantiation site
+# anywhere in this repository (src/open_vocabulary_segmentation/models/
+# dinotext/dinotext.py::apply_pamr, hardcoding num_iter=10,
+# dilations=[1, 2, 4, 8, 12, 24] -- never overridden by any YAML
+# anywhere in this codebase, across all git history). The PRIMARY
+# authority for this binding is code-level and immutable: the same
+# commit that introduced these hardcoded parameters
+# (pamr_parameter_introduction_commit_sha below) predates the first
+# DFP-related commit and has never been modified since. The historical
+# README.md reproduction command is retained only as CORROBORATING
+# evidence, cited by its immutable commit SHA -- the CURRENT top-level
+# README.md (as of this identity's freeze) no longer contains this
+# section, having been stripped by later unrelated cleanup commits, and
+# [rgb_local_boundary_baseline].selection_provenance does not claim
+# otherwise. T0_PAMR/T320_PAMR apply this SAME bound operator to DFP's
+# own already-computed T0/T320 score tensors (never a separate model
+# re-evaluation) -- see [pamr_variants] below.
 #
 # AUROC/AUPRC units: every AUROC/AUPRC threshold and improvement value
 # in [gate2_criteria] is on the raw fraction_0_1 metric scale (never
 # percent_0_100), and every improvement/delta is an absolute difference
 # on that same 0-1 scale (never itself expressed in percentage points).
 # 0.02 on this scale is the human-readable equivalent of "+2.0
-# percentage points" -- see [gate2_metrics.units] below. This repair
-# renames the two threshold fields that previously carried a misleading
-# "_pp" suffix while holding a 0-1-scale value.
+# percentage points" -- see [gate2_metrics.units] below.
+#
+# Diagnostic-model implementation: [diagnostic_model] freezes an exact
+# scikit-learn version (scikit_learn_version below), independently
+# established from the Alliance wheelhouse's sole available wheel for
+# this project's Python, and binds requirements.txt by path and SHA-256
+# (authority_bindings.requirements_pin) so a mismatch between the
+# frozen version and the actual pinned dependency is mechanically
+# detected rather than merely asserted.
 
 [identity]
 name = "e15-dfp-phase1b-protocol"
@@ -117,6 +127,10 @@ sha256 = "612403bcc5faa58be4dc54d1b941bc6989abd8e4f3214ff8c33e70926b03fb2f"
 [authority_bindings.soft_membership_code]
 relative_path = "src/dfp_phase1a_soft_membership.py"
 sha256 = "7bef9b800aa2770166422f715456d994e67fa218347bba6bb9d5b66695d03ac9"
+
+[authority_bindings.requirements_pin]
+relative_path = "requirements.txt"
+sha256 = "2fcda8061340de615f74e7b5e38deeefb2e34fdf618b81843226baf2ffd1b747"
 
 [gate1_verified_facts]
 run_mode = "coco_stuff_500"
@@ -367,6 +381,10 @@ hyperparameter_search_forbidden = true
 early_model_selection_forbidden = true
 test_fold_labels_in_standardization_or_fitting_forbidden = true
 implementation = "scikit-learn LogisticRegression"
+scikit_learn_version = "1.8.0"
+scikit_learn_version_selection_provenance = "sole scikit-learn wheel available from the Alliance wheelhouse (avail_wheels scikit-learn) for this project's Python 3.11.5 (cp311, generic arch) as of 2026-09-04; the wheel declares numpy>=1.24.1 and scipy>=1.10.0, both satisfied by the installed numpy 2.4.2+computecanada and scipy 1.17.0+computecanada; installability independently verified via a --no-index install into a fresh throwaway virtualenv under mktemp -d, never installed into the project environment; selected before any Phase 1B result exists"
+scikit_learn_version_pin_relative_path = "requirements.txt"
+scikit_learn_version_must_exactly_equal_requirements_pin = true
 diagnostic_only_never_final_selector = true
 
 # ---------------------------------------------------------------------
@@ -548,7 +566,11 @@ argmax_order = "pamr_before_argmax"
 ignore_handling = "PAMR itself has no ignore-index awareness; ignore handling for T0_PAMR/T320_PAMR confusion statistics follows the same frozen valid-pixel definition (V = GT != ignore_index) already used for every other baseline variant"
 determinism = true
 training_free = true
-selection_provenance = "README.md's own officially-documented ViT-Base COCO-Stuff reproduction command (# COCOStuff section) uses --eval_cfg src/open_vocabulary_segmentation/configs/stuff/dinotext_stuff_vitb_mlp_infonce.yml --eval_base src/open_vocabulary_segmentation/configs/stuff/eval_stuff_pamr.yml; grep -rn \"PAMR(\" across the whole repository confirms exactly one instantiation site (dinotext.py::apply_pamr), hardcoding num_iter=10 and dilations=[1,2,4,8,12,24] independent of which model/dataset config is active, and confirms no YAML anywhere in this repository overrides those two values"
+selection_provenance = "PRIMARY (code-level, immutable): grep -rn \"PAMR(\" across the whole repository confirms exactly one instantiation site (dinotext.py::apply_pamr), hardcoding num_iter=10 and dilations=[1,2,4,8,12,24] independent of which model/dataset config is active; these two values were introduced by the single commit identified in pamr_parameter_introduction_commit_sha below, have never been modified since (one addition, zero subsequent diffs touching either line across all git history), and no YAML anywhere in this repository's history ever overrides them. That same commit is confirmed (git merge-base --is-ancestor) to predate the first DFP-related commit by roughly two months, so the parameters were not selected using any Phase 1A or Phase 1B result. CORROBORATING (historical, cited by immutable commit SHA, not current documentation): at pamr_parameter_introduction_commit_sha, this repository's top-level README.md contained a \"# COCOStuff\" section documenting python -m torch.distributed.run src/open_vocabulary_segmentation/main.py --eval --eval_cfg src/open_vocabulary_segmentation/configs/stuff/dinotext_stuff_vitb_mlp_infonce.yml --eval_base src/open_vocabulary_segmentation/configs/stuff/eval_stuff_pamr.yml, verifiable via git show <that SHA>:README.md; this section was later removed from README.md by unrelated cleanup commits, and the CURRENT top-level README.md (one byte, no COCOStuff section) is not the source of this binding and is not claimed as such"
+pamr_parameter_introduction_commit_sha = "2988bcbeec08a58213e1b1960ba39731881f3d12"
+pamr_parameter_introduction_commit_predates_first_dfp_commit = true
+historical_readme_corroboration_commit_sha = "2988bcbeec08a58213e1b1960ba39731881f3d12"
+current_readme_not_claimed_as_source = true
 selection_did_not_use_phase1b_results = true
 same_pamr_parameters_for_both = true
 same_rgb_input_for_both = true

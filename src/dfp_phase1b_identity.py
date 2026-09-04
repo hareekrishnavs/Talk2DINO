@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 import tomllib
 from pathlib import Path
 from typing import Any, Mapping
@@ -83,6 +84,8 @@ CANONICAL_VALUES: dict[str, object] = {
     'authority_bindings.phase1a_artifacts.sha256': '9b8827c77fc81a7e676dece6284f69c630d61eadf916c9c2adf72f0bb30584ce',
     'authority_bindings.phase1a_protocol.relative_path': 'evaluation_identities/e13_dfp_phase1a_protocol.toml',
     'authority_bindings.phase1a_protocol.sha256': '227549b03ec6b1262c465a18b7fc67529fa5a0b5deef419c33ec79a80feb2173',
+    'authority_bindings.requirements_pin.relative_path': 'requirements.txt',
+    'authority_bindings.requirements_pin.sha256': '2fcda8061340de615f74e7b5e38deeefb2e34fdf618b81843226baf2ffd1b747',
     'authority_bindings.soft_membership_code.relative_path': 'src/dfp_phase1a_soft_membership.py',
     'authority_bindings.soft_membership_code.sha256': '7bef9b800aa2770166422f715456d994e67fa218347bba6bb9d5b66695d03ac9',
     'authority_bindings.text_prototype_projection.note': "governs the CLIP-text-to-shared-space projection used to derive per-class text prototypes; the class NAME strings themselves are governed transitively by [authority_bindings.phase1a_protocol]'s own coco_stuff_dataset.class_names_digest",
@@ -198,6 +201,10 @@ CANONICAL_VALUES: dict[str, object] = {
     'diagnostic_model.kind': 'fixed_logistic_regression',
     'diagnostic_model.max_iterations': 1000,
     'diagnostic_model.regularization': 'l2',
+    'diagnostic_model.scikit_learn_version': '1.8.0',
+    'diagnostic_model.scikit_learn_version_must_exactly_equal_requirements_pin': True,
+    'diagnostic_model.scikit_learn_version_pin_relative_path': 'requirements.txt',
+    'diagnostic_model.scikit_learn_version_selection_provenance': "sole scikit-learn wheel available from the Alliance wheelhouse (avail_wheels scikit-learn) for this project's Python 3.11.5 (cp311, generic arch) as of 2026-09-04; the wheel declares numpy>=1.24.1 and scipy>=1.10.0, both satisfied by the installed numpy 2.4.2+computecanada and scipy 1.17.0+computecanada; installability independently verified via a --no-index install into a fresh throwaway virtualenv under mktemp -d, never installed into the project environment; selected before any Phase 1B result exists",
     'diagnostic_model.solver': 'lbfgs',
     'diagnostic_model.standardization': 'training_fold_only',
     'diagnostic_model.test_fold_labels_in_standardization_or_fitting_forbidden': True,
@@ -220,6 +227,7 @@ CANONICAL_VALUES: dict[str, object] = {
     'fold_safe_transformations.mean_std_from_training_folds_only': True,
     'fold_safe_transformations.raw_single_feature_aurocs_unstandardized': True,
     'fold_safe_transformations.zero_variance_training_feature_behavior': 'transform to zero and record it',
+    'format_version': 'talk2dino-dfp-phase1b-protocol-identity-v1',
     'future_step_bindings.description': 'Fields explicitly deferred to later Phase 1B steps, never guessed or invented here.',
     'future_step_bindings.next_step_items': ['phase1b_conservation_calibration.json generation and independent verification', 'Phase 1B execution driver (masked propagation + provenance computation)', 'Phase 1B diagnostic model fitting on real data', 'Gate-2 decision on real data', 'Gate-3 protocol (if reached)'],
     'gate1_verified_facts.boundary_iou_authority_status_in_phase1a': 'not_yet_bound',
@@ -359,8 +367,10 @@ CANONICAL_VALUES: dict[str, object] = {
     'rgb_local_boundary_baseline.baseline_family': 'pamr',
     'rgb_local_boundary_baseline.configuration_relative_path': 'src/open_vocabulary_segmentation/models/dinotext/dinotext.py',
     'rgb_local_boundary_baseline.configuration_sha256': '94d920e7f9153e97c8c4948013beffd7533902c7d307fe15607a6b03508873ed',
+    'rgb_local_boundary_baseline.current_readme_not_claimed_as_source': True,
     'rgb_local_boundary_baseline.determinism': True,
     'rgb_local_boundary_baseline.dilations': [1, 2, 4, 8, 12, 24],
+    'rgb_local_boundary_baseline.historical_readme_corroboration_commit_sha': '2988bcbeec08a58213e1b1960ba39731881f3d12',
     'rgb_local_boundary_baseline.ignore_handling': 'PAMR itself has no ignore-index awareness; ignore handling for T0_PAMR/T320_PAMR confusion statistics follows the same frozen valid-pixel definition (V = GT != ignore_index) already used for every other baseline variant',
     'rgb_local_boundary_baseline.image_normalization': "single-pass pipeline normalization (BGR-to-RGB channel reorder via index [2,1,0], then the model's own mean/std as already applied upstream); never re-normalized a second time and never restored to raw 0-255/0-1 pixel values before being passed to PAMR",
     'rgb_local_boundary_baseline.implementation_relative_path': 'src/open_vocabulary_segmentation/models/dinotext/pamr.py',
@@ -375,6 +385,8 @@ CANONICAL_VALUES: dict[str, object] = {
     'rgb_local_boundary_baseline.pamr_does_not_feed_provenance_features': True,
     'rgb_local_boundary_baseline.pamr_is_not_used_to_construct_components': True,
     'rgb_local_boundary_baseline.pamr_is_not_used_to_select_disputed_pixels': True,
+    'rgb_local_boundary_baseline.pamr_parameter_introduction_commit_predates_first_dfp_commit': True,
+    'rgb_local_boundary_baseline.pamr_parameter_introduction_commit_sha': '2988bcbeec08a58213e1b1960ba39731881f3d12',
     'rgb_local_boundary_baseline.pipeline_insertion_point': 'after bilinear upsample of the soft per-class score tensor to the final output resolution, strictly before argmax',
     'rgb_local_boundary_baseline.resize_and_interpolation': "bilinear, align_corners=true; identity in practice whenever the image and score tensor already share resolution, which holds when applied to DFP's own final-resolution T0/T320 tensors",
     'rgb_local_boundary_baseline.resolved_parameter_digest': '0cb1e75acb3a7e068ef10a41519e137910a64f2acdb201cf11caebf83360b14d',
@@ -384,7 +396,7 @@ CANONICAL_VALUES: dict[str, object] = {
     'rgb_local_boundary_baseline.same_pamr_parameters_for_both': True,
     'rgb_local_boundary_baseline.same_rgb_input_for_both': True,
     'rgb_local_boundary_baseline.selection_did_not_use_phase1b_results': True,
-    'rgb_local_boundary_baseline.selection_provenance': 'README.md\'s own officially-documented ViT-Base COCO-Stuff reproduction command (# COCOStuff section) uses --eval_cfg src/open_vocabulary_segmentation/configs/stuff/dinotext_stuff_vitb_mlp_infonce.yml --eval_base src/open_vocabulary_segmentation/configs/stuff/eval_stuff_pamr.yml; grep -rn "PAMR(" across the whole repository confirms exactly one instantiation site (dinotext.py::apply_pamr), hardcoding num_iter=10 and dilations=[1,2,4,8,12,24] independent of which model/dataset config is active, and confirms no YAML anywhere in this repository overrides those two values',
+    'rgb_local_boundary_baseline.selection_provenance': 'PRIMARY (code-level, immutable): grep -rn "PAMR(" across the whole repository confirms exactly one instantiation site (dinotext.py::apply_pamr), hardcoding num_iter=10 and dilations=[1,2,4,8,12,24] independent of which model/dataset config is active; these two values were introduced by the single commit identified in pamr_parameter_introduction_commit_sha below, have never been modified since (one addition, zero subsequent diffs touching either line across all git history), and no YAML anywhere in this repository\'s history ever overrides them. That same commit is confirmed (git merge-base --is-ancestor) to predate the first DFP-related commit by roughly two months, so the parameters were not selected using any Phase 1A or Phase 1B result. CORROBORATING (historical, cited by immutable commit SHA, not current documentation): at pamr_parameter_introduction_commit_sha, this repository\'s top-level README.md contained a "# COCOStuff" section documenting python -m torch.distributed.run src/open_vocabulary_segmentation/main.py --eval --eval_cfg src/open_vocabulary_segmentation/configs/stuff/dinotext_stuff_vitb_mlp_infonce.yml --eval_base src/open_vocabulary_segmentation/configs/stuff/eval_stuff_pamr.yml, verifiable via git show <that SHA>:README.md; this section was later removed from README.md by unrelated cleanup commits, and the CURRENT top-level README.md (one byte, no COCOStuff section) is not the source of this binding and is not claimed as such',
     'rgb_local_boundary_baseline.sigma_or_affinity_parameters': 'softmax over the dilation/offset axis of -abs(local_affinity) / (1e-8 + 0.1 * local_stdev); no separate sigma parameter exists in this operator',
     'rgb_local_boundary_baseline.training_free': True,
     'rgb_local_boundary_baseline.window_or_global_scope': 'applied to the complete final-resolution stitched field; never per sliding window',
@@ -425,70 +437,71 @@ CANONICAL_VALUES: dict[str, object] = {
     'training_subsampling.retain_rule': 'lowest keys, up to a fixed maximum per image per binary category',
 }
 
-TOP_KEYS = frozenset(['authority_bindings', 'baseline_variants', 'bootstrap', 'boundary_iou_role', 'canonical_predictions', 'component_construction', 'component_evidence_decomposition', 'conservation_calibration', 'dependency_graph', 'diagnostic_feature_evaluation', 'diagnostic_model', 'fold_assignment', 'fold_safe_transformations', 'format_version', 'future_step_bindings', 'gate1_verified_facts', 'gate2_criteria', 'gate2_metrics', 'gate3_deferred_baselines', 'gt_isolation', 'identity', 'margins', 'pamr_variants', 'per_window_class_restriction', 'prohibited', 'provenance_features', 'resource_ceiling', 'rgb_local_boundary_baseline', 'scientific_purpose', 'soft_membership_pullback', 'target_categories', 'training_subsampling'])
+TOP_KEYS: frozenset[str] = frozenset(['authority_bindings', 'baseline_variants', 'bootstrap', 'boundary_iou_role', 'canonical_predictions', 'component_construction', 'component_evidence_decomposition', 'conservation_calibration', 'dependency_graph', 'diagnostic_feature_evaluation', 'diagnostic_model', 'fold_assignment', 'fold_safe_transformations', 'format_version', 'future_step_bindings', 'gate1_verified_facts', 'gate2_criteria', 'gate2_metrics', 'gate3_deferred_baselines', 'gt_isolation', 'identity', 'margins', 'pamr_variants', 'per_window_class_restriction', 'prohibited', 'provenance_features', 'resource_ceiling', 'rgb_local_boundary_baseline', 'scientific_purpose', 'soft_membership_pullback', 'target_categories', 'training_subsampling'])
 
 SECTION_TREE: dict[str, frozenset[str]] = {
-    'identity': frozenset(['description', 'diagnostic_not_deployable_selector', 'name', 'schema_name', 'schema_version', 'storage_representation_only']),
-    'dependency_graph': frozenset(['acyclic_required', 'artifact_identity_binds_this_identity_hash', 'direction', 'rationale', 'this_identity_binds_artifact_identity_hash']),
-    'authority_bindings': frozenset(['boundary_iou_successor_identity', 'coco_stuff_500_subset_manifest', 'composed_final_resolution_pullback_code', 'final_resolution_stitching_pullback_code', 'gate1_analysis', 'gate1_analysis_provenance', 'global_unary_component_code', 'k12_graph_recurrence', 'phase1a_artifacts', 'phase1a_protocol', 'soft_membership_code', 'text_prototype_projection']),
-    'authority_bindings.phase1a_protocol': frozenset(['relative_path', 'sha256']),
-    'authority_bindings.phase1a_artifacts': frozenset(['relative_path', 'sha256']),
-    'authority_bindings.coco_stuff_500_subset_manifest': frozenset(['relative_path', 'sha256']),
+    'authority_bindings': frozenset(['boundary_iou_successor_identity', 'coco_stuff_500_subset_manifest', 'composed_final_resolution_pullback_code', 'final_resolution_stitching_pullback_code', 'gate1_analysis', 'gate1_analysis_provenance', 'global_unary_component_code', 'k12_graph_recurrence', 'phase1a_artifacts', 'phase1a_protocol', 'requirements_pin', 'soft_membership_code', 'text_prototype_projection']),
     'authority_bindings.boundary_iou_successor_identity': frozenset(['relative_path', 'sha256']),
+    'authority_bindings.coco_stuff_500_subset_manifest': frozenset(['relative_path', 'sha256']),
+    'authority_bindings.composed_final_resolution_pullback_code': frozenset(['relative_path', 'sha256']),
+    'authority_bindings.final_resolution_stitching_pullback_code': frozenset(['relative_path', 'sha256']),
     'authority_bindings.gate1_analysis': frozenset(['path_kind', 'relative_path', 'sha256']),
     'authority_bindings.gate1_analysis_provenance': frozenset(['path_kind', 'relative_path', 'sha256']),
-    'authority_bindings.k12_graph_recurrence': frozenset(['relative_path', 'sha256']),
-    'authority_bindings.text_prototype_projection': frozenset(['note', 'relative_path', 'sha256']),
-    'authority_bindings.final_resolution_stitching_pullback_code': frozenset(['relative_path', 'sha256']),
-    'authority_bindings.composed_final_resolution_pullback_code': frozenset(['relative_path', 'sha256']),
     'authority_bindings.global_unary_component_code': frozenset(['relative_path', 'sha256']),
+    'authority_bindings.k12_graph_recurrence': frozenset(['relative_path', 'sha256']),
+    'authority_bindings.phase1a_artifacts': frozenset(['relative_path', 'sha256']),
+    'authority_bindings.phase1a_protocol': frozenset(['relative_path', 'sha256']),
+    'authority_bindings.requirements_pin': frozenset(['relative_path', 'sha256']),
     'authority_bindings.soft_membership_code': frozenset(['relative_path', 'sha256']),
-    'gate1_verified_facts': frozenset(['boundary_iou_authority_status_in_phase1a', 'boundary_iou_successor_authority_now_bound_for_phase1b', 'boundary_trigger_status', 'gate1_verdict', 'image_count', 'next_prerequisite_from_gate1', 'run_mode']),
-    'scientific_purpose': frozenset(['diagnostic_fitted_models_are_analysis_tools_only', 'final_5000_image_evaluation_untouched', 'fitted_diagnostic_model_forbidden_as_final_method', 'gt_forbidden_in_component_construction', 'gt_forbidden_in_contribution_calculation', 'gt_forbidden_in_feature_extraction', 'gt_forbidden_in_graph_construction', 'gt_forbidden_in_recurrence', 'gt_forbidden_in_soft_membership', 'gt_free_features_must_be_sealed_before_labeling', 'hypothesis', 'phase1b_is_diagnostic_not_final_selector', 'subset_scope']),
+    'authority_bindings.text_prototype_projection': frozenset(['note', 'relative_path', 'sha256']),
+    'baseline_variants': frozenset(['cheap_feature_controls_frozen', 'oracle_variants_are_gt_conditioned_analysis_tools_not_deployable_methods', 'original_ten_variant_order_preserved', 'pamr_variants_appended_last', 'required']),
+    'bootstrap': frozenset(['interval', 'interval_endpoint_unit', 'numpy_quantile_method', 'paired_comparison', 'paired_difference_unit', 'per_replicate_rules', 'pixels_bootstrapped_independently_forbidden', 'quantiles', 'replicates', 'resampling_unit', 'sampling', 'seed_derivation', 'seed_namespace']),
+    'bootstrap.per_replicate_rules': frozenset(['compute_auroc_auprc_only_when_both_classes_present', 'duplicate_pixels_when_image_sampled_multiple_times', 'fail_below_minimum_valid_replicate_fraction', 'include_all_eligible_pixels_of_sampled_images', 'minimum_valid_replicate_fraction', 'record_number_of_valid_replicates']),
+    'boundary_iou_role': frozenset(['authority', 'boundary_iou_from_completed_phase1a_sufficient_statistics_forbidden', 'dataset_mBoundaryIoU_aggregation', 'parallel_semantic_confusion_stats', 'per_variant_per_image_per_class_boundary_stats', 'primary_segmentation_metric', 'rerun_phase1a_in_this_schema_freezing_task_forbidden', 'secondary_preservation_metric']),
     'canonical_predictions': frozenset(['a_definition', 'b_definition', 'dispute_set_definition', 't0_definition', 't320_definition', 'tie_rule']),
-    'margins': frozenset(['delta_m_definition', 'm0_definition', 'm320_definition']),
-    'target_categories': frozenset(['beneficial_definition', 'binary_gate2_population_definition', 'harmful_definition', 'ignore_pixels_excluded_from_every_target_population', 'negative_binary_label', 'positive_binary_label', 'third_label_definition', 'third_label_excluded_from_binary_negative_class']),
     'component_construction': frozenset(['component_merging_after_observing_labels_forbidden', 'connectivity', 'domain', 'gt_forbidden', 'morphological_closing_forbidden', 'ordering', 'per_window_components_forbidden', 'same_class_connected_components', 'semantic_supercohort_as_causal_unit_forbidden', 'source', 'top_k_plus_residual_approximation_forbidden']),
-    'soft_membership_pullback': frozenset(['component_source_mass_is_diagnostic_only', 'component_source_mass_not_patch_equivalent_area', 'component_source_mass_not_pixel_area', 'composition_formula', 'membership_nonnegative', 'per_source_patch_copy_sum_to_one']),
     'component_evidence_decomposition': frozenset(['adjoint_approximation_forbidden_in_primary_implementation', 'altered_precision_between_canonical_and_masked_runs_forbidden', 'component_sum_accumulation_dtype', 'conservation_identity', 'dense_influence_kernel_forbidden', 'early_stopping_forbidden', 'equilibrium_solver_forbidden', 'exact_chunking_only', 'exact_masked_forward_propagation_required', 'k11_counterfactual_forbidden', 'masked_propagated_stitch_formula', 'masked_unary_seed_formula', 'masked_unary_stitch_formula', 'recurrence_variant_required', 'residual_supercomponent_forbidden', 'same_graph_and_recurrence_as_canonical_t320_required', 'signed_component_evidence_formula', 'storage_requirement', 'top_k_truncation_forbidden']),
-    'per_window_class_restriction': frozenset(['derivation_source', 'empty_q_w_requires_no_masked_propagation', 'only_q_w_classes_carried_through_masked_propagation', 'ordering', 'q_w_definition', 'q_w_never_replaced_by_image_global_classes', 'q_w_never_restricted_to_raw_patch_argmax_classes', 'window_identifier_bare_or_guessed_forbidden', 'window_identifier_field']),
-    'provenance_features': frozenset(['component_evidence', 'horizon_controls', 'margins_and_controls', 'text_space_control']),
-    'provenance_features.margins_and_controls': frozenset(['epsilon_in_eta_net_denominator_forbidden', 'eta_net_denominator_note', 'eta_net_formula', 'margin_change_formula', 'propagated_margin_formula', 'small_margin_exclusion_forbidden', 'unary_resistance_formula']),
-    'provenance_features.horizon_controls': frozenset(['a_wins_at_h_formula', 'b_wins_at_h_formula', 'horizons_stored', 'primary_cheap_horizon_baseline', 'third_wins_at_h_formula']),
-    'provenance_features.text_space_control': frozenset(['gt_dependent_standardization_forbidden_during_feature_generation', 'text_cosine_ab_formula', 'text_prototype_source']),
-    'provenance_features.component_evidence': frozenset(['additional_concentration_diagnostics_forbidden_without_successor_authorization', 'g_plus_definition', 'k_star_always_finite_for_valid_disputed_pixel', 'k_star_definition', 'k_star_non_finite_case_behavior', 'n_positive_components_field', 'n_positive_components_stored_beside_k_star', 'negative_evidence_sum_formula', 'phi_epsilon_forbidden', 'phi_formula', 'positive_evidence_sum_formula', 'sort_order', 'top1_positive_share_field', 'top1_positive_share_formula', 'top_positive_component_id_field', 'top_positive_evidence_field']),
+    'conservation_calibration': frozenset(['execution_authorization', 'must_be_produced_before_full_phase1b_run', 'numeric_tolerance_invented_in_this_protocol', 'procedure', 'required_artifact_relative_path']),
+    'conservation_calibration.execution_authorization': frozenset(['full_phase1b_execution_authorized', 'requires_calibration_artifact_bound_into_execution_identity', 'requires_calibration_artifact_generated', 'requires_calibration_artifact_independently_verified']),
+    'conservation_calibration.procedure': frozenset(['accumulation_dtype', 'canonical_and_masked_propagation_in_same_job_required', 'measurement', 'recorded_fields', 'same_device_type_required', 'same_gpu_model_required', 'same_propagation_precision_required', 'window_count', 'window_selection_namespace', 'window_selection_source']),
+    'dependency_graph': frozenset(['acyclic_required', 'artifact_identity_binds_this_identity_hash', 'direction', 'rationale', 'this_identity_binds_artifact_identity_hash']),
+    'diagnostic_feature_evaluation': frozenset(['cheap_control_model', 'forbidden_primary_model_inputs', 'gate2_uses_out_of_fold_predictions_only', 'primary_binary_task', 'provenance_augmented_model', 'third_label_excluded_from_model_fitting_and_binary_auroc_auprc', 'third_label_feature_and_risk_distributions_reported_separately']),
+    'diagnostic_feature_evaluation.cheap_control_model': frozenset(['inputs']),
+    'diagnostic_feature_evaluation.forbidden_primary_model_inputs': frozenset(['forbidden', 'may_be_reported_as_subgroup_diagnostics_only_if_explicitly_listed']),
+    'diagnostic_feature_evaluation.provenance_augmented_model': frozenset(['inputs']),
+    'diagnostic_model': frozenset(['c', 'class_balancing_forbidden_unless_explicitly_frozen', 'class_balancing_frozen', 'convergence_tolerance', 'diagnostic_only_never_final_selector', 'early_model_selection_forbidden', 'hyperparameter_search_forbidden', 'implementation', 'input_dtype', 'intercept_enabled', 'kind', 'max_iterations', 'regularization', 'scikit_learn_version', 'scikit_learn_version_must_exactly_equal_requirements_pin', 'scikit_learn_version_pin_relative_path', 'scikit_learn_version_selection_provenance', 'solver', 'standardization', 'test_fold_labels_in_standardization_or_fitting_forbidden']),
+    'fold_assignment': frozenset(['filesystem_order_forbidden', 'fold_count', 'fold_id_formula', 'images_per_fold', 'key_formula', 'namespace', 'pixels_never_split_across_folds', 'python_hash_forbidden', 'random_library_forbidden', 'required_checks', 'required_stored_fields', 'sort_key']),
+    'fold_safe_transformations': frozenset(['apply_training_statistics_to_held_out_fold', 'binary_horizon_indicators_never_standardized', 'descriptive_full_dataset_summaries_allowed_only_if_labelled_descriptive_and_never_fed_into_out_of_fold_fitting', 'full_dataset_statistics_forbidden', 'mean_std_from_training_folds_only', 'raw_single_feature_aurocs_unstandardized', 'zero_variance_training_feature_behavior']),
+    'future_step_bindings': frozenset(['description', 'next_step_items']),
+    'gate1_verified_facts': frozenset(['boundary_iou_authority_status_in_phase1a', 'boundary_iou_successor_authority_now_bound_for_phase1b', 'boundary_trigger_status', 'gate1_verdict', 'image_count', 'next_prerequisite_from_gate1', 'run_mode']),
+    'gate2_criteria': frozenset(['inconclusive_conditions', 'mandatory_conditions', 'outcomes', 'pamr_role', 'stop_conditions', 'threshold_loosening_after_seeing_results_forbidden', 'thresholds_frozen_before_any_phase1b_result']),
+    'gate2_criteria.inconclusive_conditions': frozenset(['confidence_interval_crossing_zero', 'incomplete_artifact', 'insufficient_valid_bootstrap_replicates', 'missing_authority', 'missing_or_invalid_pamr_statistics', 'missing_required_baseline', 'positive_but_smaller_than_required_conditional_gain']),
+    'gate2_criteria.mandatory_conditions': frozenset(['c10_boundary_iou_sufficient_statistics_for_every_frozen_baseline_variant', 'c11_pamr_statistics_present_and_valid_for_both_pamr_variants', 'c1_conservation_and_artifact_validation_pass', 'c2_single_feature_auroc_lower_bound_threshold', 'c2_single_feature_candidates', 'c3_provenance_auroc_minimum', 'c4_auroc_improvement_minimum_absolute_fraction', 'c5_auroc_improvement_bootstrap_lower_bound_strictly_positive', 'c6_auprc_improvement_minimum_absolute_fraction', 'c7_auprc_improvement_bootstrap_lower_bound_strictly_positive', 'c8_minimum_valid_bootstrap_replicate_fraction', 'c9_exact_computation_within_resource_ceiling_without_approximation']),
+    'gate2_criteria.pamr_role': frozenset(['pamr_comparison_to_final_dfp_selector_deferred_to_gate3', 'pamr_not_a_gate2_feature', 'pamr_not_an_input_to_diagnostic_classifier', 'pamr_numerical_superiority_threshold_at_gate2', 'pamr_statistics_required_for_gate2_completion', 'reported_pamr_statistics']),
+    'gate2_criteria.stop_conditions': frozenset(['auroc_improvement_upper_bound_at_or_below_zero', 'conservation_fails_after_confirmed_implementation_correctness', 'exact_computation_infeasible_under_resource_ceiling_requiring_unapproved_approximation', 'provenance_auroc_below']),
+    'gate2_metrics': frozenset(['also_reported', 'primary', 'secondary', 'subgroup_metrics_are_descriptive_only', 'units']),
+    'gate2_metrics.units': frozenset(['auprc_unit', 'auroc_unit', 'delta_auprc_unit', 'delta_auroc_unit', 'human_readable_equivalents', 'percent_0_100_forbidden_for_auroc_auprc', 'percentage_points_wording_forbidden_for_a_fraction_0_1_value']),
+    'gate3_deferred_baselines': frozenset(['deferred', 'reason']),
     'gt_isolation': frozenset(['stage_a', 'stage_b']),
     'gt_isolation.stage_a': frozenset(['driver_api_must_not_accept_gt_arrays_or_dataset_annotation_objects', 'label', 'may_contain', 'must_be_finalized_and_content_hashed_before_stage_b_begins', 'must_not_contain', 'tests_must_poison_gt_access_during_stage_a']),
     'gt_isolation.stage_b': frozenset(['binds_exact_stage_a_digest', 'label', 'may_add']),
-    'fold_assignment': frozenset(['filesystem_order_forbidden', 'fold_count', 'fold_id_formula', 'images_per_fold', 'key_formula', 'namespace', 'pixels_never_split_across_folds', 'python_hash_forbidden', 'random_library_forbidden', 'required_checks', 'required_stored_fields', 'sort_key']),
-    'diagnostic_feature_evaluation': frozenset(['cheap_control_model', 'forbidden_primary_model_inputs', 'gate2_uses_out_of_fold_predictions_only', 'primary_binary_task', 'provenance_augmented_model', 'third_label_excluded_from_model_fitting_and_binary_auroc_auprc', 'third_label_feature_and_risk_distributions_reported_separately']),
-    'diagnostic_feature_evaluation.cheap_control_model': frozenset(['inputs']),
-    'diagnostic_feature_evaluation.provenance_augmented_model': frozenset(['inputs']),
-    'diagnostic_feature_evaluation.forbidden_primary_model_inputs': frozenset(['forbidden', 'may_be_reported_as_subgroup_diagnostics_only_if_explicitly_listed']),
-    'diagnostic_model': frozenset(['c', 'class_balancing_forbidden_unless_explicitly_frozen', 'class_balancing_frozen', 'convergence_tolerance', 'diagnostic_only_never_final_selector', 'early_model_selection_forbidden', 'hyperparameter_search_forbidden', 'implementation', 'input_dtype', 'intercept_enabled', 'kind', 'max_iterations', 'regularization', 'solver', 'standardization', 'test_fold_labels_in_standardization_or_fitting_forbidden']),
-    'training_subsampling': frozenset(['fewer_available_uses_all', 'hash_algorithm', 'held_out_evaluation_pixels_never_subsampled', 'key_components', 'key_namespace', 'maximum_per_image_per_binary_category', 'required_reports', 'retain_rule']),
-    'fold_safe_transformations': frozenset(['apply_training_statistics_to_held_out_fold', 'binary_horizon_indicators_never_standardized', 'descriptive_full_dataset_summaries_allowed_only_if_labelled_descriptive_and_never_fed_into_out_of_fold_fitting', 'full_dataset_statistics_forbidden', 'mean_std_from_training_folds_only', 'raw_single_feature_aurocs_unstandardized', 'zero_variance_training_feature_behavior']),
-    'gate2_metrics': frozenset(['also_reported', 'primary', 'secondary', 'subgroup_metrics_are_descriptive_only', 'units']),
-    'gate2_metrics.units': frozenset(['auprc_unit', 'auroc_unit', 'delta_auprc_unit', 'delta_auroc_unit', 'human_readable_equivalents', 'percent_0_100_forbidden_for_auroc_auprc', 'percentage_points_wording_forbidden_for_a_fraction_0_1_value']),
-    'bootstrap': frozenset(['interval', 'interval_endpoint_unit', 'numpy_quantile_method', 'paired_comparison', 'paired_difference_unit', 'per_replicate_rules', 'pixels_bootstrapped_independently_forbidden', 'quantiles', 'replicates', 'resampling_unit', 'sampling', 'seed_derivation', 'seed_namespace']),
-    'bootstrap.per_replicate_rules': frozenset(['compute_auroc_auprc_only_when_both_classes_present', 'duplicate_pixels_when_image_sampled_multiple_times', 'fail_below_minimum_valid_replicate_fraction', 'include_all_eligible_pixels_of_sampled_images', 'minimum_valid_replicate_fraction', 'record_number_of_valid_replicates']),
-    'gate2_criteria': frozenset(['inconclusive_conditions', 'mandatory_conditions', 'outcomes', 'pamr_role', 'stop_conditions', 'threshold_loosening_after_seeing_results_forbidden', 'thresholds_frozen_before_any_phase1b_result']),
-    'gate2_criteria.mandatory_conditions': frozenset(['c10_boundary_iou_sufficient_statistics_for_every_frozen_baseline_variant', 'c11_pamr_statistics_present_and_valid_for_both_pamr_variants', 'c1_conservation_and_artifact_validation_pass', 'c2_single_feature_auroc_lower_bound_threshold', 'c2_single_feature_candidates', 'c3_provenance_auroc_minimum', 'c4_auroc_improvement_minimum_absolute_fraction', 'c5_auroc_improvement_bootstrap_lower_bound_strictly_positive', 'c6_auprc_improvement_minimum_absolute_fraction', 'c7_auprc_improvement_bootstrap_lower_bound_strictly_positive', 'c8_minimum_valid_bootstrap_replicate_fraction', 'c9_exact_computation_within_resource_ceiling_without_approximation']),
-    'gate2_criteria.stop_conditions': frozenset(['auroc_improvement_upper_bound_at_or_below_zero', 'conservation_fails_after_confirmed_implementation_correctness', 'exact_computation_infeasible_under_resource_ceiling_requiring_unapproved_approximation', 'provenance_auroc_below']),
-    'gate2_criteria.inconclusive_conditions': frozenset(['confidence_interval_crossing_zero', 'incomplete_artifact', 'insufficient_valid_bootstrap_replicates', 'missing_authority', 'missing_or_invalid_pamr_statistics', 'missing_required_baseline', 'positive_but_smaller_than_required_conditional_gain']),
-    'gate2_criteria.pamr_role': frozenset(['pamr_comparison_to_final_dfp_selector_deferred_to_gate3', 'pamr_not_a_gate2_feature', 'pamr_not_an_input_to_diagnostic_classifier', 'pamr_numerical_superiority_threshold_at_gate2', 'pamr_statistics_required_for_gate2_completion', 'reported_pamr_statistics']),
-    'boundary_iou_role': frozenset(['authority', 'boundary_iou_from_completed_phase1a_sufficient_statistics_forbidden', 'dataset_mBoundaryIoU_aggregation', 'parallel_semantic_confusion_stats', 'per_variant_per_image_per_class_boundary_stats', 'primary_segmentation_metric', 'rerun_phase1a_in_this_schema_freezing_task_forbidden', 'secondary_preservation_metric']),
-    'baseline_variants': frozenset(['cheap_feature_controls_frozen', 'oracle_variants_are_gt_conditioned_analysis_tools_not_deployable_methods', 'original_ten_variant_order_preserved', 'pamr_variants_appended_last', 'required']),
-    'rgb_local_boundary_baseline': frozenset(['argmax_order', 'authority_status', 'baseline_family', 'configuration_relative_path', 'configuration_sha256', 'determinism', 'dilations', 'ignore_handling', 'image_normalization', 'implementation_relative_path', 'implementation_sha256', 'inherited_configuration_paths', 'inherited_configuration_sha256s', 'input_image_definition', 'input_score_definition', 'iterations', 'kernel', 'output_resolution', 'pamr_does_not_feed_provenance_features', 'pamr_is_not_used_to_construct_components', 'pamr_is_not_used_to_select_disputed_pixels', 'pipeline_insertion_point', 'resize_and_interpolation', 'resolved_parameter_digest', 'resolved_parameter_digest_formula', 'same_argmax_convention_for_both', 'same_output_geometry_for_both', 'same_pamr_parameters_for_both', 'same_rgb_input_for_both', 'selection_did_not_use_phase1b_results', 'selection_provenance', 'sigma_or_affinity_parameters', 'training_free', 'window_or_global_scope']),
+    'identity': frozenset(['description', 'diagnostic_not_deployable_selector', 'name', 'schema_name', 'schema_version', 'storage_representation_only']),
+    'margins': frozenset(['delta_m_definition', 'm0_definition', 'm320_definition']),
     'pamr_variants': frozenset(['causal_comparison']),
     'pamr_variants.causal_comparison': frozenset(['historical_30_20_value_is_not_a_phase1b_result', 'no_pamr_result_currently_known_for_frozen_500_image_phase1b_run', 'pamr_does_not_affect_g_k_star_phi_eta_net_components_soft_membership_or_q_w', 'pamr_does_not_redefine_a_or_b', 'pamr_variants_are_fixed_rgb_local_boundary_baselines', 'purpose', 't0_t320_remain_the_source_pair_defining_disputes_and_provenance']),
-    'gate3_deferred_baselines': frozenset(['deferred', 'reason']),
-    'conservation_calibration': frozenset(['execution_authorization', 'must_be_produced_before_full_phase1b_run', 'numeric_tolerance_invented_in_this_protocol', 'procedure', 'required_artifact_relative_path']),
-    'conservation_calibration.procedure': frozenset(['accumulation_dtype', 'canonical_and_masked_propagation_in_same_job_required', 'measurement', 'recorded_fields', 'same_device_type_required', 'same_gpu_model_required', 'same_propagation_precision_required', 'window_count', 'window_selection_namespace', 'window_selection_source']),
-    'conservation_calibration.execution_authorization': frozenset(['full_phase1b_execution_authorized', 'requires_calibration_artifact_bound_into_execution_identity', 'requires_calibration_artifact_generated', 'requires_calibration_artifact_independently_verified']),
-    'resource_ceiling': frozenset(['checkpoint_after_every_completed_image', 'chunk_size_selection', 'exact_chunking_required', 'gpu_model_restriction_required_unless_by_calibration_identity', 'multi_gpu_numerical_variation_forbidden', 'oom_retry_that_silently_changes_scientific_computation_forbidden', 'peak_allocated_memory_ceiling_fraction_of_physical_gpu_memory', 'planning_authority', 'relative_projected_cost_vs_one_propagation', 'resume_must_reproduce_uninterrupted_arrays_exactly', 'single_gpu_only', 'values_reconstructed_from_bound_gate1_analysis_not_hardcoded_rounded', 'wall_clock_estimates_are_diagnostic_not_gate_values_unless_measured_under_bound_calibration_environment', 'worst_case_projected_peak_bytes']),
+    'per_window_class_restriction': frozenset(['derivation_source', 'empty_q_w_requires_no_masked_propagation', 'only_q_w_classes_carried_through_masked_propagation', 'ordering', 'q_w_definition', 'q_w_never_replaced_by_image_global_classes', 'q_w_never_restricted_to_raw_patch_argmax_classes', 'window_identifier_bare_or_guessed_forbidden', 'window_identifier_field']),
     'prohibited': frozenset(['list']),
-    'future_step_bindings': frozenset(['description', 'next_step_items']),
+    'provenance_features': frozenset(['component_evidence', 'horizon_controls', 'margins_and_controls', 'text_space_control']),
+    'provenance_features.component_evidence': frozenset(['additional_concentration_diagnostics_forbidden_without_successor_authorization', 'g_plus_definition', 'k_star_always_finite_for_valid_disputed_pixel', 'k_star_definition', 'k_star_non_finite_case_behavior', 'n_positive_components_field', 'n_positive_components_stored_beside_k_star', 'negative_evidence_sum_formula', 'phi_epsilon_forbidden', 'phi_formula', 'positive_evidence_sum_formula', 'sort_order', 'top1_positive_share_field', 'top1_positive_share_formula', 'top_positive_component_id_field', 'top_positive_evidence_field']),
+    'provenance_features.horizon_controls': frozenset(['a_wins_at_h_formula', 'b_wins_at_h_formula', 'horizons_stored', 'primary_cheap_horizon_baseline', 'third_wins_at_h_formula']),
+    'provenance_features.margins_and_controls': frozenset(['epsilon_in_eta_net_denominator_forbidden', 'eta_net_denominator_note', 'eta_net_formula', 'margin_change_formula', 'propagated_margin_formula', 'small_margin_exclusion_forbidden', 'unary_resistance_formula']),
+    'provenance_features.text_space_control': frozenset(['gt_dependent_standardization_forbidden_during_feature_generation', 'text_cosine_ab_formula', 'text_prototype_source']),
+    'resource_ceiling': frozenset(['checkpoint_after_every_completed_image', 'chunk_size_selection', 'exact_chunking_required', 'gpu_model_restriction_required_unless_by_calibration_identity', 'multi_gpu_numerical_variation_forbidden', 'oom_retry_that_silently_changes_scientific_computation_forbidden', 'peak_allocated_memory_ceiling_fraction_of_physical_gpu_memory', 'planning_authority', 'relative_projected_cost_vs_one_propagation', 'resume_must_reproduce_uninterrupted_arrays_exactly', 'single_gpu_only', 'values_reconstructed_from_bound_gate1_analysis_not_hardcoded_rounded', 'wall_clock_estimates_are_diagnostic_not_gate_values_unless_measured_under_bound_calibration_environment', 'worst_case_projected_peak_bytes']),
+    'rgb_local_boundary_baseline': frozenset(['argmax_order', 'authority_status', 'baseline_family', 'configuration_relative_path', 'configuration_sha256', 'current_readme_not_claimed_as_source', 'determinism', 'dilations', 'historical_readme_corroboration_commit_sha', 'ignore_handling', 'image_normalization', 'implementation_relative_path', 'implementation_sha256', 'inherited_configuration_paths', 'inherited_configuration_sha256s', 'input_image_definition', 'input_score_definition', 'iterations', 'kernel', 'output_resolution', 'pamr_does_not_feed_provenance_features', 'pamr_is_not_used_to_construct_components', 'pamr_is_not_used_to_select_disputed_pixels', 'pamr_parameter_introduction_commit_predates_first_dfp_commit', 'pamr_parameter_introduction_commit_sha', 'pipeline_insertion_point', 'resize_and_interpolation', 'resolved_parameter_digest', 'resolved_parameter_digest_formula', 'same_argmax_convention_for_both', 'same_output_geometry_for_both', 'same_pamr_parameters_for_both', 'same_rgb_input_for_both', 'selection_did_not_use_phase1b_results', 'selection_provenance', 'sigma_or_affinity_parameters', 'training_free', 'window_or_global_scope']),
+    'scientific_purpose': frozenset(['diagnostic_fitted_models_are_analysis_tools_only', 'final_5000_image_evaluation_untouched', 'fitted_diagnostic_model_forbidden_as_final_method', 'gt_forbidden_in_component_construction', 'gt_forbidden_in_contribution_calculation', 'gt_forbidden_in_feature_extraction', 'gt_forbidden_in_graph_construction', 'gt_forbidden_in_recurrence', 'gt_forbidden_in_soft_membership', 'gt_free_features_must_be_sealed_before_labeling', 'hypothesis', 'phase1b_is_diagnostic_not_final_selector', 'subset_scope']),
+    'soft_membership_pullback': frozenset(['component_source_mass_is_diagnostic_only', 'component_source_mass_not_patch_equivalent_area', 'component_source_mass_not_pixel_area', 'composition_formula', 'membership_nonnegative', 'per_source_patch_copy_sum_to_one']),
+    'target_categories': frozenset(['beneficial_definition', 'binary_gate2_population_definition', 'harmful_definition', 'ignore_pixels_excluded_from_every_target_population', 'negative_binary_label', 'positive_binary_label', 'third_label_definition', 'third_label_excluded_from_binary_negative_class']),
+    'training_subsampling': frozenset(['fewer_available_uses_all', 'hash_algorithm', 'held_out_evaluation_pixels_never_subsampled', 'key_components', 'key_namespace', 'maximum_per_image_per_binary_category', 'required_reports', 'retain_rule']),
 }
 
 # ---------------------------------------------------------------------
@@ -520,6 +533,28 @@ def _require_relative_path(value: Any, label: str) -> str:
         if part in ("", "."):
             raise DfpPhase1bIdentityError(f"{label} must not contain empty or '.' path components")
     return token
+
+
+_FULL_COMMIT_SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
+_SCIKIT_LEARN_VERSION_PATTERN = re.compile(r"\d+\.\d+\.\d+")
+_SCIKIT_LEARN_REQUIREMENT_PIN_PATTERN = re.compile(r"scikit-learn==(\d+\.\d+\.\d+)")
+_SCIKIT_LEARN_REQUIREMENT_LINE_PATTERN = re.compile(r"scikit[-_]learn", re.IGNORECASE)
+
+
+def _require_full_commit_sha(value: Any, label: str) -> str:
+    """Rejects anything that is not an exact, full, lowercase 40-hex-
+    character git commit SHA -- in particular a symbolic revision such
+    as 'e70226f^', an abbreviated hash such as '2988bcb', a branch/tag
+    name, or a wrong-length/uppercase string. Called independently of
+    the closed-schema exact-value pinning so this format guarantee
+    holds even if a future edit ever relaxes that pinning for this
+    field."""
+    if type(value) is not str or not _FULL_COMMIT_SHA_PATTERN.fullmatch(value):
+        raise DfpPhase1bIdentityError(
+            f"{label} must be a full 40-character lowercase-hex commit SHA, "
+            f"never a symbolic revision such as 'e70226f^' or an abbreviated hash: got {value!r}"
+        )
+    return value
 
 
 def _require_no_symlink_escape(root: Path, relative: str, label: str) -> Path:
@@ -636,7 +671,7 @@ def verify_authority_bindings(*, repo_root: Path | None = None, identity_path: P
         "phase1a_protocol", "phase1a_artifacts", "coco_stuff_500_subset_manifest",
         "boundary_iou_successor_identity", "k12_graph_recurrence", "text_prototype_projection",
         "final_resolution_stitching_pullback_code", "composed_final_resolution_pullback_code",
-        "global_unary_component_code", "soft_membership_code",
+        "global_unary_component_code", "soft_membership_code", "requirements_pin",
     )
     for name in file_backed:
         binding = identity["authority_bindings"][name]
@@ -698,6 +733,9 @@ def verify_pamr_authority_bindings(*, repo_root: Path | None = None, identity_pa
     if binding["authority_status"] != "bound":
         raise DfpPhase1bIdentityError(f"rgb_local_boundary_baseline.authority_status is {binding['authority_status']!r}, not 'bound'")
 
+    for commit_field in ("pamr_parameter_introduction_commit_sha", "historical_readme_corroboration_commit_sha"):
+        _require_full_commit_sha(binding[commit_field], f"rgb_local_boundary_baseline.{commit_field}")
+
     verified: dict[str, Any] = {}
 
     impl_path = _require_no_symlink_escape(root, binding["implementation_relative_path"], "rgb_local_boundary_baseline.implementation_relative_path")
@@ -746,6 +784,80 @@ def verify_pamr_authority_bindings(*, repo_root: Path | None = None, identity_pa
     return verified
 
 
+def _parse_scikit_learn_pin(text: str) -> str:
+    """Return the one exact scikit-learn version frozen by requirements
+    text. Pure text-in/text-out: never reads a file, never computes a
+    hash, never inspects the protocol identity, never imports scikit-
+    learn, never mutates `text`, and is fully deterministic. Requires
+    exactly one scikit-learn-shaped requirement line, and that line
+    must be an exact `scikit-learn==X.Y.Z` pin -- rejects zero such
+    lines, more than one such line (duplicate or conflicting pins),
+    and any ranged (`>=`, `~=`, `<=`), wildcard, compatible-release,
+    minimum-only, unpinned, or otherwise non-exact scikit-learn-shaped
+    requirement line. Raises `DfpPhase1bIdentityError` for any invalid
+    text; never raises a different exception type for a domain
+    rejection."""
+    if type(text) is not str:
+        raise DfpPhase1bIdentityError(f"requirements text must be a str, got {type(text).__name__}")
+
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    scikit_lines = [ln for ln in lines if _SCIKIT_LEARN_REQUIREMENT_LINE_PATTERN.search(ln)]
+    exact_pins = [ln for ln in scikit_lines if _SCIKIT_LEARN_REQUIREMENT_PIN_PATTERN.fullmatch(ln)]
+
+    if len(scikit_lines) == 0:
+        raise DfpPhase1bIdentityError("requirements.txt contains no scikit-learn requirement line at all")
+    if len(exact_pins) == 0:
+        raise DfpPhase1bIdentityError(
+            f"requirements.txt has no exact 'scikit-learn==X.Y.Z' pin (found scikit-learn-shaped lines: {scikit_lines!r}); "
+            "ranged (>=, ~=, <=), wildcard, compatible-release, minimum-only, and unpinned entries are forbidden"
+        )
+    if len(scikit_lines) > 1:
+        raise DfpPhase1bIdentityError(
+            f"requirements.txt contains more than one scikit-learn-shaped requirement line (must contain exactly one exact pin): {scikit_lines!r}"
+        )
+
+    return _SCIKIT_LEARN_REQUIREMENT_PIN_PATTERN.fullmatch(exact_pins[0]).group(1)
+
+
+def verify_scikit_learn_version_binding(*, repo_root: Path | None = None, identity_path: Path | None = None) -> str:
+    """Loads the identity, live-verifies `requirements.txt`'s bound
+    SHA-256, then proves the frozen `[diagnostic_model].scikit_learn_
+    version` is EXACTLY equal to the single `scikit-learn==X.Y.Z` pin
+    actually present in `requirements.txt` -- never merely checks that
+    both are non-empty. Hash verification always runs BEFORE semantic
+    parsing (see `_parse_scikit_learn_pin`, which is independently
+    callable and exists for direct testing, not to change this order).
+    Runs purely on text -- never imports scikit-learn, never fits a
+    model."""
+    root = Path(repo_root) if repo_root is not None else repository_root()
+    identity = load_identity(identity_path, repo_root=root)
+    declared_version = identity["diagnostic_model"]["scikit_learn_version"]
+
+    if type(declared_version) is not str or not _SCIKIT_LEARN_VERSION_PATTERN.fullmatch(declared_version):
+        raise DfpPhase1bIdentityError(
+            f"diagnostic_model.scikit_learn_version must be an exact 'X.Y.Z' string, got {declared_version!r}"
+        )
+
+    binding = identity["authority_bindings"]["requirements_pin"]
+    req_path = _require_no_symlink_escape(root, binding["relative_path"], "authority_bindings.requirements_pin.relative_path")
+    if not req_path.is_file():
+        raise DfpPhase1bIdentityError(f"requirements.txt does not exist: {req_path}")
+    observed_hash = sha256_file(req_path)
+    if observed_hash != binding["sha256"]:
+        raise DfpPhase1bIdentityError(
+            f"authority_bindings.requirements_pin SHA256 mismatch: identity declares {binding['sha256']}, observed {observed_hash}"
+        )
+
+    text = req_path.read_text(encoding="utf-8")
+    pinned_version = _parse_scikit_learn_pin(text)
+    if pinned_version != declared_version:
+        raise DfpPhase1bIdentityError(
+            f"scikit_learn_version mismatch: identity declares {declared_version!r}, requirements.txt pins {pinned_version!r}"
+        )
+
+    return pinned_version
+
+
 __all__ = [
     "IDENTITY_RELATIVE_PATH",
     "FORMAT_VERSION",
@@ -759,4 +871,5 @@ __all__ = [
     "verify_authority_bindings",
     "compute_resolved_pamr_parameter_digest",
     "verify_pamr_authority_bindings",
+    "verify_scikit_learn_version_binding",
 ]
