@@ -1,0 +1,216 @@
+format_version = "talk2dino-dfp-phase1b-artifacts-identity-v1"
+
+# Storage-only artifact-schema authority for DFP Phase 1B: binds the
+# frozen e15-dfp-phase1b-protocol identity, then defines the Stage-A
+# (GT-free provenance feature) artifact schema, the Stage-B (evaluation-
+# label) artifact schema, the fixed prediction-variant confusion-array
+# naming convention, and the checkpoint/resume invariants for a future
+# execution driver. This is a DISTINCT schema from the completed Phase
+# 1A v2 per-image-stats schema -- it neither reuses nor mutates it.
+# Implements no evaluator, no inference, and defines no scientific
+# quantity beyond storage/validation.
+
+[identity]
+name = "e15-dfp-phase1b-artifacts"
+schema_name = "talk2dino-dfp-phase1b-artifacts-identity-v1"
+schema_version = 1
+description = "Storage-only artifact-schema authority for DFP Phase 1B: binds the frozen e15-dfp-phase1b-protocol identity, then defines the Stage-A GT-free provenance-feature artifact schema, the Stage-B evaluation-label artifact schema (binding the exact Stage-A digest), the fixed prediction-variant confusion-array naming convention (semantic and Boundary IoU), and the checkpoint/resume invariants for a future (not-yet-implemented) execution driver. Implements no evaluator, no inference, no masked propagation, and defines no scientific quantity."
+storage_representation_only = true
+
+[protocol_binding]
+protocol_identity_relative_path = "evaluation_identities/e15_dfp_phase1b_protocol.toml"
+protocol_identity_sha256 = "b3f165c9030200e8d988c65f2cc984804eb0ba7f60765d0193ff06c0aa897e7f"
+
+# ---------------------------------------------------------------------
+# Stage A: GT-free provenance feature artifact schema.
+# ---------------------------------------------------------------------
+
+[stage_a_schema]
+schema_name = "talk2dino-dfp-phase1b-stage-a-features-v1"
+schema_version = 1
+gt_derived_array_forbidden = true
+
+[stage_a_schema.manifest_fields]
+canonical_image_ids = "list[str], length image_count"
+selected_ids_digest = "str, sha256 hex"
+image_count = "int, must equal 500"
+dispute_count_per_image = "int64[image_count]"
+dispute_offsets = "int64[image_count + 1]"
+component_count_per_image = "int64[image_count]"
+window_count_per_image = "int64[image_count]"
+total_processed_windows = "int64 scalar"
+per_image_max_conservation_residual = "float64[image_count]"
+per_image_mean_conservation_residual = "float64[image_count]"
+per_image_projected_compute_fields = "object, mirrors gate1_analysis.json compute_projection per-image field names"
+fold_assignment = "int64[image_count], values in [0,4]"
+fold_assignment_digest = "str, sha256 hex over the canonical (image_id, fold_id) sequence"
+checkpoint_prefix = "str, safe basename, no directory component"
+complete = "bool"
+
+[stage_a_schema.flat_disputed_pixel_members]
+# Native-endian fixed dtypes, exactly as listed. No object/structured
+# dtype anywhere. int64 is used for every integer field in this freeze
+# (the smallest-safe-dtype exception in the protocol requires proving
+# exact bounds first, which this schema-freezing task does not do).
+image_row_index = "int64"
+final_pixel_linear_index = "int64"
+unary_class_a = "int64"
+propagated_class_b = "int64"
+t16_label = "int64"
+t32_label = "int64"
+t64_label = "int64"
+m0 = "float64"
+m320 = "float64"
+margin_change = "float64"
+eta_net = "float64"
+text_cosine_ab = "float64"
+positive_evidence_sum = "float64"
+negative_evidence_sum = "float64"
+sum_component_evidence = "float64"
+conservation_residual = "float64"
+n_positive_components = "int64"
+k_star = "int64"
+phi = "float64"
+top_positive_component_id = "int64"
+top_positive_evidence = "float64"
+top1_positive_share = "float64"
+
+[stage_a_schema.relational_validation]
+list = [
+    "offset[0] = 0",
+    "offset is nondecreasing",
+    "offset[-1] = flat row count",
+    "diff(offsets) = per-image dispute count",
+    "a != b",
+    "m0 <= 0",
+    "m320 > 0",
+    "margin_change = m320 - m0",
+    "eta_net = m320 / margin_change",
+    "positive_evidence_sum > 0",
+    "negative_evidence_sum <= 0",
+    "1 <= k_star <= n_positive_components",
+    "0 < phi <= 1",
+    "0 < top1_positive_share <= 1",
+    "sum_component_evidence ~= margin_change (within the separately bound calibration tolerance, never a guessed constant)",
+]
+conservation_tolerance_source = "phase1b_conservation_calibration.json, bound by [conservation_calibration] in e15-dfp-phase1b-protocol; this schema never guesses a numeric tolerance"
+
+# ---------------------------------------------------------------------
+# Stage B: evaluation-label artifact schema.
+# ---------------------------------------------------------------------
+
+[stage_b_schema]
+schema_name = "talk2dino-dfp-phase1b-stage-b-labels-v1"
+schema_version = 1
+binds_exact_stage_a_digest = true
+
+[stage_b_schema.target_category_codes]
+harmful = 0
+beneficial = 1
+third_label = 2
+
+[stage_b_schema.per_pixel_members]
+gt_class = "int64"
+target_category = "int64, one of [0,1,2] per [stage_b_schema.target_category_codes]"
+binary_eligible = "int64, 0 or 1; 1 exactly when target_category in {0,1}"
+harmful_binary_label = "int64, 1 for harmful, 0 for beneficial, -1 sentinel (not-binary-eligible) for third_label -- never 0 or 1 for third_label"
+boundary_interior_flag = "int64, 0 (interior) or 1 (boundary)"
+fold_id = "int64, in [0,4]; must equal the image-level frozen fold_assignment for the same image"
+training_selection_flag = "int64, 0 or 1; set by [training_subsampling] in e15-dfp-phase1b-protocol"
+
+[stage_b_schema.diagnostic_prediction_members_optional]
+description = "Absent until all five folds are complete; a Stage-B artifact with fewer than five folds fitted must not include these members at all."
+out_of_fold_cheap_control_risk = "float64"
+out_of_fold_provenance_augmented_risk = "float64"
+
+[stage_b_schema.manifest_fields]
+per_image_target_counts = "object: harmful/beneficial/third_label counts per image"
+per_fold_counts = "object: harmful/beneficial/third_label/binary_eligible counts per fold"
+fixed_single_feature_risk_orientations = "object: {feature_name: '+' or '-'} for neg_phi, neg_k_star, top1_positive_share, matching [gate2_criteria.mandatory_conditions].c2_single_feature_candidates"
+bootstrap_result_summary = "object: sufficient statistics or arrays per [bootstrap] in e15-dfp-phase1b-protocol"
+
+[stage_b_schema.relational_validation]
+list = [
+    "harmful + beneficial + third_label = disputes",
+    "binary_eligible = harmful + beneficial",
+    "third_label is never assigned harmful_binary_label 0 or 1",
+    "fold_id agrees with the image-level frozen fold",
+]
+
+# ---------------------------------------------------------------------
+# Fixed prediction-statistic member naming (Section 24).
+# ---------------------------------------------------------------------
+
+[prediction_variants]
+names = [
+    "t0", "t16", "t32", "t64", "t320", "oracle_o_p",
+    "persist_h32_full", "persist_h32_harmful_only", "persist_h32_beneficial_only", "persist_h32_third_label_only",
+    "t0_pamr", "t320_pamr",
+]
+count = 12
+original_ten_order_preserved = true
+pamr_variants_appended_last = true
+
+[semantic_confusion_schema]
+stat_names = ["intersection", "union", "predicted_pixels", "ground_truth_pixels"]
+member_name_pattern = "semantic_{variant}_{stat}"
+shape = "[image_count, class_count]"
+dtype = "int64"
+relation = "union = predicted_pixels + ground_truth_pixels - intersection"
+cross_variant_relation = "all variants must have identical per-class ground_truth_pixels"
+total_member_count = 48
+total_member_count_formula = "12 variants * 4 stats"
+
+[boundary_confusion_schema]
+stat_names = ["boundary_intersection", "boundary_union", "predicted_boundary_pixels", "ground_truth_boundary_pixels"]
+member_name_pattern = "boundary_{variant}_{stat}"
+shape = "[image_count, class_count]"
+dtype = "int64"
+relation = "boundary_union = predicted_boundary_pixels + ground_truth_boundary_pixels - boundary_intersection"
+cross_variant_relation = "all Boundary IoU variants must have identical per-class ground_truth_boundary_pixels when they use the same GT and the e14 authority"
+authority = "e14-dfp-phase1b-boundary-iou"
+total_member_count = 48
+total_member_count_formula = "12 variants * 4 stats"
+
+# ---------------------------------------------------------------------
+# Checkpoint and resume schema (Section 25) -- schema/invariants only,
+# no writer or execution driver is implemented by this task.
+# ---------------------------------------------------------------------
+
+[checkpoint_resume_schema]
+append_only_generation = true
+source_manifest_prefix_must_match_first_completed_ids = true
+skip_duplicate_or_reorder_forbidden = true
+stage_a_stage_b_have_distinct_completion_states = true
+stage_b_cannot_start_until_stage_a_complete_and_sealed = true
+stage_b_checkpoint_binds_stage_a_final_digest = true
+complete_final_boolean_combinations_exact = [
+    "complete=false, final=false: incomplete",
+    "complete=true, final=false: complete-but-unfinalized",
+    "complete=true, final=true: finalized",
+]
+zero_progress_arrays_valid_without_np_stack_of_empty = true
+each_installed_generation_self_verifies_before_pointer_replacement = true
+atomic_pointer_update = true
+orphan_generation_after_handled_failure_forbidden = true
+reconcile_ambiguous_post_replace_failure_before_deleting_files = true
+resume_equivalence_byte_identical_to_uninterrupted_execution = true
+final_result_installation_cpu_only_no_model_rebuild = true
+writer_and_execution_driver_not_implemented_by_this_task = true
+
+# ---------------------------------------------------------------------
+# Path policy / atomic write policy (mirrors e13-dfp-phase1a-artifacts).
+# ---------------------------------------------------------------------
+
+[path_policy]
+allowed_path_kinds = ["repository_relative_logical_path", "safe_basename_no_directory_component"]
+forbidden = [
+    "absolute_path", "parent_traversal_dotdot", "empty_path_component", "forbidden_dot_component",
+    "drive_qualified_path", "backslash_traversal", "nul_byte", "path_escaping_artifact_root_after_resolution",
+    "unexpected_symlink_escape", "private_cluster_or_user_path",
+]
+canonical_image_id_distinct_from_physical_filename = true
+
+[atomic_write_policy]
+checkpoint_install = "write_verified_candidate_files_to_unpredictable_task_specific_temp_names_in_the_destination_filesystem_then_os_replace_the_checkpoint_pointer_last_after_full_self_verification_previous_valid_checkpoint_preserved_until_the_new_candidate_verifies_orphan_temp_files_removed_on_any_failure"
+result_install = "build_the_complete_result_in_a_fresh_sibling_staging_directory_verify_every_file_and_every_cross_file_hash_then_atomically_rename_the_directory_into_place_reject_cleanly_if_the_destination_already_exists_no_partial_multi_file_replacement"

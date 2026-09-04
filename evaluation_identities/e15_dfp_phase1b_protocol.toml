@@ -1,0 +1,669 @@
+format_version = "talk2dino-dfp-phase1b-protocol-identity-v1"
+
+# DFP Phase 1B scientific protocol pre-registration. This is a
+# diagnostic-protocol identity, exactly like e13-dfp-phase1a-protocol:
+# it never loads CUDA, a model, or a dataset, and it computes no
+# scientific quantity. It freezes the Phase 1B hypothesis, the GT-free
+# component-evidence provenance decomposition, the GT-isolation
+# architecture, fold assignment, the diagnostic feature-evaluation
+# procedure, the image-level bootstrap, and the Gate-2 stop/proceed
+# criteria -- BEFORE any provenance computation, masked propagation, or
+# diagnostic model fitting occurs.
+#
+# Dependency direction (acyclic, by design):
+#   e13-dfp-phase1a-protocol (+ e12-matched-k11-k12-t320, e3-paired-
+#   soft-routing, the frozen 500-image subset manifest)
+#     -> Gate-1 result (gate1_analysis.json / analysis_provenance.json)
+#        + e14-dfp-phase1b-boundary-iou
+#     -> THIS identity (e15-dfp-phase1b-protocol)
+#     -> e15-dfp-phase1b-artifacts (binds THIS identity's own SHA-256;
+#        this identity never binds the artifact identity's hash, which
+#        would create a cycle).
+#
+# This identity does not modify, cascade a new hash through, or
+# retroactively reinterpret e13-dfp-phase1a-protocol,
+# e13-dfp-phase1a-artifacts, e14-dfp-phase1b-boundary-iou, or the
+# frozen subset manifest -- all four are bound below by exact path and
+# SHA-256 and re-verified against the live files every time this
+# identity loads.
+#
+# RGB/local-boundary baseline: see [rgb_local_boundary_baseline] below.
+# The historical Talk2DINO PAMR operator is now bound directly in this
+# identity (e15 was still uncommitted when this repair was made, so the
+# binding is applied in place rather than via a successor identity).
+# The bound configuration is the SOLE PAMR instantiation site anywhere
+# in this repository (src/open_vocabulary_segmentation/models/dinotext/
+# dinotext.py::apply_pamr, hardcoding num_iter=10, dilations=[1, 2, 4,
+# 8, 12, 24] -- never overridden by any YAML anywhere in this codebase),
+# activated for COCO-Stuff via the officially-documented reproduction
+# command in this repository's own top-level README.md ("# COCOStuff"
+# section: --eval_cfg .../stuff/dinotext_stuff_vitb_mlp_infonce.yml
+# --eval_base .../stuff/eval_stuff_pamr.yml). T0_PAMR/T320_PAMR apply
+# this SAME bound operator to DFP's own already-computed T0/T320 score
+# tensors (never a separate model re-evaluation) -- see
+# [pamr_variants] below.
+#
+# AUROC/AUPRC units: every AUROC/AUPRC threshold and improvement value
+# in [gate2_criteria] is on the raw fraction_0_1 metric scale (never
+# percent_0_100), and every improvement/delta is an absolute difference
+# on that same 0-1 scale (never itself expressed in percentage points).
+# 0.02 on this scale is the human-readable equivalent of "+2.0
+# percentage points" -- see [gate2_metrics.units] below. This repair
+# renames the two threshold fields that previously carried a misleading
+# "_pp" suffix while holding a 0-1-scale value.
+
+[identity]
+name = "e15-dfp-phase1b-protocol"
+schema_name = "talk2dino-dfp-phase1b-protocol-identity-v1"
+schema_version = 1
+description = "Freezes the DFP Phase 1B scientific protocol: the component-evidence provenance hypothesis, GT-free feature decomposition, GT-isolation architecture (Stage A / Stage B), deterministic fold assignment, diagnostic feature-evaluation procedure (cheap-control vs provenance-augmented logistic diagnostic model), image-level paired bootstrap, and the Gate-2 PROCEED_TO_GATE_3/STOP_DFP/INCONCLUSIVE criteria. Implements no evaluator, no inference, no masked propagation, and computes no provenance value."
+storage_representation_only = true
+diagnostic_not_deployable_selector = true
+
+[dependency_graph]
+direction = "phase1a_protocol_and_gate1_and_boundary_iou -> phase1b_protocol -> phase1b_artifacts"
+acyclic_required = true
+this_identity_binds_artifact_identity_hash = false
+artifact_identity_binds_this_identity_hash = true
+rationale = "the artifact identity is generated after this protocol and must bind it for provenance; this protocol is frozen before the artifact identity exists and therefore cannot bind a hash that does not yet exist without creating a circular dependency"
+
+[authority_bindings.phase1a_protocol]
+relative_path = "evaluation_identities/e13_dfp_phase1a_protocol.toml"
+sha256 = "227549b03ec6b1262c465a18b7fc67529fa5a0b5deef419c33ec79a80feb2173"
+
+[authority_bindings.phase1a_artifacts]
+relative_path = "evaluation_identities/e13_dfp_phase1a_artifacts.toml"
+sha256 = "9b8827c77fc81a7e676dece6284f69c630d61eadf916c9c2adf72f0bb30584ce"
+
+[authority_bindings.coco_stuff_500_subset_manifest]
+relative_path = "evaluation_subsets/dfp_phase1a_coco_stuff_500.json"
+sha256 = "75373aca8ef6d434ae02a7e90b6dcc9ba13fd8a31d1e87d858a2f542c19ef482"
+
+[authority_bindings.boundary_iou_successor_identity]
+relative_path = "evaluation_identities/e14_dfp_phase1b_boundary_iou.toml"
+sha256 = "fe4c33d4376d40fcd53f7751405ffc60e5856ce9919f548df3c039809ebc0ab8"
+
+[authority_bindings.gate1_analysis]
+relative_path = "gate1_analysis.json"
+path_kind = "logical_artifact_name_not_a_private_filesystem_path"
+sha256 = "bd0cb034d6368e78ca8db19d0d86d3b785d0527fe4aef4c77b841edeb34769dd"
+
+[authority_bindings.gate1_analysis_provenance]
+relative_path = "analysis_provenance.json"
+path_kind = "logical_artifact_name_not_a_private_filesystem_path"
+sha256 = "6e67c7cfa3ba4ab7f24e70f117823a91ef0e8ec435784d479e0117ead48d51a3"
+
+[authority_bindings.k12_graph_recurrence]
+relative_path = "evaluation_identities/e12_matched_k11_k12_t320.toml"
+sha256 = "1f4eea731ae7b803a5e2d572d0a1f59b3275ec240d36061d03540706e3bbc259"
+
+[authority_bindings.text_prototype_projection]
+relative_path = "evaluation_identities/e3_paired_soft_routing.toml"
+sha256 = "db9cb8d407d6b5770d13c2b6546a33008206ae44ebcdc55f6b7384813eec477c"
+note = "governs the CLIP-text-to-shared-space projection used to derive per-class text prototypes; the class NAME strings themselves are governed transitively by [authority_bindings.phase1a_protocol]'s own coco_stuff_dataset.class_names_digest"
+
+[authority_bindings.final_resolution_stitching_pullback_code]
+relative_path = "src/dfp_phase1a_stitching_pullback.py"
+sha256 = "6e15dd8b967eeaa317ab417ded2127d04f9064accf97fca6275e7cf962a1ac04"
+
+[authority_bindings.composed_final_resolution_pullback_code]
+relative_path = "src/dfp_phase1a_final_rescale_pullback.py"
+sha256 = "fe771097e0204dde1f48d236f6142ec32880743e0fb4638425938e489af14298"
+
+[authority_bindings.global_unary_component_code]
+relative_path = "src/dfp_phase1a_global_unary_components.py"
+sha256 = "612403bcc5faa58be4dc54d1b941bc6989abd8e4f3214ff8c33e70926b03fb2f"
+
+[authority_bindings.soft_membership_code]
+relative_path = "src/dfp_phase1a_soft_membership.py"
+sha256 = "7bef9b800aa2770166422f715456d994e67fa218347bba6bb9d5b66695d03ac9"
+
+[gate1_verified_facts]
+run_mode = "coco_stuff_500"
+image_count = 500
+gate1_verdict = "PROCEED_TO_PHASE_1B"
+boundary_trigger_status = "FIRED"
+boundary_iou_authority_status_in_phase1a = "not_yet_bound"
+next_prerequisite_from_gate1 = "BIND_BOUNDARY_IOU"
+boundary_iou_successor_authority_now_bound_for_phase1b = true
+
+# ---------------------------------------------------------------------
+# Scientific purpose (Section 4)
+# ---------------------------------------------------------------------
+
+[scientific_purpose]
+hypothesis = "Does component-level diffusion evidence provenance provide statistically and practically meaningful information for distinguishing harmful T0->T320 washouts from beneficial T0->T320 corrections, beyond unary confidence, propagation margin, text similarity and early-horizon persistence?"
+phase1b_is_diagnostic_not_final_selector = true
+gt_free_features_must_be_sealed_before_labeling = "GT may define evaluation labels only after GT-free provenance features are sealed (Stage A digest finalized before Stage B begins)"
+gt_forbidden_in_component_construction = true
+gt_forbidden_in_soft_membership = true
+gt_forbidden_in_graph_construction = true
+gt_forbidden_in_recurrence = true
+gt_forbidden_in_contribution_calculation = true
+gt_forbidden_in_feature_extraction = true
+diagnostic_fitted_models_are_analysis_tools_only = true
+fitted_diagnostic_model_forbidden_as_final_method = "no fitted diagnostic model produced under this protocol may be reported as the training-free final DFP method"
+final_5000_image_evaluation_untouched = "the final 5,000-image COCO evaluation remains untouched and confirmatory; this protocol governs only the frozen stratified 500-image development subset"
+subset_scope = "coco_stuff_500 only; ade20k_500 was never run for Gate-1 and is out of scope for this protocol"
+
+# ---------------------------------------------------------------------
+# Canonical prediction and dispute definitions (Section 5)
+# ---------------------------------------------------------------------
+
+[canonical_predictions]
+t0_definition = "canonical stitched final ori-resolution unary field"
+t320_definition = "canonical stitched final ori-resolution propagated field"
+a_definition = "lowest_index_argmax_of_T0_stitched_prediction"
+b_definition = "lowest_index_argmax_of_T320_stitched_prediction"
+tie_rule = "exact_argmax_ties_select_lowest_class_index"
+dispute_set_definition = "D = {x : a(x) != b(x), GT(x) != ignore_index}"
+
+[margins]
+m0_definition = "m0(x) = S0(x,b) - S0(x,a); m0(x) <= 0"
+m320_definition = "m320(x) = S320(x,b) - S320(x,a); m320(x) > 0"
+delta_m_definition = "delta_m(x) = m320(x) - m0(x); delta_m(x) > 0"
+
+[target_categories]
+harmful_definition = "GT(x) == a(x) and GT(x) != b(x)"
+beneficial_definition = "GT(x) == b(x) and GT(x) != a(x)"
+third_label_definition = "GT(x) not in {a(x), b(x)}"
+binary_gate2_population_definition = "GT(x) in {a(x), b(x)}"
+positive_binary_label = "harmful = 1"
+negative_binary_label = "beneficial = 0"
+third_label_excluded_from_binary_negative_class = true
+ignore_pixels_excluded_from_every_target_population = true
+
+# ---------------------------------------------------------------------
+# Canonical provenance components (Section 6)
+# ---------------------------------------------------------------------
+
+[component_construction]
+source = "final ori-resolution T0 argmax map"
+domain = "complete final image"
+connectivity = 8
+same_class_connected_components = true
+ordering = "deterministic, by first flat pixel index in canonical row-major order"
+gt_forbidden = true
+per_window_components_forbidden = true
+morphological_closing_forbidden = true
+component_merging_after_observing_labels_forbidden = true
+semantic_supercohort_as_causal_unit_forbidden = true
+top_k_plus_residual_approximation_forbidden = true
+
+[soft_membership_pullback]
+composition_formula = "A_final = R composed with A_stitch"
+per_source_patch_copy_sum_to_one = "sum_r M[r,w,j] = 1"
+membership_nonnegative = "M[r,w,j] >= 0"
+component_source_mass_is_diagnostic_only = true
+component_source_mass_not_pixel_area = true
+component_source_mass_not_patch_equivalent_area = true
+
+# ---------------------------------------------------------------------
+# Exact component evidence decomposition (Section 7)
+# ---------------------------------------------------------------------
+
+[component_evidence_decomposition]
+masked_unary_seed_formula = "Y0^(r)[w,j,c] = M[r,w,j] * Y0[w,j,c]"
+masked_unary_stitch_formula = "S0^(r) = A_final(Y0^(r))"
+masked_propagated_stitch_formula = "S320^(r) = A_final(K320(P) Y0^(r))"
+signed_component_evidence_formula = "G[x,r] = [S320^(r)(x,b) - S320^(r)(x,a)] - [S0^(r)(x,b) - S0^(r)(x,a)]"
+conservation_identity = "sum_r G[x,r] = m320(x) - m0(x) = delta_m(x)"
+exact_masked_forward_propagation_required = true
+exact_chunking_only = true
+same_graph_and_recurrence_as_canonical_t320_required = true
+adjoint_approximation_forbidden_in_primary_implementation = true
+dense_influence_kernel_forbidden = true
+top_k_truncation_forbidden = true
+residual_supercomponent_forbidden = true
+altered_precision_between_canonical_and_masked_runs_forbidden = true
+component_sum_accumulation_dtype = "fp64"
+early_stopping_forbidden = true
+equilibrium_solver_forbidden = true
+recurrence_variant_required = "k12"
+k11_counterfactual_forbidden = true
+storage_requirement = "the artifact must store enough information to independently verify conservation without storing the full component-by-pixel evidence matrix"
+
+# ---------------------------------------------------------------------
+# Per-window class restriction (Section 8)
+# ---------------------------------------------------------------------
+
+[per_window_class_restriction]
+q_w_definition = "Q_w = { a(x), b(x) : x is disputed and final window w contributes nonzero stitching weight to x }"
+only_q_w_classes_carried_through_masked_propagation = true
+derivation_source = "final stitched disputed pixels"
+window_identifier_field = "position.relative_path"
+window_identifier_bare_or_guessed_forbidden = true
+ordering = "deterministic lowest-class-index ordering"
+q_w_never_replaced_by_image_global_classes = true
+q_w_never_restricted_to_raw_patch_argmax_classes = true
+empty_q_w_requires_no_masked_propagation = true
+
+# ---------------------------------------------------------------------
+# Frozen provenance features (Section 9)
+# ---------------------------------------------------------------------
+
+[provenance_features.margins_and_controls]
+unary_resistance_formula = "unary_resistance = -m0"
+propagated_margin_formula = "propagated_margin = m320"
+margin_change_formula = "margin_change = delta_m"
+eta_net_formula = "eta_net = m320 / (m320 - m0)"
+eta_net_denominator_note = "because m320 > 0 and m0 <= 0, the denominator (m320 - m0) is a sum of magnitudes and is always strictly positive"
+epsilon_in_eta_net_denominator_forbidden = true
+small_margin_exclusion_forbidden = true
+
+[provenance_features.horizon_controls]
+horizons_stored = [16, 32, 64]
+b_wins_at_h_formula = "b_wins_at_h = 1[argmax S_h(x) = b(x)]"
+a_wins_at_h_formula = "a_wins_at_h = 1[argmax S_h(x) = a(x)]"
+third_wins_at_h_formula = "third_wins_at_h = 1 - b_wins_at_h - a_wins_at_h (otherwise case)"
+primary_cheap_horizon_baseline = 32
+
+[provenance_features.text_space_control]
+text_cosine_ab_formula = "text_cosine_ab = cosine(t_a, t_b)"
+text_prototype_source = "exact text prototypes bound to [authority_bindings.text_prototype_projection]"
+gt_dependent_standardization_forbidden_during_feature_generation = true
+
+[provenance_features.component_evidence]
+g_plus_definition = "G_plus = { G[x,r] : G[x,r] > 0 }"
+sort_order = "1) descending contribution; 2) ascending deterministic component ID for exact ties"
+n_positive_components_field = "n_positive_components"
+positive_evidence_sum_formula = "positive_evidence_sum = sum_r max(G[x,r], 0)"
+negative_evidence_sum_formula = "negative_evidence_sum = sum_r min(G[x,r], 0)"
+top_positive_component_id_field = "top_positive_component_id"
+top_positive_evidence_field = "top_positive_evidence"
+top1_positive_share_field = "top1_positive_share"
+k_star_definition = "k_star(x) = minimum k such that m320(x) - sum_{q=1..k} G_positive_sorted[q] <= 0"
+k_star_always_finite_for_valid_disputed_pixel = true
+k_star_non_finite_case_behavior = "reject an invalid non-finite case rather than inventing infinity"
+n_positive_components_stored_beside_k_star = "because the integer count is fragmentation-confounded"
+phi_formula = "phi(x) = sum_{q=1..k_star} G_positive_sorted[q] / positive_evidence_sum"
+phi_epsilon_forbidden = true
+top1_positive_share_formula = "top1_positive_share = top_positive_evidence / positive_evidence_sum"
+additional_concentration_diagnostics_forbidden_without_successor_authorization = "no Gini, entropy, or additional features may be added after observing results unless a later successor protocol explicitly authorizes them"
+
+# ---------------------------------------------------------------------
+# GT-isolation architecture (Section 10)
+# ---------------------------------------------------------------------
+
+[gt_isolation.stage_a]
+label = "GT-free provenance feature artifact"
+may_contain = [
+    "image_identifiers", "dispute_offsets", "pixel_indices", "a_b_classes", "margins",
+    "horizon_states", "text_cosine", "component_evidence_features", "conservation_diagnostics",
+    "compute_diagnostics",
+]
+must_not_contain = [
+    "gt_class", "harmful_beneficial_third_label_target", "oracle_decision",
+    "gt_boundary_label", "any_fitted_prediction_using_gt",
+]
+must_be_finalized_and_content_hashed_before_stage_b_begins = true
+driver_api_must_not_accept_gt_arrays_or_dataset_annotation_objects = true
+tests_must_poison_gt_access_during_stage_a = true
+
+[gt_isolation.stage_b]
+label = "evaluation-label artifact"
+binds_exact_stage_a_digest = true
+may_add = [
+    "gt_class", "harmful_beneficial_third_label_category", "boundary_interior_indicator",
+    "deterministic_fold_id", "confusion_sufficient_statistics", "boundary_iou_sufficient_statistics",
+    "diagnostic_model_outputs",
+]
+
+# ---------------------------------------------------------------------
+# Deterministic fold assignment (Section 11)
+# ---------------------------------------------------------------------
+
+[fold_assignment]
+fold_count = 5
+images_per_fold = 100
+pixels_never_split_across_folds = true
+namespace = "talk2dino-dfp-phase1b-fold-assignment-v1"
+key_formula = "key(image_id) = SHA256(namespace + NUL + canonical_image_id)"
+sort_key = "(key, canonical_image_id)"
+fold_id_formula = "fold_id = sorted_rank mod 5"
+random_library_forbidden = true
+filesystem_order_forbidden = true
+python_hash_forbidden = true
+required_stored_fields = ["fold_assignment", "fold_assignment_digest"]
+required_checks = ["exactly_100_images_per_fold", "every_dispute_pixel_inherits_its_images_fold"]
+
+# ---------------------------------------------------------------------
+# Diagnostic feature evaluation (Section 12)
+# ---------------------------------------------------------------------
+
+[diagnostic_feature_evaluation]
+gate2_uses_out_of_fold_predictions_only = true
+primary_binary_task = "harmful_vs_beneficial"
+third_label_excluded_from_model_fitting_and_binary_auroc_auprc = true
+third_label_feature_and_risk_distributions_reported_separately = true
+
+[diagnostic_feature_evaluation.cheap_control_model]
+inputs = ["unary_resistance", "propagated_margin", "eta_net", "t16_horizon_state", "t32_horizon_state", "t64_horizon_state", "text_cosine_ab"]
+
+[diagnostic_feature_evaluation.provenance_augmented_model]
+inputs = [
+    "unary_resistance", "propagated_margin", "eta_net", "t16_horizon_state", "t32_horizon_state",
+    "t64_horizon_state", "text_cosine_ab", "k_star", "n_positive_components", "phi",
+    "top1_positive_share", "positive_evidence_sum", "negative_evidence_sum",
+]
+
+[diagnostic_feature_evaluation.forbidden_primary_model_inputs]
+forbidden = ["image_rgb", "gt", "class_frequency", "class_id", "thing_stuff_label", "dataset_statistics", "component_size"]
+may_be_reported_as_subgroup_diagnostics_only_if_explicitly_listed = true
+
+[diagnostic_model]
+kind = "fixed_logistic_regression"
+regularization = "l2"
+c = 1.0
+intercept_enabled = true
+solver = "lbfgs"
+max_iterations = 1000
+convergence_tolerance = 0.0001
+input_dtype = "float64"
+standardization = "training_fold_only"
+class_balancing_forbidden_unless_explicitly_frozen = true
+class_balancing_frozen = false
+hyperparameter_search_forbidden = true
+early_model_selection_forbidden = true
+test_fold_labels_in_standardization_or_fitting_forbidden = true
+implementation = "scikit-learn LogisticRegression"
+diagnostic_only_never_final_selector = true
+
+# ---------------------------------------------------------------------
+# Deterministic training subsampling (Section 13)
+# ---------------------------------------------------------------------
+
+[training_subsampling]
+key_components = ["frozen_namespace", "canonical_image_id", "final_pixel_linear_index", "target_category"]
+key_namespace = "talk2dino-dfp-phase1b-training-subsample-v1"
+hash_algorithm = "SHA256"
+retain_rule = "lowest keys, up to a fixed maximum per image per binary category"
+maximum_per_image_per_binary_category = 4096
+fewer_available_uses_all = true
+held_out_evaluation_pixels_never_subsampled = true
+required_reports = ["training_sample_counts", "full_held_out_evaluation_counts"]
+
+# ---------------------------------------------------------------------
+# Fold-safe transformations (Section 14)
+# ---------------------------------------------------------------------
+
+[fold_safe_transformations]
+mean_std_from_training_folds_only = true
+apply_training_statistics_to_held_out_fold = true
+zero_variance_training_feature_behavior = "transform to zero and record it"
+full_dataset_statistics_forbidden = true
+binary_horizon_indicators_never_standardized = true
+raw_single_feature_aurocs_unstandardized = true
+descriptive_full_dataset_summaries_allowed_only_if_labelled_descriptive_and_never_fed_into_out_of_fold_fitting = true
+
+# ---------------------------------------------------------------------
+# Primary Gate-2 metrics (Section 15)
+# ---------------------------------------------------------------------
+
+[gate2_metrics]
+primary = "out_of_fold_pixel_level_auroc"
+secondary = "out_of_fold_pixel_level_auprc"
+also_reported = [
+    "harmful_prevalence", "per_image_auroc_where_both_classes_occur", "macro_mean_across_valid_images",
+    "thing_stuff_subgroup_results", "boundary_interior_subgroup_results", "transition_text_similarity_bins",
+    "third_label_risk_distribution", "coverage_of_gt_in_ab",
+]
+subgroup_metrics_are_descriptive_only = "subgroup metrics are descriptive and do not independently pass the gate"
+
+[gate2_metrics.units]
+auroc_unit = "fraction_0_1"
+auprc_unit = "fraction_0_1"
+delta_auroc_unit = "absolute_fraction_0_1"
+delta_auprc_unit = "absolute_fraction_0_1"
+percent_0_100_forbidden_for_auroc_auprc = true
+percentage_points_wording_forbidden_for_a_fraction_0_1_value = true
+human_readable_equivalents = "provenance AUROC minimum 0.65 = 65%; AUROC/AUPRC improvement minimum 0.02 absolute = 2.0 percentage points -- 0.02 on the fraction_0_1 scale must never itself be written as \"0.02 pp\""
+
+# ---------------------------------------------------------------------
+# Image-level paired bootstrap (Section 16)
+# ---------------------------------------------------------------------
+
+[bootstrap]
+replicates = 10000
+resampling_unit = "image"
+sampling = "500 image IDs with replacement"
+paired_comparison = "identical sampled images for cheap and provenance models"
+interval = "percentile_95_percent"
+quantiles = [0.025, 0.975]
+numpy_quantile_method = "linear"
+seed_namespace = "talk2dino-dfp-phase1b-bootstrap-seed-v1"
+seed_derivation = "seed = int.from_bytes(SHA256(seed_namespace)[:8], byteorder='big') % (2**32)"
+pixels_bootstrapped_independently_forbidden = true
+interval_endpoint_unit = "absolute_fraction_0_1"
+paired_difference_unit = "absolute_fraction_0_1"
+
+[bootstrap.per_replicate_rules]
+include_all_eligible_pixels_of_sampled_images = true
+duplicate_pixels_when_image_sampled_multiple_times = true
+compute_auroc_auprc_only_when_both_classes_present = true
+record_number_of_valid_replicates = true
+minimum_valid_replicate_fraction = 0.95
+fail_below_minimum_valid_replicate_fraction = true
+
+# ---------------------------------------------------------------------
+# Gate-2 stop/proceed criteria (Section 17)
+# ---------------------------------------------------------------------
+
+[gate2_criteria]
+outcomes = ["PROCEED_TO_GATE_3", "STOP_DFP", "INCONCLUSIVE"]
+thresholds_frozen_before_any_phase1b_result = true
+threshold_loosening_after_seeing_results_forbidden = true
+
+[gate2_criteria.mandatory_conditions]
+c1_conservation_and_artifact_validation_pass = true
+c2_single_feature_auroc_lower_bound_threshold = 0.5
+c2_single_feature_candidates = ["neg_phi", "neg_k_star", "top1_positive_share"]
+c3_provenance_auroc_minimum = 0.65
+c4_auroc_improvement_minimum_absolute_fraction = 0.02
+c5_auroc_improvement_bootstrap_lower_bound_strictly_positive = true
+c6_auprc_improvement_minimum_absolute_fraction = 0.02
+c7_auprc_improvement_bootstrap_lower_bound_strictly_positive = true
+c8_minimum_valid_bootstrap_replicate_fraction = 0.95
+c9_exact_computation_within_resource_ceiling_without_approximation = true
+c10_boundary_iou_sufficient_statistics_for_every_frozen_baseline_variant = true
+c11_pamr_statistics_present_and_valid_for_both_pamr_variants = true
+
+[gate2_criteria.stop_conditions]
+provenance_auroc_below = 0.60
+auroc_improvement_upper_bound_at_or_below_zero = true
+conservation_fails_after_confirmed_implementation_correctness = true
+exact_computation_infeasible_under_resource_ceiling_requiring_unapproved_approximation = true
+
+[gate2_criteria.inconclusive_conditions]
+positive_but_smaller_than_required_conditional_gain = true
+confidence_interval_crossing_zero = true
+insufficient_valid_bootstrap_replicates = true
+missing_required_baseline = true
+missing_authority = true
+incomplete_artifact = true
+missing_or_invalid_pamr_statistics = true
+
+[gate2_criteria.pamr_role]
+pamr_statistics_required_for_gate2_completion = true
+pamr_not_an_input_to_diagnostic_classifier = true
+pamr_not_a_gate2_feature = true
+pamr_comparison_to_final_dfp_selector_deferred_to_gate3 = true
+pamr_numerical_superiority_threshold_at_gate2 = false
+reported_pamr_statistics = ["mBoundaryIoU", "mIoU", "delta_vs_t0", "delta_vs_t320", "per_class_values", "boundary_interior_diagnostics_where_supported"]
+
+# ---------------------------------------------------------------------
+# Boundary IoU role (Section 18)
+# ---------------------------------------------------------------------
+
+[boundary_iou_role]
+authority = "e14-dfp-phase1b-boundary-iou"
+primary_segmentation_metric = "mean Boundary IoU"
+secondary_preservation_metric = "mIoU"
+per_variant_per_image_per_class_boundary_stats = [
+    "boundary_intersection", "boundary_union", "predicted_boundary_pixels", "ground_truth_boundary_pixels",
+]
+dataset_mBoundaryIoU_aggregation = "sum_then_divide_using_e14_contract"
+parallel_semantic_confusion_stats = ["intersection", "union", "predicted_pixels", "ground_truth_pixels"]
+boundary_iou_from_completed_phase1a_sufficient_statistics_forbidden = "raw prediction maps were not retained by the completed Phase 1A run"
+rerun_phase1a_in_this_schema_freezing_task_forbidden = true
+
+# ---------------------------------------------------------------------
+# Fixed baseline variants (Section 19)
+# ---------------------------------------------------------------------
+
+[baseline_variants]
+required = [
+    "t0", "t16", "t32", "t64", "t320", "oracle_o_p",
+    "persist_h32_full", "persist_h32_harmful_only", "persist_h32_beneficial_only", "persist_h32_third_label_only",
+    "t0_pamr", "t320_pamr",
+]
+oracle_variants_are_gt_conditioned_analysis_tools_not_deployable_methods = true
+cheap_feature_controls_frozen = true
+original_ten_variant_order_preserved = true
+pamr_variants_appended_last = true
+
+[rgb_local_boundary_baseline]
+authority_status = "bound"
+baseline_family = "pamr"
+implementation_relative_path = "src/open_vocabulary_segmentation/models/dinotext/pamr.py"
+implementation_sha256 = "5f3d6051e8e22aa2b0cfe9e091e3644d217b56716e152a654e2b6996c489f1d2"
+configuration_relative_path = "src/open_vocabulary_segmentation/models/dinotext/dinotext.py"
+configuration_sha256 = "94d920e7f9153e97c8c4948013beffd7533902c7d307fe15607a6b03508873ed"
+inherited_configuration_paths = ["src/open_vocabulary_segmentation/configs/stuff/eval_stuff_pamr.yml"]
+inherited_configuration_sha256s = ["d6043d83676fcb498e966fbaa0b90f68be3eed46dbb7002e3d332e13a69d9cb6"]
+resolved_parameter_digest = "0cb1e75acb3a7e068ef10a41519e137910a64f2acdb201cf11caebf83360b14d"
+resolved_parameter_digest_formula = "SHA256(json.dumps(resolved_params, sort_keys=True, separators=(',', ':')).encode('utf-8')), where resolved_params = {operator:'PAMR', num_iter:iterations, dilations:dilations, kernel:kernel, affinity:sigma_or_affinity_parameters, insertion_point:pipeline_insertion_point, image_input:input_image_definition, image_normalization:image_normalization, resize_interpolation:resize_and_interpolation, scope:window_or_global_scope, argmax_order:argmax_order, determinism:determinism, training_free:training_free} -- every value taken verbatim from this SAME [rgb_local_boundary_baseline] table, so the digest is mechanically self-verifying against this file (see src.dfp_phase1b_identity.compute_resolved_pamr_parameter_digest)"
+input_image_definition = "the evaluation pipeline's own image tensor at the point PAMR is invoked -- for T0_PAMR/T320_PAMR this is DFP's own already-loaded, already-normalized final-resolution image, never a separately re-decoded or re-fetched image"
+image_normalization = "single-pass pipeline normalization (BGR-to-RGB channel reorder via index [2,1,0], then the model's own mean/std as already applied upstream); never re-normalized a second time and never restored to raw 0-255/0-1 pixel values before being passed to PAMR"
+input_score_definition = "the soft (pre-argmax), per-class stitched score tensor at DFP's final ori-resolution canonical domain -- T0 for t0_pamr, T320 for t320_pamr"
+pipeline_insertion_point = "after bilinear upsample of the soft per-class score tensor to the final output resolution, strictly before argmax"
+iterations = 10
+dilations = [1, 2, 4, 8, 12, 24]
+kernel = "3x3_local_affinity_shift_kernel_8_connectivity"
+sigma_or_affinity_parameters = "softmax over the dilation/offset axis of -abs(local_affinity) / (1e-8 + 0.1 * local_stdev); no separate sigma parameter exists in this operator"
+window_or_global_scope = "applied to the complete final-resolution stitched field; never per sliding window"
+resize_and_interpolation = "bilinear, align_corners=true; identity in practice whenever the image and score tensor already share resolution, which holds when applied to DFP's own final-resolution T0/T320 tensors"
+output_resolution = "identical to the input score tensor's resolution (DFP's final ori-resolution canonical domain); PAMR never changes resolution"
+argmax_order = "pamr_before_argmax"
+ignore_handling = "PAMR itself has no ignore-index awareness; ignore handling for T0_PAMR/T320_PAMR confusion statistics follows the same frozen valid-pixel definition (V = GT != ignore_index) already used for every other baseline variant"
+determinism = true
+training_free = true
+selection_provenance = "README.md's own officially-documented ViT-Base COCO-Stuff reproduction command (# COCOStuff section) uses --eval_cfg src/open_vocabulary_segmentation/configs/stuff/dinotext_stuff_vitb_mlp_infonce.yml --eval_base src/open_vocabulary_segmentation/configs/stuff/eval_stuff_pamr.yml; grep -rn \"PAMR(\" across the whole repository confirms exactly one instantiation site (dinotext.py::apply_pamr), hardcoding num_iter=10 and dilations=[1,2,4,8,12,24] independent of which model/dataset config is active, and confirms no YAML anywhere in this repository overrides those two values"
+selection_did_not_use_phase1b_results = true
+same_pamr_parameters_for_both = true
+same_rgb_input_for_both = true
+same_output_geometry_for_both = true
+same_argmax_convention_for_both = true
+pamr_does_not_feed_provenance_features = true
+pamr_is_not_used_to_construct_components = true
+pamr_is_not_used_to_select_disputed_pixels = true
+
+[pamr_variants.causal_comparison]
+t0_t320_remain_the_source_pair_defining_disputes_and_provenance = true
+pamr_does_not_redefine_a_or_b = true
+pamr_does_not_affect_g_k_star_phi_eta_net_components_soft_membership_or_q_w = true
+pamr_variants_are_fixed_rgb_local_boundary_baselines = true
+purpose = "test whether conventional local image refinement (PAMR) explains boundary improvements that provenance also explains, without contaminating the causal T0/T320 provenance chain"
+no_pamr_result_currently_known_for_frozen_500_image_phase1b_run = true
+historical_30_20_value_is_not_a_phase1b_result = true
+
+[gate3_deferred_baselines]
+deferred = ["densecrf", "zoom_and_recrop"]
+reason = "Gate-3 method baselines, not required for the Gate-2 feature-discrimination run"
+
+# ---------------------------------------------------------------------
+# Precision and conservation calibration (Section 20)
+# ---------------------------------------------------------------------
+
+[conservation_calibration]
+required_artifact_relative_path = "phase1b_conservation_calibration.json"
+numeric_tolerance_invented_in_this_protocol = false
+must_be_produced_before_full_phase1b_run = true
+
+[conservation_calibration.procedure]
+window_count = 200
+window_selection_source = "deterministically selected from the frozen 500 images"
+window_selection_namespace = "talk2dino-dfp-phase1b-calibration-window-selection-v1"
+same_gpu_model_required = true
+same_device_type_required = true
+same_propagation_precision_required = true
+canonical_and_masked_propagation_in_same_job_required = true
+accumulation_dtype = "fp64"
+measurement = "stitched-field residual"
+recorded_fields = ["device_version", "software_versions"]
+
+[conservation_calibration.execution_authorization]
+full_phase1b_execution_authorized = false
+requires_calibration_artifact_generated = true
+requires_calibration_artifact_independently_verified = true
+requires_calibration_artifact_bound_into_execution_identity = true
+
+# ---------------------------------------------------------------------
+# Resource ceiling (Section 21)
+# ---------------------------------------------------------------------
+
+[resource_ceiling]
+planning_authority = "gate1_analysis.json compute_projection (bound above by exact SHA-256)"
+relative_projected_cost_vs_one_propagation = 19.831283867160256
+worst_case_projected_peak_bytes = 113860608
+values_reconstructed_from_bound_gate1_analysis_not_hardcoded_rounded = true
+single_gpu_only = true
+multi_gpu_numerical_variation_forbidden = true
+exact_chunking_required = true
+chunk_size_selection = "deterministic memory preflight only"
+peak_allocated_memory_ceiling_fraction_of_physical_gpu_memory = 0.80
+oom_retry_that_silently_changes_scientific_computation_forbidden = true
+checkpoint_after_every_completed_image = true
+resume_must_reproduce_uninterrupted_arrays_exactly = true
+gpu_model_restriction_required_unless_by_calibration_identity = false
+wall_clock_estimates_are_diagnostic_not_gate_values_unless_measured_under_bound_calibration_environment = true
+
+# ---------------------------------------------------------------------
+# Prohibited (mirrors e13's own [prohibited] convention)
+# ---------------------------------------------------------------------
+
+[prohibited]
+list = [
+    "gt_in_component_construction",
+    "gt_in_soft_membership",
+    "gt_in_graph_construction",
+    "gt_in_recurrence",
+    "gt_in_contribution_calculation",
+    "gt_in_feature_extraction",
+    "fitted_diagnostic_model_as_final_selector",
+    "top_k_plus_residual_approximation",
+    "adjoint_approximation_in_primary_implementation",
+    "dense_influence_kernel",
+    "early_stopping",
+    "equilibrium_solver",
+    "k11_counterfactual",
+    "epsilon_in_eta_net_denominator",
+    "epsilon_in_phi",
+    "gini_or_entropy_features_without_successor_authorization",
+    "threshold_loosening_after_seeing_results",
+    "silent_pamr_parameter_choice",
+    "boundary_iou_from_phase1a_sufficient_statistics",
+    "rerunning_phase1a_in_this_task",
+    "masked_propagation_in_this_task",
+    "diagnostic_classifier_result_in_this_task",
+    "real_image_or_gt_access_in_this_task",
+    "real_boundary_iou_computation_in_this_task",
+    "final_selector_in_this_task",
+    "threshold_tuning_in_this_task",
+    "modifying_e13_or_e14_identities",
+    "modifying_phase1a_artifacts",
+    "phase1b_execution_driver_in_this_task",
+    "slurm_launcher_in_this_task",
+    "job_submission_in_this_task",
+    "cuda_initialization_in_this_task",
+]
+
+[future_step_bindings]
+description = "Fields explicitly deferred to later Phase 1B steps, never guessed or invented here."
+next_step_items = [
+    "phase1b_conservation_calibration.json generation and independent verification",
+    "Phase 1B execution driver (masked propagation + provenance computation)",
+    "Phase 1B diagnostic model fitting on real data",
+    "Gate-2 decision on real data",
+    "Gate-3 protocol (if reached)",
+]
