@@ -41,11 +41,30 @@
 #                              bin/activate script (opencv module loaded
 #                              separately, see DFP_OPENCV_MODULE below)
 #   COCO_STUFF_REAL_DATA_ROOT  path to the real COCO-Stuff-164K dataset
-#                              root (consumed directly by the real
-#                              GeometryProvider/ImagePreparer wiring a
-#                              future, authorized change supplies to
-#                              `execute` -- never read or interpreted by
-#                              this script)
+#                              root, consumed by the real production
+#                              dataset/manifest-adapter wiring in
+#                              `src.dfp_phase1b_calibration_production`
+#                              (via the same *_REAL_DATA_ROOT convention
+#                              every other DFP Phase 1A production job
+#                              in this repository already uses) -- never
+#                              read or interpreted by this script itself
+#   TALK2DINO_WEIGHT_DIR       path to the directory holding the real
+#                              DINOv2 backbone and CLIP checkpoint files
+#                              named by the committed E3 identity
+#                              (`evaluation_identities/
+#                              e3_paired_soft_routing.toml`'s
+#                              `[model].backbone_checkpoint_name`/
+#                              `clip_checkpoint_name`) -- read by
+#                              `src.local_weights.DEFAULT_WEIGHT_DIR`
+#                              (falls back to the repository-relative
+#                              "weights" directory, which holds only the
+#                              separate, already hash-pinned E13 bridge
+#                              checkpoint, never the backbone/CLIP
+#                              files) -- see docs/dfp_phase1b_
+#                              calibration_run.md's "Weight resolution"
+#                              section for the full account, including
+#                              why no SHA-256 binding exists for these
+#                              two files in the committed authorities
 #   DFP_CALIBRATION_OUTPUT_ROOT
 #                              scratch output root; this run's
 #                              `phase1b_conservation_calibration.json`
@@ -56,7 +75,8 @@
 #                              E16 authorizes recording this value in the
 #                              artifact but does not freeze it to one
 #                              number; this script never silently
-#                              defaults it
+#                              defaults it, and this launcher does not
+#                              choose one on the operator's behalf
 # Optional environment:
 #   DFP_OPENCV_MODULE          environment-module name to load (default:
 #                              opencv/4.14.0, the module every verified
@@ -79,13 +99,14 @@
 #   export DFP_REPO_ROOT=/path/to/Talk2DINO
 #   export DFP_VENV_ACTIVATE_PATH=/path/to/venv/bin/activate
 #   export COCO_STUFF_REAL_DATA_ROOT=/path/to/coco_stuff164k
+#   export TALK2DINO_WEIGHT_DIR=/path/to/weights
 #   export DFP_CALIBRATION_OUTPUT_ROOT=/path/to/scratch/output
 #   export DFP_CALIBRATION_COMPONENT_CHUNK_SIZE=8
 #   <scheduler submit command> dfp_phase1b_calibration_coco_stuff_200.sbatch
 
 set -euo pipefail
 
-for var in DFP_REPO_ROOT DFP_VENV_ACTIVATE_PATH COCO_STUFF_REAL_DATA_ROOT \
+for var in DFP_REPO_ROOT DFP_VENV_ACTIVATE_PATH COCO_STUFF_REAL_DATA_ROOT TALK2DINO_WEIGHT_DIR \
            DFP_CALIBRATION_OUTPUT_ROOT DFP_CALIBRATION_COMPONENT_CHUNK_SIZE; do
     if [ -z "${!var:-}" ]; then
         echo "FATAL: \$$var is not set in the environment this job was submitted from." >&2

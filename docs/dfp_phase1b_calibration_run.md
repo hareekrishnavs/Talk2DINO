@@ -310,22 +310,77 @@ after the full test run.
    freeze a numeric conservation tolerance from the resulting raw
    residual distribution -- never chosen or implied by this runner.
 
-## Known limitation
+## Production provider wiring
 
 `diagnostics/run_dfp_phase1b_calibration.py`'s `execute` subcommand
-currently raises `DfpPhase1bCalibrationRunError` unconditionally after
-its CUDA-requirement check passes, rather than wiring real dataset/
-model/`InferenceProvider`/`ImagePreparer`/`GeometryProvider`
-implementations from the real Phase 1A execution context. This is
-intentional: this task is not authorized to touch real `/scratch`
-datasets, real checkpoints, or a real CUDA device. All of the
-computation this wiring would call
-(`run_preflight`, `build_candidate_universe`, `select_and_verify`,
-`process_selected_image`, `assemble_calibration_artifact`,
-`install_calibration_artifact`, `real_device_record`,
-`real_software_record`, `build_propagation_precision_record`) already
-exists, is tested, and is ready to be composed by a future change made
-under an authorized GPU allocation -- composing them is the one
-remaining piece of real-execution wiring, deliberately left undone
-here rather than written untested against real infrastructure this
-task cannot access.
+wires real `GeometryProvider`/`ImagePreparer`/`InferenceProvider`
+implementations, in `src/dfp_phase1b_calibration_production.py`, by
+reusing -- never reimplementing -- the exact production entry points
+DFP Phase 1A's own execution driver
+(`src/dfp_phase1a_execute.py::execute_run`) already uses:
+
+- `diagnostics.run_k11_k12_stability._build_dataset_only` /
+  `_build_inference` -- real canonical-dataset and real model/weight
+  construction, called exactly once each per `execute` invocation;
+- `diagnostics.run_k11_k12_stability._extract_prepared_image` -- the
+  canonical mmseg test-pipeline run for one image;
+- `src.dfp_phase1a_dataset_view.build_manifest_execution_view` /
+  `verify_position_identity` -- the frozen-manifest-order -> native-
+  dataset-index adapter that already closed the exact 500-vs-5000
+  positional-index defect this module must not reintroduce.
+
+**Ordering.** `_cmd_execute` runs the exact same `run_preflight` the
+`preflight` subcommand uses -- mode/device/chunk-size validation, E16
+loading, output-path freshness -- entirely before importing
+`src.dfp_phase1b_calibration_production` or any of its heavy (torch/
+mmcv/model/dataset) dependencies. Candidate-universe construction and
+the exact-200 selection (Phase B) run next, using only real image/
+pipeline geometry (`_extract_prepared_image`, discarding each decoded
+tensor immediately after reading its height/width) -- no model has
+been constructed yet, so no model output can influence selection. Only
+after selection completes is the real model built
+(`build_production_inference`) and scientific execution
+(`process_selected_image`, unmodified) run for every image containing
+at least one selected window. Output freshness is re-checked
+immediately before model construction and again immediately before
+the final atomic install, closing the time-of-check-to-time-of-use
+window a real multi-hour run leaves open.
+
+## Weight resolution
+
+Real model construction resolves the DINOv2 backbone and CLIP weights
+via `src.local_weights.DEFAULT_WEIGHT_DIR`
+(`os.environ.get("TALK2DINO_WEIGHT_DIR", "weights")`, read once at
+that module's own import time). Unlike the E13-bound bridge checkpoint
+(`weights/vitb_mlp_infonce_paired_soft_routing_tau010.pth`, hash-pinned
+in `evaluation_identities/e13_dfp_phase1a_artifacts.toml`), the
+committed E3 identity
+(`evaluation_identities/e3_paired_soft_routing.toml`) names the
+backbone/CLIP checkpoint files only by filename
+(`[model].backbone_checkpoint_name`/`clip_checkpoint_name`) -- **no
+SHA-256 binding exists anywhere in the committed authorities for
+either file.** `verify_backbone_weights_present` therefore checks only
+that the named files exist at `TALK2DINO_WEIGHT_DIR`; it never invents
+a digest binding no committed authority defines. The calibration
+launcher requires `TALK2DINO_WEIGHT_DIR` as an explicit environment
+variable (never a hardcoded path) for exactly this reason.
+
+## Synthetic testing versus real execution
+
+`tests/test_dfp_phase1b_calibration_production.py` proves this wiring
+end to end by driving the actual `_cmd_execute` CLI function after a
+real preflight against the real, committed 500-image frozen manifest
+-- only the dataset/model-construction entry points
+(`_build_dataset_only`/`_build_inference`/`_extract_prepared_image`)
+are replaced with small synthetic stand-ins (dependency injection at
+exactly the real/synthetic boundary, never inside the CLI or the
+scientific core). Candidate-universe construction, the exact-200
+selection algorithm, `process_selected_image`, and artifact assembly/
+install/validation all run unmodified. The synthetic fixture uses the
+real, unweakened k=12/T=320/171-class/1024-node production scale for a
+small number of selected windows (a test-only authority override of
+the *window count* only, applied via monkeypatching, restored after
+the test, and never touching the production `WINDOW_COUNT` default)
+so this real computation stays appropriate for a shared login node.
+This implementation has not accessed the real COCO-Stuff dataset, has
+not loaded real weights, and has not initialized CUDA at any point.

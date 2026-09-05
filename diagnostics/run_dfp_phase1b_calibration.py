@@ -17,14 +17,24 @@ execute         Run the full calibration (Phase C) and atomically
                 install ``phase1b_conservation_calibration.json``.
                 Requires ``--device cuda`` (never ``cpu`` -- a CPU run
                 could never be a genuine completed E16 calibration).
+                Wires the real ``src.dfp_phase1b_calibration_
+                production`` provider adapters -- production dataset/
+                model construction, real candidate-universe geometry,
+                exact 200-window selection, and selected-image
+                scientific execution via the already-committed
+                ``process_selected_image`` orchestration.
 verify-artifact Independently re-validate an installed artifact via
                 the committed E16 validator.
 
 Every subcommand except ``execute`` performs no torch import, no CUDA
 initialization, and no real dataset/model access. ``execute`` always
-runs the full preflight first; every torch/model/dataset import in
-this file and in ``src.dfp_phase1b_calibration_run`` is deferred into a
-function body, never at module scope.
+runs the full preflight first, using the SAME ``run_preflight`` the
+``preflight`` subcommand uses; only after that succeeds does it import
+``src.dfp_phase1b_calibration_production`` and its heavy (torch/mmcv/
+model/dataset) dependencies. Every torch/model/dataset import in this
+file, in ``src.dfp_phase1b_calibration_run``, and in ``src.dfp_
+phase1b_calibration_production`` is deferred into a function body,
+never at module scope.
 """
 
 from __future__ import annotations
@@ -94,19 +104,44 @@ def _cmd_preflight(args: argparse.Namespace) -> int:
 
 def _cmd_execute(args: argparse.Namespace) -> int:
     _print_banner("execute")
+    # Steps 1-4 of the mandatory ordering (parse/validate mode, device,
+    # chunk size, output path; load/verify E16; verify bindings and
+    # fresh output state) are exactly `run_preflight` -- called here,
+    # BEFORE the production adapter (and therefore torch/mmcv/model/
+    # dataset) is ever imported. `--device cpu` is rejected before that
+    # call: the committed E16 authority requires device_type='cuda' for
+    # a genuine completed calibration artifact, and this CLI never
+    # provides a --device cpu path that could produce a falsely-final
+    # artifact.
     if args.device != "cuda":
         raise DfpPhase1bCalibrationRunError(
             f"--device {args.device!r} is not authorized -- the committed E16 authority requires "
             "device_type='cuda' for a genuine completed calibration artifact; this runner never provides "
             "a --device cpu execution path that could produce a falsely-final artifact."
         )
-    raise DfpPhase1bCalibrationRunError(
-        "real execution is not implemented by this CLI invocation in this environment: producing a real "
-        "phase1b_conservation_calibration.json requires real dataset access, real model weights, and a "
-        "real CUDA device, none of which this task is authorized to touch. Wire a real GeometryProvider/"
-        "ImagePreparer/InferenceProvider (see src/dfp_phase1b_calibration_run.py's Protocol definitions) "
-        "from the real Phase 1A execution context before running this on an authorized GPU allocation."
+    if type(args.component_chunk_size) is not int or args.component_chunk_size <= 0:
+        raise DfpPhase1bCalibrationRunError("--component-chunk-size must be a positive integer")
+
+    output_path = Path(args.output)
+    run_preflight(output_path=output_path, mode=args.mode, allow_overwrite=args.force, repo_root=args.repo_root)
+    print(f"Preflight PASS -- output {output_path} verified fresh; beginning real execution.")
+
+    # Only now -- after preflight has already fully succeeded -- import
+    # the production adapter and its heavy (torch/mmcv/model/dataset)
+    # dependencies.
+    from src.dfp_phase1b_calibration_production import execute_production_calibration
+
+    result = execute_production_calibration(
+        output_path=output_path, device=args.device, component_chunk_size=args.component_chunk_size,
+        repo_root=args.repo_root, allow_overwrite=args.force,
     )
+    print(
+        f"CALIBRATION COMPLETE: {result['selected_window_count']} selected-window rows installed to "
+        f"{result['output_path']} (complete={result['complete']}, final={result['final']})."
+    )
+    print("This is a raw conservation-residual MEASUREMENT ONLY -- it selects no tolerance and does not")
+    print("authorize the full Phase 1B run.")
+    return 0
 
 
 def _cmd_verify_artifact(args: argparse.Namespace) -> int:
