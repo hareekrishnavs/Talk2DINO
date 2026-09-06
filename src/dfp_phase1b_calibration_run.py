@@ -625,6 +625,56 @@ def _window_final_support_mask(window_index: int, *, pullback_plan: Any, final_r
     return final_indicator.squeeze(0).squeeze(0) > 0
 
 
+def _align_membership_device(membership: Any, reference: Any) -> Any:
+    """Move ``membership`` onto ``reference``'s actual device, ONCE per
+    selected window (called immediately after ``unary_for_query`` is
+    computed, before that window's component-chunk loop begins -- never
+    inside the loop, never per-chunk) -- see ``process_selected_image``.
+
+    Component/membership geometry (``compute_global_unary_components``,
+    ``iter_image_final_soft_memberships``) is computed on CPU/numpy by
+    design (final-resolution component labeling is a CPU operation) and
+    stays that way; it is never the concern here. The real model's own
+    score tensor (``unary_window_scores``, i.e. ``s0``/``unary_for_query``
+    below), however, lives on whatever device inference actually ran on
+    -- CPU in every synthetic test in this repository so far, ``cuda`` on
+    a real GPU job -- and ``build_masked_seed_chunk``'s own strict
+    same-device requirement (``src.dfp_phase1b_masked_forward``, left
+    completely unmodified here) is otherwise violated the instant those
+    two differ, exactly as a real ``execute --device cuda`` job observed.
+
+    Never hardcodes ``.cuda()``/``"cuda:0"`` -- always reads the actual
+    target off ``reference`` itself, so this is correct on CPU, on a
+    single real GPU, and on whichever CUDA device inference actually
+    used. ``Tensor.to(device=...)`` (no ``dtype`` argument) changes
+    nothing but placement -- dtype and values are preserved exactly. A
+    genuine no-op (returns the identical tensor object, no copy) when
+    the device already matches, so every existing CPU-only test's
+    behavior, and every reused frozen function's own downstream
+    computation, is completely unaffected by this alignment.
+
+    A ``RuntimeError`` from the transfer itself (e.g. a real CUDA
+    allocation/copy failure) is translated into this module's own
+    ``DfpPhase1bCalibrationRunError`` -- identifying the tensor, its
+    source device, and the requested target device -- with the original
+    exception preserved as ``__cause__``. Nothing else is caught here:
+    a mismatched-shape/dtype error from ``membership``/``reference``
+    themselves, or any error unrelated to this one ``.to(...)`` call,
+    propagates completely unchanged; ``KeyboardInterrupt``/
+    ``SystemExit``/``MemoryError`` are never subclasses of
+    ``RuntimeError`` and are never caught here either."""
+    if membership.device == reference.device:
+        return membership
+    try:
+        return membership.to(device=reference.device)
+    except RuntimeError as error:
+        raise DfpPhase1bCalibrationRunError(
+            f"membership_rows device alignment failed: could not move membership_rows from "
+            f"{membership.device} to {reference.device} ({reference.device} is unary_window_scores' own "
+            f"device) -- {error}"
+        ) from error
+
+
 def process_selected_image(
     inference: InferenceProvider, prepared: PreparedImage, canonical_id: str, *,
     selected_windows_for_image: Sequence[int], protocol_identity: Mapping[str, Any],
@@ -750,12 +800,23 @@ def process_selected_image(
 
         unary_for_query = s0_full[:, list(query_classes)].to(contracts.masked_forward.propagation_dtype)
 
+        # Masked-forward boundary: membership geometry is CPU-native
+        # (see _align_membership_device's docstring); the real model's
+        # score tensor may not be. Align the FULL window membership
+        # tensor exactly ONCE here, before the component-chunk loop --
+        # never per-chunk -- so a window with many chunks issues exactly
+        # one device transfer. component_ids/final_plan/active_components
+        # above are untouched; build_masked_seed_chunk's own strict
+        # same-device assertion (unmodified) still runs on every chunk,
+        # now against two already-agreeing devices.
+        membership_rows_aligned = _align_membership_device(membership_rows_full, unary_for_query)
+
         seed_by_component_parts = []
         propagated_by_component_parts = []
         chunk_start = 0
         while chunk_start < components.component_count:
             chunk_stop = min(chunk_start + component_chunk_size, components.component_count)
-            membership_slice = membership_rows_full[chunk_start:chunk_stop]
+            membership_slice = membership_rows_aligned[chunk_start:chunk_stop]
             seed = build_masked_seed_chunk(
                 unary_for_query, membership_slice, list(range(chunk_start, chunk_stop)), list(query_classes),
                 contract=contracts.masked_forward, window_index=window_index,

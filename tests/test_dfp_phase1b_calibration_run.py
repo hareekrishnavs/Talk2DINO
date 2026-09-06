@@ -894,6 +894,460 @@ def test_cuda_never_initialized_by_phase_c(real_e13_e15_identities):
 
 
 # ---------------------------------------------------------------------------
+# Section: membership/unary_window_scores device alignment.
+#
+# A real `execute --device cuda` job (SLURM 21196409) failed at the
+# masked-forward boundary with "unary_window_scores device cuda:0
+# disagrees with membership_rows device cpu": `compute_global_unary_
+# components`/`iter_image_final_soft_memberships` are CPU/numpy-based
+# by design, while the real model's own score tensor lives on whatever
+# device inference actually ran on. Every test above ran entirely on
+# CPU (`unary_scores` from `_FakeModel` is always CPU), so this specific
+# cross-device pairing was never exercised until a real GPU job hit it.
+# `_align_membership_device` (`run.py`) closes exactly this gap; the
+# tests below prove it CPU-testably (no-op when devices already match,
+# and that `process_selected_image` actually invokes it at the right
+# boundary with the right tensors) plus, when a real GPU is present,
+# an end-to-end regression reproducing the exact failing scenario.
+# ---------------------------------------------------------------------------
+
+
+def test_align_membership_device_noop_when_already_matching():
+    import torch
+
+    membership = torch.rand(3, 5, dtype=torch.float64)
+    reference = torch.rand(5, 2, dtype=torch.float32)  # same (CPU) device, different shape/dtype entirely
+    result = run._align_membership_device(membership, reference)
+    assert result is membership  # identical object -- no copy, no unnecessary transfer
+    assert result.dtype == torch.float64  # dtype untouched
+    assert torch.equal(result, membership)  # values untouched
+
+
+def test_process_selected_image_invokes_membership_alignment_at_masked_forward_boundary(real_e13_e15_identities, monkeypatch):
+    """CPU-testable instrumentation: without any GPU, confirm the real
+    pipeline actually calls `_align_membership_device` at the masked-
+    forward boundary EXACTLY ONCE PER SELECTED WINDOW (never once per
+    component chunk), always with `reference` being that window's own
+    `unary_for_query`-derived tensor (the real `unary_window_scores`)
+    -- proving the WIRING is correct even though the cross-device MOVE
+    itself can only be exercised with real CUDA (see the CUDA-gated
+    test below). Every window in this fixture is selected, so the
+    expected call count is exactly `n_windows`."""
+    import torch
+
+    e13, e15, repo_root = real_e13_e15_identities
+    contracts = _build_small_contracts(e13, e15, repo_root)
+
+    calls = []
+    real_align = run._align_membership_device
+
+    def spying_align(membership, reference):
+        calls.append((membership.device, reference.device, tuple(membership.shape)))
+        return real_align(membership, reference)
+
+    monkeypatch.setattr(run, "_align_membership_device", spying_align)
+    results, model, n_windows = _run_small_image(
+        contracts, e13, image_h=63, image_w=105, ori_shape=(37, 61), seeds={i: 950 + i for i in range(4)},
+    )
+    assert len(calls) == n_windows, f"expected exactly one alignment call per selected window ({n_windows}), got {len(calls)}"
+    for membership_device, reference_device, _shape in calls:
+        assert membership_device == reference_device == torch.device("cpu")
+    # Sanity: the alignment call did not change the scientific outcome
+    # (every CPU-only correctness assertion elsewhere in this file
+    # already covers the actual residual values for this exact fixture
+    # shape; here we only need confirmation results were still produced).
+    assert results
+
+
+def _instrumented_chunk_run(*, component_chunk_size, selected_windows=None):
+    """Shared instrumentation for the transfer-count regression tests
+    below: real e13/e15 identities, the 63x105/(37,61) fixture (known,
+    from repeated construction, to produce >=37 global components for
+    window 0 with the diversity=True random unary field), spying on
+    both `_align_membership_device` and the real, unmodified
+    `build_masked_seed_chunk` so the alignment-call count can be
+    directly compared against the actual chunk count."""
+    import torch
+
+    from src.dfp_phase1a_identity import load_identity as load_e13_identity
+    from src.dfp_phase1b_identity import load_identity as load_e15_identity
+    import src.dfp_phase1b_masked_forward as masked_forward_module
+
+    e13 = load_e13_identity(repo_root=run.repository_root())
+    e15 = load_e15_identity(repo_root=run.repository_root())
+    contracts = _build_small_contracts(e13, e15, run.repository_root())
+
+    align_calls = []
+    real_align = run._align_membership_device
+
+    def spying_align(membership, reference):
+        align_calls.append(tuple(membership.shape))
+        return real_align(membership, reference)
+
+    chunk_calls = {"n": 0}
+    real_build = masked_forward_module.build_masked_seed_chunk
+
+    def counting_build(unary_window_scores, membership_rows, component_ids, query_class_indices, *, contract, window_index):
+        chunk_calls["n"] += 1
+        return real_build(unary_window_scores, membership_rows, component_ids, query_class_indices, contract=contract, window_index=window_index)
+
+    run._align_membership_device = spying_align
+    run.build_masked_seed_chunk = counting_build
+    masked_forward_module.build_masked_seed_chunk = counting_build
+    try:
+        results, model, n_windows = _run_small_image(
+            contracts, e13, image_h=63, image_w=105, ori_shape=(37, 61), seeds={i: 5000 + i for i in range(4)},
+            component_chunk_size=component_chunk_size, selected_windows=selected_windows,
+        )
+    finally:
+        run._align_membership_device = real_align
+        run.build_masked_seed_chunk = real_build
+        masked_forward_module.build_masked_seed_chunk = real_build
+    return align_calls, chunk_calls["n"], results, n_windows
+
+
+@pytest.mark.parametrize("component_chunk_size", [1, 2, 8, 64, 10_000])
+def test_alignment_call_count_equals_selected_window_count_not_chunk_count(component_chunk_size):
+    """Section 6: one selected window, >=37 global components (this
+    exact fixture is already known, from the module docstring's own
+    small-geometry construction, to produce many components for a
+    diverse random unary field) -- across every chunk size from 1 (>=37
+    chunks) up to one enormous chunk (exactly 1 chunk), the alignment
+    call count must stay exactly 1 (one selected window), never equal
+    to the chunk count except by the trivial coincidence of
+    component_chunk_size >= component_count."""
+    align_calls, n_chunks, results, n_windows = _instrumented_chunk_run(component_chunk_size=component_chunk_size, selected_windows=[0])
+    import math
+    expected_n_chunks = math.ceil(37 / component_chunk_size) if component_chunk_size < 37 else 1
+    assert n_chunks == expected_n_chunks, (
+        f"fixture assumption violated: expected {expected_n_chunks} chunks (37 components / chunk_size="
+        f"{component_chunk_size}), got {n_chunks} -- the global component count for this fixture may have changed"
+    )
+    assert len(align_calls) == 1, (
+        f"chunk_size={component_chunk_size}: expected exactly 1 alignment call (one per selected window), "
+        f"got {len(align_calls)} (chunk count was {n_chunks})"
+    )
+    assert results[0]  # the selected window actually produced a result
+
+
+def test_alignment_call_count_multiple_selected_and_unselected_windows():
+    """Section 7: multiple selected windows (different component/chunk
+    counts each, since components are global to the image but chunking
+    is per-window-independent), plus at least one unselected canonical-
+    only window. Exactly one alignment call per selected window; zero
+    for the unselected window; canonical processing (graph/trajectory)
+    still runs for every window regardless of selection."""
+    align_calls, n_chunks, results, n_windows = _instrumented_chunk_run(component_chunk_size=1, selected_windows=[0, 1])
+    assert n_windows >= 3, "need at least one additional unselected window"
+    assert len(align_calls) == 2, f"expected exactly 2 alignment calls (2 selected windows), got {len(align_calls)}"
+    assert set(results.keys()) == {0, 1}
+
+
+class _RaisingOnTo:
+    """A membership-tensor-shaped double whose `.to(...)` always raises
+    a specific, uniquely identifiable RuntimeError instance -- so a
+    test can assert `__cause__ is exactly this object`, never merely
+    "some RuntimeError"."""
+
+    def __init__(self, real_tensor, error):
+        self._real = real_tensor
+        self._error = error
+        self.to_call_count = 0
+
+    @property
+    def device(self):
+        return self._real.device
+
+    @property
+    def dtype(self):
+        return self._real.dtype
+
+    @property
+    def shape(self):
+        return self._real.shape
+
+    def to(self, *args, **kwargs):
+        self.to_call_count += 1
+        raise self._error
+
+
+def test_align_membership_device_translates_runtime_error_from_transfer_only():
+    """Section 5/11: only the `.to(...)` operation's RuntimeError is
+    translated -- into this module's own DfpPhase1bCalibrationRunError,
+    naming both devices and identifying membership_rows, with the
+    original exception preserved exactly as `__cause__`."""
+    import torch
+
+    injected = RuntimeError("simulated CUDA allocation/transfer failure")
+    real_membership = torch.zeros(2, 3, dtype=torch.float64)
+    membership_double = _RaisingOnTo(real_membership, injected)
+    reference = torch.zeros(3).to("meta")  # distinct device -- forces the .to(...) branch, never the no-op
+
+    with pytest.raises(run.DfpPhase1bCalibrationRunError) as excinfo:
+        run._align_membership_device(membership_double, reference)
+
+    message = str(excinfo.value)
+    assert "membership_rows" in message
+    assert "cpu" in message.lower()
+    assert "meta" in message.lower()
+    assert excinfo.value.__cause__ is injected  # exact original exception preserved, not a copy/re-wrap
+    assert membership_double.to_call_count == 1
+
+
+def test_align_membership_device_does_not_translate_when_devices_already_match():
+    """The no-op (same-device) branch never calls `.to` at all, so a
+    membership double that would raise on `.to` is never even touched
+    when alignment was never needed."""
+    import torch
+
+    injected = RuntimeError("must never be reached")
+    real_membership = torch.zeros(2, 3, dtype=torch.float64)
+    membership_double = _RaisingOnTo(real_membership, injected)
+    reference = torch.zeros(3, dtype=torch.float32)  # same (cpu) device
+
+    result = run._align_membership_device(membership_double, reference)
+    assert result is membership_double
+    assert membership_double.to_call_count == 0
+
+
+@pytest.mark.parametrize("exc_type", [KeyboardInterrupt, SystemExit, MemoryError])
+def test_align_membership_device_never_catches_fatal_exceptions(exc_type):
+    """Section 12: KeyboardInterrupt/SystemExit/MemoryError raised by
+    the transfer itself must propagate completely uncaught and
+    unwrapped -- never translated into DfpPhase1bCalibrationRunError,
+    since none of them is a RuntimeError and the translation is scoped
+    to exactly one `except RuntimeError` clause."""
+    import torch
+
+    class _FatalRaisingOnTo(_RaisingOnTo):
+        def to(self, *args, **kwargs):
+            raise self._error
+
+    real_membership = torch.zeros(2, 3, dtype=torch.float64)
+    membership_double = _FatalRaisingOnTo(real_membership, exc_type("must propagate"))
+    reference = torch.zeros(3).to("meta")
+
+    with pytest.raises(exc_type):
+        run._align_membership_device(membership_double, reference)
+
+
+def test_align_membership_device_does_not_swallow_unrelated_runtime_error_from_elsewhere():
+    """Section 13: a RuntimeError raised by a DIFFERENT operation (here,
+    a mocked masked-propagation call happening strictly after a
+    successful alignment) must propagate completely unchanged -- never
+    caught, translated, or misattributed as a membership-transfer
+    failure by `_align_membership_device`'s own narrow `except
+    RuntimeError` (which is scoped to its own `.to(...)` call only, and
+    is not even on the call stack once alignment has already returned)."""
+    import torch
+    import src.dfp_phase1b_masked_forward as masked_forward_module
+
+    from src.dfp_phase1a_identity import load_identity as load_e13_identity
+    from src.dfp_phase1b_identity import load_identity as load_e15_identity
+
+    e13 = load_e13_identity(repo_root=run.repository_root())
+    e15 = load_e15_identity(repo_root=run.repository_root())
+    contracts = _build_small_contracts(e13, e15, run.repository_root())
+
+    class _UnrelatedRuntimeError(RuntimeError):
+        pass
+
+    real_propagate = masked_forward_module.propagate_masked_seed_chunk
+
+    def raising_propagate(graph, seed, *, contract):
+        raise _UnrelatedRuntimeError("unrelated failure in propagate_masked_seed_chunk, not a device transfer")
+
+    masked_forward_module.propagate_masked_seed_chunk = raising_propagate
+    try:
+        with pytest.raises(_UnrelatedRuntimeError) as excinfo:
+            _run_small_image(contracts, e13, image_h=63, image_w=105, ori_shape=(37, 61), seeds={i: 5100 + i for i in range(4)})
+        # Must be the exact original, never wrapped in DfpPhase1bCalibrationRunError.
+        assert not isinstance(excinfo.value, run.DfpPhase1bCalibrationRunError)
+        assert "membership" not in str(excinfo.value).lower()
+    finally:
+        masked_forward_module.propagate_masked_seed_chunk = real_propagate
+
+
+def test_masked_seed_independent_reconstruction_matches_hoisted_production_path():
+    """Section 9: independently reconstruct
+    masked_seed[r,j,c] = membership[r,j] * unary[j,c] (the docstring's
+    own stated formula, never importing the internal implementation),
+    and compare it against the REAL, POST-HOIST production path (the
+    single once-per-window `_align_membership_device` call feeding a
+    chunked `build_masked_seed_chunk` loop) -- both single-chunk and
+    multi-chunk ('more components than one chunk'), requiring exact
+    (FP64) agreement, and confirming chunking invariance."""
+    import torch
+
+    from src.dfp_phase1a_identity import load_identity as load_e13_identity
+    from src.dfp_phase1b_identity import load_identity as load_e15_identity
+    from src.dfp_phase1b_masked_forward import build_masked_seed_chunk, dfp_masked_forward_contract_from_protocol
+
+    e13 = load_e13_identity(repo_root=run.repository_root())
+    e15 = load_e15_identity(repo_root=run.repository_root())
+    contract = dfp_masked_forward_contract_from_protocol(e13, e15)
+    assert contract.accumulation_dtype == torch.float64
+
+    node_count, component_count, query_class_count = 9, 5, 4
+    g = torch.Generator().manual_seed(4242)
+    membership_full = torch.stack([
+        torch.zeros(node_count, dtype=torch.float32),
+        torch.full((node_count,), 0.5, dtype=torch.float32),
+        torch.rand(node_count, generator=g, dtype=torch.float32),
+        torch.full((node_count,), 0.5, dtype=torch.float32),  # repeated row
+        torch.tensor([1.0, 0.0, 0.25, 0.75, 0.0, 1.0, 0.5, 0.5, 0.0]),
+    ])
+    unary = torch.rand(node_count, query_class_count, generator=g, dtype=torch.float64) * 4 - 2  # signed
+    query_classes = list(range(query_class_count))
+
+    def independent_masked_seed(membership_rows, unary_window_scores):
+        R, N = membership_rows.shape
+        out = torch.zeros(N, R, query_class_count, dtype=torch.float64)
+        for r in range(R):
+            for j in range(N):
+                for c in range(query_class_count):
+                    out[j, r, c] = float(membership_rows[r, j]) * float(unary_window_scores[j, c])
+        return out
+
+    expected = independent_masked_seed(membership_full, unary)
+
+    # Single chunk, through the real (hoisted) alignment call.
+    aligned = run._align_membership_device(membership_full, unary)
+    chunk = build_masked_seed_chunk(unary, aligned, list(range(component_count)), query_classes, contract=contract, window_index=0)
+    actual_single = chunk.unflatten(chunk.seed_flat).to(torch.float64)
+    assert torch.equal(actual_single, expected)
+
+    # Multiple chunks (more components than one chunk), aligned exactly
+    # once for the whole window, then sliced per chunk -- exactly the
+    # production ordering after the Finding-A repair.
+    chunk_size = 2
+    assert component_count > chunk_size
+    aligned_once = run._align_membership_device(membership_full, unary)
+    parts = []
+    start = 0
+    while start < component_count:
+        stop = min(start + chunk_size, component_count)
+        c = build_masked_seed_chunk(unary, aligned_once[start:stop], list(range(start, stop)), query_classes, contract=contract, window_index=0)
+        parts.append(c.unflatten(c.seed_flat))
+        start = stop
+    reassembled = torch.cat(parts, dim=1).to(torch.float64)
+    assert torch.equal(reassembled, expected)
+    assert torch.equal(reassembled, actual_single)  # chunking invariance
+
+
+def test_bypassed_alignment_still_rejected_by_frozen_device_assertion():
+    """Section 10: with alignment adversarially bypassed (a membership
+    tensor deliberately left on a device that disagrees with the
+    reference), the frozen masked-forward core's own strict
+    same-device assertion must still reject -- confirming the
+    invariant was made satisfiable by the repair, never removed or
+    weakened. `meta` stands in for a real non-cpu device (no CUDA is
+    available in this test environment)."""
+    import torch
+
+    from src.dfp_phase1a_identity import load_identity as load_e13_identity
+    from src.dfp_phase1b_identity import load_identity as load_e15_identity
+    from src.dfp_phase1b_masked_forward import build_masked_seed_chunk, dfp_masked_forward_contract_from_protocol
+
+    e13 = load_e13_identity(repo_root=run.repository_root())
+    e15 = load_e15_identity(repo_root=run.repository_root())
+    contract = dfp_masked_forward_contract_from_protocol(e13, e15)
+
+    unary = torch.zeros(4, 2, dtype=contract.propagation_dtype).to("meta")
+    membership_wrong_device = torch.zeros(2, 4, dtype=torch.float64)  # deliberately NOT aligned (still cpu)
+    with pytest.raises(Exception) as excinfo:
+        build_masked_seed_chunk(unary, membership_wrong_device, [0, 1], [0, 1], contract=contract, window_index=0)
+    msg = str(excinfo.value).lower()
+    assert "device" in msg or "meta" in msg or "cpu" in msg
+
+
+def test_align_membership_device_moves_and_preserves_values_and_dtype():
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+
+    membership_cpu = torch.rand(4, 7, dtype=torch.float64)
+    reference_cuda = torch.zeros(7, 3, dtype=torch.float32, device="cuda")
+
+    moved = run._align_membership_device(membership_cpu, reference_cuda)
+
+    assert moved.device == reference_cuda.device  # matches the SCORE tensor's actual device, not a hardcoded "cuda:0"
+    assert moved.dtype == membership_cpu.dtype  # dtype preserved exactly -- only placement changed
+    assert torch.equal(moved.cpu(), membership_cpu)  # values preserved exactly
+    assert reference_cuda.device.type == "cuda"  # the reference (score) tensor itself was never touched/copied
+
+
+def test_end_to_end_synthetic_image_with_cuda_resident_scores_matches_cpu(real_e13_e15_identities):
+    """Regression test for SLURM job 21196409's real failure: a
+    synthetic model whose `unary_scores`/`dino_features` are CUDA-
+    resident (exactly mirroring what a real GPU inference call
+    produces), while `compute_global_unary_components`/`iter_image_
+    final_soft_memberships` still run on CPU/numpy underneath,
+    completely unchanged. Before the fix this raised
+    `unary_window_scores device cuda:0 disagrees with membership_rows
+    device cpu`; after it, results must exist and must numerically
+    match (to floating-point machine precision) an identical run where
+    every tensor stays on CPU -- the device alignment must never change
+    the scientific outcome, only where the arithmetic happens."""
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+
+    e13, e15, repo_root = real_e13_e15_identities
+    contracts = _build_small_contracts(e13, e15, repo_root)
+    seeds = {i: 960 + i for i in range(4)}
+
+    class _DeviceFakeSnapshot:
+        def __init__(self, unary_scores, dino_features):
+            self.unary_scores = [unary_scores]
+            self.dino_features = [dino_features]
+
+    class _DeviceFakeModel:
+        def __init__(self, per_window_data, device):
+            self.per_window_data = per_window_data
+            self.device = device
+            self.call_count = 0
+
+        def generate_patch_snapshot(self, crop, text_embedding):
+            idx = self.call_count
+            self.call_count += 1
+            unary, features = self.per_window_data[idx]
+            target = torch.device(self.device) if self.device is not None else unary.device
+            return _DeviceFakeSnapshot(unary.to(target), features.to(target))
+
+    def _run(device):
+        from src.dfp_phase1a_stitching_pullback import build_stitching_pullback_plan
+
+        pullback_plan = build_stitching_pullback_plan((63, 105), contract=contracts.pullback)
+        n_windows = len(pullback_plan.plan.windows)
+        per_window_data = {i: _make_window_unary_features(seed=seeds[i]) for i in range(n_windows)}
+        model = _DeviceFakeModel(per_window_data, device=device)
+        inference = _FakeInference(model)
+        image_tensor = torch.zeros(1, 3, 63, 105)
+        prepared = run.PreparedImage(image_tensor=image_tensor, inference_height=63, inference_width=105, ori_shape=(37, 61))
+        return run.process_selected_image(
+            inference, prepared, "000000000001", selected_windows_for_image=list(range(n_windows)),
+            protocol_identity=e13, contracts=contracts, class_count=_CLASS_COUNT,
+            affinity_power=float(e13["graph"]["affinity_power"]), component_chunk_size=2,
+        )
+
+    results_cpu = _run(None)
+    results_cuda = _run("cuda")
+
+    assert results_cuda.keys() == results_cpu.keys()
+    for window_index in results_cpu:
+        for family in ("rho_M", "rho_0", "rho_320", "rho_g"):
+            cpu_summary, cuda_summary = results_cpu[window_index][family], results_cuda[window_index][family]
+            assert cpu_summary["sample_count"] == cuda_summary["sample_count"]
+            if cpu_summary["sample_count"] > 0:
+                assert cuda_summary["mean_absolute_residual"] == pytest.approx(cpu_summary["mean_absolute_residual"], abs=1e-9)
+                assert cuda_summary["maximum_absolute_residual"] == pytest.approx(cpu_summary["maximum_absolute_residual"], abs=1e-9)
+                assert cuda_summary["non_finite_count"] == 0
+
+
+# ---------------------------------------------------------------------------
 # Section: CLI.
 # ---------------------------------------------------------------------------
 
