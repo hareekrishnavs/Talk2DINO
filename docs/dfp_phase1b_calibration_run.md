@@ -182,12 +182,90 @@ requirement. No autocast, no mixed precision, anywhere.
 
 ## Chunk-size handling
 
-`component_chunk_size` only changes how many global components are
-processed per `build_masked_seed_chunk`/`propagate_masked_seed_chunk`
-call -- never the output. `tests/test_dfp_phase1b_calibration_run.py::test_end_to_end_chunk_size_invariance`
-confirms identical per-window sample counts and mean-absolute-residual
-values across chunk sizes 1, 2, and "one chunk covers everything" on
-the same synthetic image.
+`component_chunk_size` bounds host-RAM use for BOTH stages of the
+per-window pipeline -- the masked recurrence
+(`build_masked_seed_chunk`/`propagate_masked_seed_chunk`) and the
+masked-numerator stitching (`stitch_and_rescale_component_scores`) --
+never the output. A real GPU job (21216898, 2026-09-06) was killed by
+the kernel OOM-killer (`MaxRSS≈83.9GB` of an 80G request) because the
+stitching stage, unlike recurrence, was still invoking the unmodified,
+protected `stitch_and_rescale_component_scores` exactly once per
+window with `component_count=components.component_count` (the FULL
+image total, independent of `component_chunk_size`); that function's
+own FP64, CPU-only accumulator is shaped
+`[1, component_count * len(query_class_union), height, width]`, so a
+real COCO-Stuff image's component count (observed up to 647) drove the
+allocation far past 80G at real inference resolution.
+
+The fix reuses the SAME chunk boundaries `build_masked_seed_chunk`/
+`propagate_masked_seed_chunk` already compute: `stitch_and_rescale_
+component_scores` and `compute_signed_contributions` (both unmodified,
+protected functions -- see their own docstrings, which already
+document a single-chunk contract) are now called once PER component
+chunk, with `component_count=` that chunk's own size, never the
+image's full component count unless it already fits in one chunk. The
+resulting small `SignedContributionChunk` objects (never the large,
+image-resolution stitched tensors) are recombined in ascending global
+component-id order -- contiguous, non-overlapping, covering
+`[0, components.component_count)` exactly once -- before calling the
+unmodified `compute_signed_margin_conservation_residual` a single time
+on the reassembled matrix. `rho_0`/`rho_320`'s own reconstruction
+residual functions have no chunked variant and require the full
+`[component_count, node_count, query_class_count]` tensor; that tensor
+is bounded by `node_count` (not inference-resolution height*width), is
+not the OOM-causing allocation, and is unchanged by this repair.
+
+`tests/test_dfp_phase1b_calibration_run.py::test_end_to_end_chunk_size_invariance`
+and `::test_repaired_runner_matches_old_style_full_component_reference`
+confirm identical per-window sample counts and residual values across
+chunk sizes spanning far below, at, and above a fixture's own component
+count; `::test_allocation_bound_scales_with_chunk_size_not_total_component_count`
+confirms the accumulator allocation this repair targets actually scales
+with `component_chunk_size`, never with the image's total component
+count. This repair changes memory and runtime characteristics only --
+no residual formula, tolerance, window selection, or component/query-
+class ordering changes. **No real GPU execution of this repair has
+occurred**; the OOM is not confirmed fixed on real hardware until a
+future authorized run on real COCO-Stuff-500 data succeeds.
+
+Before the per-chunk `SignedContributionChunk` results are concatenated,
+`process_selected_image` also validates that each chunk's `values`
+tensor is rank-2, has a positive component-axis width, and that width
+agrees EXACTLY with the chunk's own declared
+`component_id_stop - component_id_start` (and with its `component_count`
+property, when present) -- narrower, wider, or zero-width `values` for a
+declared nonempty range raises `DfpPhase1bCalibrationRunError` naming
+the chunk's range and the expected-versus-observed widths, before
+concatenation and before `compute_signed_margin_conservation_residual`
+is ever reached. This is a defensive integrity check on top of the
+existing range-coverage/disputed-pixel-order validation above -- it
+never infers a component count from a malformed tensor and adjusts
+metadata to match. See
+`tests/test_dfp_phase1b_calibration_run.py::test_signed_contribution_chunk_width_mismatch_rejected`
+and its neighboring tests (first/middle/final/single/partial-chunk
+corruption, correct-width control, pre-residual ordering, no-artifact,
+fatal-exception propagation).
+
+### Scientific invariance versus the operator's production choice
+
+`component_chunk_size` is a pure memory/runtime knob: the streamed
+implementation above is mathematically exact for ANY positive integer
+value (proven bit-identical to the former full-component computation
+across a wide chunk-size sweep, see above) -- the scientific code never
+hard-codes a specific chunk size, and none should ever be added to it.
+Which value an operator actually passes to `execute
+--component-chunk-size N` for a real production run is a separate,
+purely operational decision, informed by the independent re-verification
+of this repair: at `component_chunk_size=64` (the value job 21216898
+used), the accumulator this repair bounds is not unconditionally safe
+under a real image's worst-case component count and query-class-union
+width, even though the full-component allocation that caused that job's
+OOM is eliminated. Pending a fresh authorized run, **the next production
+`execute` should use `--component-chunk-size 16`**, keeping host memory
+at **80G** and mode **fresh** -- this is an operator/launcher parameter
+choice for the next job submission, not a change to this module. As
+above, **no real GPU execution has occurred**; nothing here claims the
+OOM is fixed on real production hardware until that future run succeeds.
 
 ## Zero-sample behavior
 

@@ -1571,52 +1571,101 @@ def test_exact_failure_reproduction_without_alignment_then_success_with_it(real_
     assert torch.isfinite(s0).all() and torch.isfinite(sf).all()
 
 
-def test_stitching_alignment_call_count_invariant_to_chunk_size(real_e13_e15_identities, monkeypatch):
-    """Section 3/6: for a fixed image, _align_tensor_to_stitching_plan_device
-    must be called exactly 4 times per selected window (seed_by_component,
-    propagated_by_component, canonical_t0_full, canonical_tfinal_full),
-    regardless of component_chunk_size -- never once per component,
-    chunk, or recurrence step."""
-    e13, e15, repo_root = real_e13_e15_identities
-    contracts = _build_small_contracts(e13, e15, repo_root)
+def _instrumented_stitching_align_run(*, component_chunk_size, selected_windows, seed_base):
+    """Shared instrumentation for the corrected (repair D) stitching-
+    alignment call-count tests below: counts real `build_masked_seed_
+    chunk` calls per window (== that window's masked component-chunk
+    count, since it is called exactly once per chunk both before and
+    after this repair) alongside real `_align_tensor_to_stitching_plan_
+    device` calls, in one single run so both counts are guaranteed
+    consistent with each other and with `results`."""
+    import src.dfp_phase1b_masked_forward as masked_forward_module
 
-    calls = []
+    e13 = __import__("src.dfp_phase1a_identity", fromlist=["load_identity"]).load_identity(repo_root=run.repository_root())
+    e15 = __import__("src.dfp_phase1b_identity", fromlist=["load_identity"]).load_identity(repo_root=run.repository_root())
+    contracts = _build_small_contracts(e13, e15, run.repository_root())
+
+    align_calls = []
     real_align = run._align_tensor_to_stitching_plan_device
 
     def spying_align(tensor, plan):
-        calls.append(tuple(tensor.shape))
+        align_calls.append(tuple(tensor.shape))
         return real_align(tensor, plan)
 
-    monkeypatch.setattr(run, "_align_tensor_to_stitching_plan_device", spying_align)
+    build_calls_by_window: dict[int, int] = {}
+    real_build = masked_forward_module.build_masked_seed_chunk
 
-    for chunk_size in (1, 2, 8, 16, 37, 64):
-        calls.clear()
-        _run_small_image(
-            contracts, e13, image_h=63, image_w=105, ori_shape=(37, 61), seeds={i: 7000 + i for i in range(4)},
-            component_chunk_size=chunk_size, selected_windows=[0],
+    def counting_build(unary_window_scores, membership_rows, component_ids, query_class_indices, *, contract, window_index):
+        build_calls_by_window[window_index] = build_calls_by_window.get(window_index, 0) + 1
+        return real_build(unary_window_scores, membership_rows, component_ids, query_class_indices, contract=contract, window_index=window_index)
+
+    run._align_tensor_to_stitching_plan_device = spying_align
+    run.build_masked_seed_chunk = counting_build
+    masked_forward_module.build_masked_seed_chunk = counting_build
+    try:
+        results, model, n_windows = _run_small_image(
+            contracts, e13, image_h=63, image_w=105, ori_shape=(37, 61), seeds={i: seed_base + i for i in range(4)},
+            component_chunk_size=component_chunk_size, selected_windows=selected_windows,
         )
-        assert len(calls) == 4, f"chunk_size={chunk_size}: expected exactly 4 stitching-alignment calls (one selected window), got {len(calls)}"
+    finally:
+        run._align_tensor_to_stitching_plan_device = real_align
+        run.build_masked_seed_chunk = real_build
+        masked_forward_module.build_masked_seed_chunk = real_build
+    return align_calls, build_calls_by_window, results, n_windows
 
 
-def test_stitching_alignment_multiple_windows_call_count(real_e13_e15_identities, monkeypatch):
-    e13, e15, repo_root = real_e13_e15_identities
-    contracts = _build_small_contracts(e13, e15, repo_root)
-
-    calls = []
-    real_align = run._align_tensor_to_stitching_plan_device
-
-    def spying_align(tensor, plan):
-        calls.append(1)
-        return real_align(tensor, plan)
-
-    monkeypatch.setattr(run, "_align_tensor_to_stitching_plan_device", spying_align)
-    results, model, n_windows = _run_small_image(
-        contracts, e13, image_h=63, image_w=105, ori_shape=(37, 61), seeds={i: 7100 + i for i in range(4)},
-        component_chunk_size=1, selected_windows=[0, 1],
+@pytest.mark.parametrize("component_chunk_size", [1, 2, 8, 16, 37, 64])
+def test_stitching_alignment_call_count_scales_with_chunk_count(component_chunk_size):
+    """Section 7 (repair D correction): after eliminating the full-
+    component stitched allocation, there is no longer a single full-
+    component CPU copy to align once per window -- the OLD assertion of
+    "exactly 4 calls per selected window regardless of chunk size" is
+    therefore WRONG post-repair and must not be preserved. The correct
+    contract: exactly 2 calls for the window-scoped CANONICAL numerator
+    (its own t0/t_final; always component_count=1, never chunked, so
+    this part is unaffected by chunk_size) plus, ONLY when the window
+    has at least one disputed pixel, exactly 2 calls per MASKED
+    component chunk (this chunk's own t0/t_final) -- never once per
+    component, never once per recurrence step, and never a single call
+    sized by the full component_count."""
+    align_calls, build_calls_by_window, results, _ = _instrumented_stitching_align_run(
+        component_chunk_size=component_chunk_size, selected_windows=[0], seed_base=7000,
     )
-    assert n_windows >= 3
-    assert len(calls) == 4 * 2, f"expected 4 calls per selected window x 2 selected windows, got {len(calls)}"
+    n_chunks = build_calls_by_window[0]
+    has_disputed = results[0]["rho_g"]["sample_count"] > 0
+    expected_calls = 2 + (2 * n_chunks if has_disputed else 0)
+    assert len(align_calls) == expected_calls, (
+        f"chunk_size={component_chunk_size}: expected {expected_calls} stitching-alignment calls "
+        f"(2 canonical + 2*{n_chunks if has_disputed else 0} masked chunks; has_disputed={has_disputed}, "
+        f"n_chunks={n_chunks}), got {len(align_calls)}"
+    )
+    # Never the old, now-incorrect fixed count of 4 unless it happens to
+    # coincide (n_chunks == 1 and has_disputed) -- explicitly confirm the
+    # count actually MOVES with chunk count for a chunk_size small enough
+    # to produce more than one chunk.
+    if n_chunks > 1 and has_disputed:
+        assert expected_calls != 4
+
+
+def test_stitching_alignment_multiple_windows_call_count():
+    """Multiple selected windows, plus at least one unselected canonical-
+    only window: each selected window's own stitching-alignment call
+    count independently follows the corrected per-chunk contract above
+    (2 canonical + 2 per masked chunk when that window has disputed
+    pixels), summed across the selected windows."""
+    align_calls, build_calls_by_window, results, n_windows = _instrumented_stitching_align_run(
+        component_chunk_size=1, selected_windows=[0, 1], seed_base=7100,
+    )
+    assert n_windows >= 3, "need at least one additional unselected window"
     assert set(results.keys()) == {0, 1}
+    expected_total = 0
+    for window_index in (0, 1):
+        n_chunks = build_calls_by_window[window_index]
+        has_disputed = results[window_index]["rho_g"]["sample_count"] > 0
+        expected_total += 2 + (2 * n_chunks if has_disputed else 0)
+    assert len(align_calls) == expected_total, (
+        f"expected {expected_total} stitching-alignment calls across 2 selected windows, got {len(align_calls)}"
+    )
 
 
 def test_unrelated_runtime_error_downstream_of_stitching_alignment_not_mislabeled(real_e13_e15_identities):
@@ -2039,3 +2088,836 @@ def test_install_calibration_artifact_reconciles_ambiguous_success(tmp_path, rea
     run.install_calibration_artifact(document, destination)
     assert destination.read_text(encoding="utf-8") == serialized
     assert list(tmp_path.glob("*.tmp")) == []
+
+
+# ---------------------------------------------------------------------------
+# Repair D (per-component-chunk stitching, job 21216898 OOM): independent
+# equivalence, allocation-bound, retention, and call-count tests.
+# ---------------------------------------------------------------------------
+
+
+def _reference_process_selected_image_full_component(
+    inference, prepared, canonical_id, *, selected_windows_for_image, protocol_identity,
+    contracts, class_count, affinity_power, component_chunk_size,
+):
+    """Old-style, PRE-repair-D reference: byte-for-byte the same
+    orchestration `run.process_selected_image` used before this repair
+    (still chunking `build_masked_seed_chunk`/`propagate_masked_seed_chunk`
+    for rho_0/rho_320, exactly as production does), but for rho_g issues
+    exactly ONE `stitch_and_rescale_component_scores` call per selected
+    window with `component_count=components.component_count` (the FULL
+    image total) -- the defect this repair fixes. Built ONLY from
+    unmodified, protected functions/dataclasses (never a reimplemented
+    formula) so it is a genuine independent oracle, not a restatement of
+    the repaired code."""
+    import numpy as np
+    import torch
+
+    from src.dfp_phase1a_analysis import derive_horizon_labels
+    from src.dfp_phase1a_final_rescale_pullback import (
+        apply_final_rescale_forward, build_final_stitching_pullback_plan, iter_image_final_soft_memberships,
+    )
+    from src.dfp_phase1a_global_unary_components import compute_global_unary_components
+    from src.dfp_phase1a_horizon_stitching import WindowHorizonCaptures, stitch_dfp_phase1a_horizons
+    from src.dfp_phase1a_stitching_pullback import build_stitching_pullback_plan
+    from src.dfp_phase1b_masked_forward import (
+        PropagatedChunk, build_masked_seed_chunk, compute_membership_partition_residual,
+        compute_propagated_reconstruction_residual, compute_seed_reconstruction_residual,
+        compute_signed_contributions, compute_signed_margin_conservation_residual, propagate_masked_seed_chunk,
+        stitch_and_rescale_component_scores,
+    )
+
+    selected_set = set(selected_windows_for_image)
+    image_tensor = prepared.image_tensor
+    img_shape = (prepared.inference_height, prepared.inference_width)
+    ori_shape = prepared.ori_shape
+    ori_height, ori_width = ori_shape
+
+    pullback_plan = build_stitching_pullback_plan(img_shape, contract=contracts.pullback)
+
+    window_results = {}
+    window_captures = []
+    for window in pullback_plan.plan.windows:
+        result = run._process_one_window_for_calibration(
+            inference, image_tensor, window, protocol_identity=protocol_identity,
+            affinity_power=affinity_power, class_count=class_count, retain_graph=window.index in selected_set,
+        )
+        window_results[window.index] = result
+        window_captures.append(WindowHorizonCaptures(window_index=window.index, captures=result.trace.snapshots))
+
+    stitched_inf = stitch_dfp_phase1a_horizons(
+        pullback_plan.plan, tuple(window_captures), contract=contracts.stitching, class_count=class_count,
+    )
+    scores_final = {}
+    for horizon, tensor in stitched_inf.items():
+        rescaled = apply_final_rescale_forward(tensor, img_shape=img_shape, ori_shape=ori_shape, contract=contracts.final_resolution)
+        scores_final[horizon] = rescaled.squeeze(0).detach()
+
+    labels = derive_horizon_labels({h: t.cpu().numpy() for h, t in scores_final.items()})
+    a_labels = labels[0]
+    b_labels = labels[contracts.recurrence.steps]
+    dispute_mask_np = a_labels != b_labels
+    dispute_mask_t = torch.from_numpy(dispute_mask_np)
+
+    components = compute_global_unary_components(
+        scores_final[0].cpu().numpy(), contract=contracts.component, class_count=class_count,
+    )
+    final_plan = build_final_stitching_pullback_plan(
+        pullback_plan, img_shape=img_shape, ori_shape=ori_shape, contract=contracts.final_resolution,
+    )
+
+    active_components_by_window = {w.index: set() for w in pullback_plan.plan.windows}
+    membership_chunks = {}
+    for start, chunk in iter_image_final_soft_memberships(
+        components.component_ids, components.component_count, final_plan=final_plan, component_chunk_size=component_chunk_size,
+    ):
+        for window_index, membership in chunk.items():
+            for offset, is_positive in enumerate((membership > 0).any(dim=1).tolist()):
+                if is_positive:
+                    active_components_by_window[window_index].add(start + offset)
+            if window_index in selected_set:
+                membership_chunks.setdefault(window_index, {})[(start, start + membership.shape[0])] = membership
+
+    disputed_component_ids = components.component_ids[dispute_mask_np]
+    disputed_b_values = b_labels[dispute_mask_np]
+    component_b_value_sets = {}
+    for cid, bval in zip(disputed_component_ids.tolist(), disputed_b_values.tolist()):
+        component_b_value_sets.setdefault(cid, set()).add(bval)
+
+    results = {}
+    for window_index in sorted(selected_set):
+        window_result = window_results[window_index]
+        graph = window_result.graph
+        s0_full = window_result.unary_scores
+
+        active_components = tuple(sorted(active_components_by_window.get(window_index, ())))
+        query_class_set = set()
+        for component_id in active_components:
+            query_class_set.add(int(components.component_class_indices[component_id]))
+            query_class_set.update(component_b_value_sets.get(component_id, ()))
+        query_classes = tuple(sorted(query_class_set))
+
+        family_summaries = {}
+        if not query_classes or not active_components or window_index not in membership_chunks:
+            for family in run.RESIDUAL_FAMILIES:
+                family_summaries[family] = run.summarize_residual_tensor(torch.zeros(0, dtype=torch.float64))
+            results[window_index] = family_summaries
+            continue
+
+        membership_rows_full = torch.cat(
+            [membership_chunks[window_index][key] for key in sorted(membership_chunks[window_index])], dim=0,
+        )
+        rho_m_summary = compute_membership_partition_residual(membership_rows_full)
+        family_summaries["rho_M"] = run.summarize_residual_tensor(rho_m_summary.signed)
+
+        unary_for_query = s0_full[:, list(query_classes)].to(contracts.masked_forward.propagation_dtype)
+        membership_rows_aligned = run._align_membership_device(membership_rows_full, unary_for_query)
+
+        seed_by_component_parts = []
+        propagated_by_component_parts = []
+        chunk_start = 0
+        while chunk_start < components.component_count:
+            chunk_stop = min(chunk_start + component_chunk_size, components.component_count)
+            membership_slice = membership_rows_aligned[chunk_start:chunk_stop]
+            seed = build_masked_seed_chunk(
+                unary_for_query, membership_slice, list(range(chunk_start, chunk_stop)), list(query_classes),
+                contract=contracts.masked_forward, window_index=window_index,
+            )
+            propagated = propagate_masked_seed_chunk(graph, seed, contract=contracts.masked_forward)
+            seed_by_component_parts.append(seed.unflatten(seed.seed_flat).transpose(0, 1))
+            propagated_by_component_parts.append(seed.unflatten(propagated.t_final).transpose(0, 1))
+            chunk_start = chunk_stop
+
+        seed_by_component = torch.cat(seed_by_component_parts, dim=0)
+        propagated_by_component = torch.cat(propagated_by_component_parts, dim=0)
+
+        canonical_t0_full = window_result.trace.snapshots[0].to(contracts.masked_forward.propagation_dtype)
+        canonical_tfinal_full = window_result.trace.snapshots[contracts.recurrence.steps].to(contracts.masked_forward.propagation_dtype)
+        rho_0_summary = compute_seed_reconstruction_residual(seed_by_component, canonical_t0_full[:, list(query_classes)])
+        family_summaries["rho_0"] = run.summarize_residual_tensor(rho_0_summary.signed)
+        rho_320_summary = compute_propagated_reconstruction_residual(propagated_by_component, canonical_tfinal_full[:, list(query_classes)])
+        family_summaries["rho_320"] = run.summarize_residual_tensor(rho_320_summary.signed)
+
+        seed_by_component_for_stitch = run._align_tensor_to_stitching_plan_device(seed_by_component, pullback_plan)
+        propagated_by_component_for_stitch = run._align_tensor_to_stitching_plan_device(propagated_by_component, pullback_plan)
+        canonical_t0_for_stitch = run._align_tensor_to_stitching_plan_device(canonical_t0_full, pullback_plan)
+        canonical_tfinal_for_stitch = run._align_tensor_to_stitching_plan_device(canonical_tfinal_full, pullback_plan)
+
+        node_count = seed_by_component.shape[1]
+        masked_chunk_for_window = PropagatedChunk(
+            t0=seed_by_component_for_stitch.transpose(0, 1).reshape(node_count, -1),
+            t_final=propagated_by_component_for_stitch.transpose(0, 1).reshape(node_count, -1),
+            window_index=window_index, component_id_start=0, component_id_stop=components.component_count,
+            query_class_indices=query_classes, steps_completed=contracts.recurrence.steps,
+        )
+        s0_masked, s_final_masked = stitch_and_rescale_component_scores(
+            {window_index: masked_chunk_for_window}, window_plan=pullback_plan, final_contract=contracts.final_resolution,
+            img_shape=img_shape, ori_shape=ori_shape, component_count=components.component_count, query_class_union=query_classes,
+        )
+
+        canonical_chunk_for_window = PropagatedChunk(
+            t0=canonical_t0_for_stitch[:, list(query_classes)], t_final=canonical_tfinal_for_stitch[:, list(query_classes)],
+            window_index=window_index, component_id_start=0, component_id_stop=1,
+            query_class_indices=query_classes, steps_completed=contracts.recurrence.steps,
+        )
+        m0_w, m320_w = stitch_and_rescale_component_scores(
+            {window_index: canonical_chunk_for_window}, window_plan=pullback_plan, final_contract=contracts.final_resolution,
+            img_shape=img_shape, ori_shape=ori_shape, component_count=1, query_class_union=query_classes,
+        )
+
+        support_mask = run._window_final_support_mask(
+            window_index, pullback_plan=pullback_plan, final_resolution_contract=contracts.final_resolution,
+            img_shape=img_shape, ori_shape=ori_shape,
+        )
+        window_dispute_mask = support_mask & dispute_mask_t
+        disputed_rows_t, disputed_cols_t = torch.nonzero(window_dispute_mask, as_tuple=True)
+        order = torch.argsort(disputed_rows_t * ori_width + disputed_cols_t)
+        disputed_rows_t, disputed_cols_t = disputed_rows_t[order], disputed_cols_t[order]
+
+        if disputed_rows_t.numel() == 0:
+            family_summaries["rho_g"] = run.summarize_residual_tensor(torch.zeros(0, dtype=torch.float64))
+        else:
+            a_vals = a_labels[disputed_rows_t.numpy(), disputed_cols_t.numpy()]
+            b_vals = b_labels[disputed_rows_t.numpy(), disputed_cols_t.numpy()]
+            query_index_of = {cls: idx for idx, cls in enumerate(query_classes)}
+            a_local = torch.tensor([query_index_of[int(v)] for v in a_vals], dtype=torch.int64)
+            b_local = torch.tensor([query_index_of[int(v)] for v in b_vals], dtype=torch.int64)
+            a_global = torch.as_tensor(a_vals, dtype=torch.int64)
+            b_global = torch.as_tensor(b_vals, dtype=torch.int64)
+
+            g_chunk = compute_signed_contributions(
+                s0_masked, s_final_masked, component_count=components.component_count, query_class_union=query_classes,
+                disputed_pixel_rows=disputed_rows_t, disputed_pixel_cols=disputed_cols_t,
+                disputed_pixel_a=a_global, disputed_pixel_b=b_global, ori_width=ori_width, component_id_start=0,
+            )
+            m0_at_a = m0_w[0, a_local, disputed_rows_t, disputed_cols_t]
+            m0_at_b = m0_w[0, b_local, disputed_rows_t, disputed_cols_t]
+            m320_at_a = m320_w[0, a_local, disputed_rows_t, disputed_cols_t]
+            m320_at_b = m320_w[0, b_local, disputed_rows_t, disputed_cols_t]
+            m0_x = (m0_at_b - m0_at_a).to(contracts.masked_forward.accumulation_dtype)
+            m320_x = (m320_at_b - m320_at_a).to(contracts.masked_forward.accumulation_dtype)
+            delta_m_x = m320_x - m0_x
+
+            g_all_components = g_chunk.values.to(contracts.masked_forward.accumulation_dtype)
+            rho_g_summary = compute_signed_margin_conservation_residual(g_all_components, delta_m_x)
+            family_summaries["rho_g"] = run.summarize_residual_tensor(rho_g_summary.signed)
+
+        results[window_index] = family_summaries
+
+    return results
+
+
+def _build_equivalence_fixture(seed_base):
+    """A richer fixture than the module default: two overlapping windows
+    plus flush-right/flush-bottom geometry (from the shared 63x105/
+    (37,61) construction, already >=4 windows, non-square, non-integer
+    final-resize ratio), >=1 window with >=37 global components (module
+    docstring, repeatedly confirmed), >=3 query classes (_CLASS_COUNT=6),
+    FP64 throughout, positive/negative/zero contributions and disputed
+    pixels across multiple windows from the diverse random unary field."""
+    e13, e15, repo_root = _real_identities_for_equivalence()
+    contracts = _build_small_contracts(e13, e15, repo_root)
+    from src.dfp_phase1a_stitching_pullback import build_stitching_pullback_plan
+    import torch
+
+    pullback_plan = build_stitching_pullback_plan((63, 105), contract=contracts.pullback)
+    n_windows = len(pullback_plan.plan.windows)
+    per_window_data = {i: _make_window_unary_features(seed=seed_base + i, diversity=True) for i in range(n_windows)}
+    model = _FakeModel(per_window_data, grid_hw=_PATCH_GRID)
+    inference = _FakeInference(model)
+    image_tensor = torch.zeros(1, 3, 63, 105)
+    prepared = run.PreparedImage(image_tensor=image_tensor, inference_height=63, inference_width=105, ori_shape=(37, 61))
+    return inference, prepared, e13, contracts, n_windows
+
+
+def _real_identities_for_equivalence():
+    from src.dfp_phase1a_identity import load_identity as load_e13_identity
+    from src.dfp_phase1b_identity import load_identity as load_e15_identity
+
+    repo_root = run.repository_root()
+    return load_e13_identity(repo_root=repo_root), load_e15_identity(repo_root=repo_root), repo_root
+
+
+@pytest.mark.parametrize("component_chunk_size", [1, 2, 3, 4, 8, 16, 37, 64])
+def test_repaired_runner_matches_old_style_full_component_reference(component_chunk_size):
+    """Section 8: the repaired, per-chunk `run.process_selected_image`
+    must be bit-identical (or, at minimum, match to floating-point
+    machine precision) to the OLD-style full-component reference above,
+    across a chunk-size sweep spanning far below, at, and far above the
+    fixture's own component count (37: known from repeated construction,
+    see `_instrumented_chunk_run`'s docstring) -- for all four residual
+    families, their aggregate fields, and component/window bookkeeping."""
+    # The fixture geometry itself (>=4 overlapping/flush windows,
+    # non-square, non-integer final-resize ratio, >=37 global components,
+    # >=3 query classes) already satisfies Section 8's "rich fixture"
+    # requirement regardless of how many windows are SELECTED for actual
+    # (expensive) masked processing below; canonical recurrence already
+    # runs for every window unconditionally (needed for stitching), so
+    # restricting selection to one window here only trims the part of the
+    # cost that scales with component_chunk_size, matching Alliance
+    # login-node conservatism -- it does not narrow what is being tested.
+    inference, prepared, e13, contracts, n_windows = _build_equivalence_fixture(seed_base=7000)
+    selected = [0]
+
+    new_results = run.process_selected_image(
+        inference, prepared, "000000000001", selected_windows_for_image=selected, protocol_identity=e13,
+        contracts=contracts, class_count=_CLASS_COUNT, affinity_power=float(e13["graph"]["affinity_power"]),
+        component_chunk_size=component_chunk_size,
+    )
+    # Rebuild the fixture (fresh model call-count state) for the reference
+    # run, so both runs see byte-identical synthetic inputs.
+    inference2, prepared2, _, _, _ = _build_equivalence_fixture(seed_base=7000)
+    reference_results = _reference_process_selected_image_full_component(
+        inference2, prepared2, "000000000001", selected_windows_for_image=selected, protocol_identity=e13,
+        contracts=contracts, class_count=_CLASS_COUNT, affinity_power=float(e13["graph"]["affinity_power"]),
+        component_chunk_size=component_chunk_size,
+    )
+
+    assert set(new_results.keys()) == set(reference_results.keys())
+    saw_nonzero_rho_g = False
+    for window_index in new_results:
+        for family in ("rho_M", "rho_0", "rho_320", "rho_g"):
+            a, b = new_results[window_index][family], reference_results[window_index][family]
+            assert a["sample_count"] == b["sample_count"], (
+                f"chunk_size={component_chunk_size} window={window_index} family={family}: "
+                f"sample_count mismatch {a['sample_count']} != {b['sample_count']}"
+            )
+            if a["sample_count"] > 0:
+                if family == "rho_g":
+                    saw_nonzero_rho_g = True
+                for field in ("signed_minimum", "signed_maximum", "mean_absolute_residual", "root_mean_square_residual", "maximum_absolute_residual"):
+                    assert a[field] == pytest.approx(b[field], abs=1e-9, rel=1e-9), (
+                        f"chunk_size={component_chunk_size} window={window_index} family={family} field={field}: "
+                        f"{a[field]} != {b[field]}"
+                    )
+    assert saw_nonzero_rho_g, "fixture assumption violated: expected at least one window with disputed pixels"
+
+
+def test_allocation_bound_scales_with_chunk_size_not_total_component_count():
+    """Section 9: instrument the REAL, unmodified `torch.zeros` reached
+    through `stitch_and_rescale_component_scores` and assert every
+    accumulator-shaped allocation's channel_count never exceeds
+    component_chunk_size * len(query_class_union) -- and, in particular,
+    is never sized by the fixture's full component_count (37) once
+    chunk_size is smaller than it."""
+    import torch
+
+    seen_channel_counts = []
+    real_zeros = torch.zeros
+
+    def spying_zeros(*args, **kwargs):
+        out = real_zeros(*args, **kwargs)
+        if out.dim() == 4 and out.shape[0] == 1 and out.dtype == torch.float64:
+            seen_channel_counts.append(out.shape[1])
+        return out
+
+    for component_chunk_size in (1, 2, 8, 16, 32, 64):
+        # A fresh fixture per chunk_size: _FakeModel.generate_patch_snapshot
+        # indexes its per-window data by an internal, ever-incrementing
+        # call_count, so reusing one `inference` object across multiple
+        # `process_selected_image` calls would exhaust it after the first
+        # iteration.
+        inference, prepared, e13, contracts, n_windows = _build_equivalence_fixture(seed_base=8100)
+        seen_channel_counts.clear()
+        torch.zeros = spying_zeros
+        try:
+            run.process_selected_image(
+                inference, prepared, "000000000001", selected_windows_for_image=[0], protocol_identity=e13,
+                contracts=contracts, class_count=_CLASS_COUNT, affinity_power=float(e13["graph"]["affinity_power"]),
+                component_chunk_size=component_chunk_size,
+            )
+        finally:
+            torch.zeros = real_zeros
+        assert seen_channel_counts, "no accumulator allocations observed -- instrumentation is not matching"
+        max_query_union_width = _CLASS_COUNT  # query_class_union can never exceed the total class count
+        bound = component_chunk_size * max_query_union_width
+        for channel_count in seen_channel_counts:
+            assert channel_count <= bound, (
+                f"chunk_size={component_chunk_size}: observed accumulator channel_count={channel_count} "
+                f"exceeds the bound component_chunk_size*len(query_class_union)={bound} -- the full-component "
+                f"allocation appears not to have been eliminated"
+            )
+        # Explicitly confirm the allocation never used the fixture's full
+        # component count (37) once it exceeds the chunk size.
+        if component_chunk_size < 37:
+            assert max(seen_channel_counts) < 37 * max_query_union_width
+
+
+def test_signed_contribution_chunk_tensors_are_not_retained_after_extraction():
+    """Section 10: the large, image-resolution stitched T0/T320 chunk
+    tensors (`s0_chunk`/`s_final_chunk`) must not survive past the
+    iteration that produced them -- proven with weak references: once
+    `process_selected_image` returns, every such weakref must be dead
+    (garbage collected), even though the small `SignedContributionChunk`
+    results they were derived from are (transiently, inside the
+    function) still logically "in use" one iteration at a time."""
+    import gc
+    import weakref
+
+    import src.dfp_phase1b_masked_forward as masked_forward_module
+
+    inference, prepared, e13, contracts, n_windows = _build_equivalence_fixture(seed_base=8200)
+
+    live_refs = []
+    real_stitch = masked_forward_module.stitch_and_rescale_component_scores
+
+    def spying_stitch(*args, **kwargs):
+        s0, s_final = real_stitch(*args, **kwargs)
+        live_refs.append(weakref.ref(s0))
+        live_refs.append(weakref.ref(s_final))
+        return s0, s_final
+
+    # Patching `masked_forward_module` (the module `process_selected_
+    # image` actually re-imports `stitch_and_rescale_component_scores`
+    # from, fresh, on every call) is the only patch that matters --
+    # `run.stitch_and_rescale_component_scores` is never read by that
+    # function (it is a local, call-time import, never a module-level
+    # `run` attribute) and assigning to it here would only leave a stray,
+    # permanent attribute on `run` behind for later tests to trip over.
+    masked_forward_module.stitch_and_rescale_component_scores = spying_stitch
+    try:
+        run.process_selected_image(
+            inference, prepared, "000000000001", selected_windows_for_image=[0], protocol_identity=e13,
+            contracts=contracts, class_count=_CLASS_COUNT, affinity_power=float(e13["graph"]["affinity_power"]),
+            component_chunk_size=1,
+        )
+    finally:
+        masked_forward_module.stitch_and_rescale_component_scores = real_stitch
+
+    assert len(live_refs) >= 2, "no stitching calls observed -- instrumentation is not matching"
+    gc.collect()
+    dead = sum(1 for r in live_refs if r() is None)
+    assert dead == len(live_refs), (
+        f"{len(live_refs) - dead} of {len(live_refs)} stitched chunk tensors are still reachable after "
+        f"process_selected_image returned -- a list is retaining a full stitched tensor"
+    )
+
+
+def test_per_chunk_call_counts_equal_expected_chunks_for_62_components(monkeypatch):
+    """Section 11: for a real, rich multi-component image (the same
+    proven fixture family used throughout this file -- >=37 global
+    components at window 0 for a diverse random unary field, confirmed
+    repeatedly by construction, see `_instrumented_chunk_run`'s own
+    docstring), confirm `build_masked_seed_chunk`, `propagate_masked_
+    seed_chunk`, the masked `stitch_and_rescale_component_scores`, and
+    `compute_signed_contributions` calls all equal
+    `ceil(component_count/chunk_size)` -- never `1` (the old defect) and
+    never `component_count` (over-chunked)."""
+    import math
+
+    import src.dfp_phase1b_masked_forward as masked_forward_module
+
+    real_build = masked_forward_module.build_masked_seed_chunk
+    real_propagate = masked_forward_module.propagate_masked_seed_chunk
+    real_stitch = masked_forward_module.stitch_and_rescale_component_scores
+    real_signed = masked_forward_module.compute_signed_contributions
+
+    # Discover this fixture's actual global component count once, with
+    # component_chunk_size=1 -- exactly one call per global component, by
+    # construction (unlike a large chunk size, which always yields exactly
+    # one call regardless of the true component count).
+    build_calls = {"n": 0}
+
+    def counting_build0(*args, **kwargs):
+        build_calls["n"] += 1
+        return real_build(*args, **kwargs)
+
+    inference0, prepared0, e13, contracts, n_windows = _build_equivalence_fixture(seed_base=7000)
+    monkeypatch.setattr(masked_forward_module, "build_masked_seed_chunk", counting_build0)
+    monkeypatch.setattr(run, "build_masked_seed_chunk", counting_build0, raising=False)
+    baseline_results = run.process_selected_image(
+        inference0, prepared0, "000000000001", selected_windows_for_image=[0], protocol_identity=e13,
+        contracts=contracts, class_count=_CLASS_COUNT, affinity_power=float(e13["graph"]["affinity_power"]),
+        component_chunk_size=1,
+    )
+    monkeypatch.setattr(masked_forward_module, "build_masked_seed_chunk", real_build)
+    component_count = build_calls["n"]
+    assert component_count >= 5, f"fixture produced only {component_count} components; need >=5 for a meaningful sweep"
+    has_disputed = baseline_results[0]["rho_g"]["sample_count"] > 0
+    assert has_disputed, "fixture assumption violated: expected disputed pixels for this seed"
+
+    for component_chunk_size in (1, 2, 8, 16, 37, 64):
+        # A fresh fixture per chunk_size -- `_FakeModel.generate_patch_
+        # snapshot` indexes its per-window data by an ever-incrementing
+        # call_count, so reusing one `inference` object across multiple
+        # `process_selected_image` calls would exhaust it.
+        inference, prepared, _, _, _ = _build_equivalence_fixture(seed_base=7000)
+        build_calls_by_fn = {"build": 0, "propagate": 0, "stitch": 0, "signed": 0}
+        # NOTE: reuse the `real_build`/`real_propagate`/`real_stitch`/
+        # `real_signed` captured ONCE before this loop -- re-reading
+        # `masked_forward_module.<name>` here would instead capture the
+        # PREVIOUS iteration's own counting wrapper (since it is still
+        # installed until this iteration's monkeypatch.setattr call below
+        # replaces it), wrapping wrapper around wrapper into unbounded
+        # recursion.
+
+        def counting_build2(*args, **kwargs):
+            build_calls_by_fn["build"] += 1
+            return real_build(*args, **kwargs)
+
+        def counting_propagate(*args, **kwargs):
+            build_calls_by_fn["propagate"] += 1
+            return real_propagate(*args, **kwargs)
+
+        stitch_call_index = {"n": 0}
+
+        def counting_stitch(propagated_by_window, **kwargs):
+            # The canonical-numerator stitching call always happens FIRST,
+            # once per window, before the masked per-chunk loop begins (see
+            # `process_selected_image`'s own structure) -- distinguish it
+            # by call ORDER, never by `component_count`, since a masked
+            # chunk's own component_count is also 1 whenever
+            # component_chunk_size == 1, making that value indistinguishable
+            # from the canonical call's own component_count=1.
+            stitch_call_index["n"] += 1
+            if stitch_call_index["n"] > 1:
+                build_calls_by_fn["stitch"] += 1
+            return real_stitch(propagated_by_window, **kwargs)
+
+        def counting_signed(*args, **kwargs):
+            build_calls_by_fn["signed"] += 1
+            return real_signed(*args, **kwargs)
+
+        monkeypatch.setattr(masked_forward_module, "build_masked_seed_chunk", counting_build2)
+        monkeypatch.setattr(run, "build_masked_seed_chunk", counting_build2, raising=False)
+        monkeypatch.setattr(masked_forward_module, "propagate_masked_seed_chunk", counting_propagate)
+        monkeypatch.setattr(run, "propagate_masked_seed_chunk", counting_propagate, raising=False)
+        monkeypatch.setattr(masked_forward_module, "stitch_and_rescale_component_scores", counting_stitch)
+        monkeypatch.setattr(run, "stitch_and_rescale_component_scores", counting_stitch, raising=False)
+        monkeypatch.setattr(masked_forward_module, "compute_signed_contributions", counting_signed)
+        monkeypatch.setattr(run, "compute_signed_contributions", counting_signed, raising=False)
+
+        run.process_selected_image(
+            inference, prepared, "000000000001", selected_windows_for_image=[0], protocol_identity=e13,
+            contracts=contracts, class_count=_CLASS_COUNT, affinity_power=float(e13["graph"]["affinity_power"]),
+            component_chunk_size=component_chunk_size,
+        )
+        expected_chunks = math.ceil(component_count / component_chunk_size)
+        assert build_calls_by_fn["build"] == expected_chunks, (
+            f"chunk_size={component_chunk_size}: build_masked_seed_chunk calls {build_calls_by_fn['build']} != {expected_chunks}"
+        )
+        assert build_calls_by_fn["propagate"] == expected_chunks
+        assert build_calls_by_fn["stitch"] == expected_chunks, (
+            f"chunk_size={component_chunk_size}: masked stitch_and_rescale_component_scores calls "
+            f"{build_calls_by_fn['stitch']} != {expected_chunks}"
+        )
+        assert build_calls_by_fn["signed"] == expected_chunks
+
+
+def test_signed_contribution_chunk_gap_is_rejected():
+    """Section 12: if the reassembled signed-contribution chunks do not
+    cover [0, component_count) contiguously (simulated by dropping the
+    first chunk), the runner raises DfpPhase1bCalibrationRunError --
+    never silently produces a wrong-shaped or partial rho_g."""
+    import src.dfp_phase1b_masked_forward as masked_forward_module
+
+    inference, prepared, e13, contracts, n_windows = _build_equivalence_fixture(seed_base=8400)
+
+    real_signed_cls = masked_forward_module.SignedContributionChunk
+    call_index = {"n": 0}
+    real_compute = masked_forward_module.compute_signed_contributions
+
+    def dropping_compute(*args, **kwargs):
+        result = real_compute(*args, **kwargs)
+        call_index["n"] += 1
+        if call_index["n"] == 1:
+            # Corrupt the first chunk's own component_id_start so the
+            # reassembly validation must detect the resulting gap.
+            return real_signed_cls(
+                values=result.values, component_id_start=result.component_id_start + 1,
+                component_id_stop=result.component_id_stop + 1,
+                disputed_pixel_flat_indices=result.disputed_pixel_flat_indices,
+            )
+        return result
+
+    # Only `masked_forward_module`'s own attribute matters (see the
+    # retention test above for why patching `run.*` directly here would
+    # only leak a stray permanent attribute onto `run` for later tests).
+    masked_forward_module.compute_signed_contributions = dropping_compute
+    try:
+        with pytest.raises(run.DfpPhase1bCalibrationRunError, match="gap|overlap|cover"):
+            run.process_selected_image(
+                inference, prepared, "000000000001", selected_windows_for_image=[0], protocol_identity=e13,
+                contracts=contracts, class_count=_CLASS_COUNT, affinity_power=float(e13["graph"]["affinity_power"]),
+                component_chunk_size=1,
+            )
+    finally:
+        masked_forward_module.compute_signed_contributions = real_compute
+
+
+def _corrupt_nth_signed_contribution_chunk(*, n_to_corrupt, corrupt_fn):
+    """Shared instrumentation: wrap the real, unmodified
+    `compute_signed_contributions` so its `n_to_corrupt`-th call (1-indexed,
+    ascending chunk order -- this function is called exactly once per
+    masked component chunk, never for the canonical numerator) returns a
+    NEW `SignedContributionChunk` (via the frozen dataclass's own
+    constructor, never by mutating the original -- `SignedContributionChunk`
+    is itself `@dataclass(frozen=True)`, so in-place mutation would raise
+    `FrozenInstanceError` even if attempted) with `corrupt_fn` applied to
+    its `values` tensor, while `component_id_start`/`component_id_stop`/
+    `disputed_pixel_flat_indices` are carried over UNCHANGED from the real
+    result -- exactly the "declared range says one thing, values says
+    another" shape this repair must catch."""
+    import src.dfp_phase1b_masked_forward as masked_forward_module
+
+    real_signed_cls = masked_forward_module.SignedContributionChunk
+    real_compute = masked_forward_module.compute_signed_contributions
+    call_index = {"n": 0}
+
+    def wrapped(*args, **kwargs):
+        result = real_compute(*args, **kwargs)
+        call_index["n"] += 1
+        if call_index["n"] == n_to_corrupt:
+            return real_signed_cls(
+                values=corrupt_fn(result.values), component_id_start=result.component_id_start,
+                component_id_stop=result.component_id_stop, disputed_pixel_flat_indices=result.disputed_pixel_flat_indices,
+            )
+        return result
+
+    return masked_forward_module, real_compute, wrapped
+
+
+def _narrow_by_one(values):
+    assert values.shape[1] >= 1
+    return values[:, :-1]
+
+
+def _wide_by_one(values):
+    import torch
+    return torch.cat([values, values[:, :1]], dim=1)
+
+
+def _zero_width(values):
+    return values[:, :0]
+
+
+def _run_with_corrupted_chunk(*, seed_base, component_chunk_size, n_to_corrupt, corrupt_fn, selected_windows=(0,)):
+    masked_forward_module, real_compute, wrapped = _corrupt_nth_signed_contribution_chunk(
+        n_to_corrupt=n_to_corrupt, corrupt_fn=corrupt_fn,
+    )
+    inference, prepared, e13, contracts, n_windows = _build_equivalence_fixture(seed_base=seed_base)
+    masked_forward_module.compute_signed_contributions = wrapped
+    try:
+        return run.process_selected_image(
+            inference, prepared, "000000000001", selected_windows_for_image=list(selected_windows), protocol_identity=e13,
+            contracts=contracts, class_count=_CLASS_COUNT, affinity_power=float(e13["graph"]["affinity_power"]),
+            component_chunk_size=component_chunk_size,
+        )
+    finally:
+        masked_forward_module.compute_signed_contributions = real_compute
+
+
+def _chunk_count_for(seed_base, component_chunk_size, selected_windows=(0,)):
+    """Discover this fixture's real chunk count for a given chunk_size by
+    counting real (unwrapped) build_masked_seed_chunk calls."""
+    import src.dfp_phase1b_masked_forward as masked_forward_module
+
+    inference, prepared, e13, contracts, n_windows = _build_equivalence_fixture(seed_base=seed_base)
+    calls = {"n": 0}
+    real_build = masked_forward_module.build_masked_seed_chunk
+
+    def counting(*a, **k):
+        calls["n"] += 1
+        return real_build(*a, **k)
+
+    masked_forward_module.build_masked_seed_chunk = counting
+    try:
+        run.process_selected_image(
+            inference, prepared, "000000000001", selected_windows_for_image=list(selected_windows), protocol_identity=e13,
+            contracts=contracts, class_count=_CLASS_COUNT, affinity_power=float(e13["graph"]["affinity_power"]),
+            component_chunk_size=component_chunk_size,
+        )
+    finally:
+        masked_forward_module.build_masked_seed_chunk = real_build
+    return calls["n"]
+
+
+_WIDTH_SEED_BASE = 8400  # >=40 global components for window 0 (established by construction; re-checked below)
+
+
+@pytest.mark.parametrize("corrupt_fn,expected_phrase", [
+    (_narrow_by_one, "declares component-axis width"),
+    (_wide_by_one, "declares component-axis width"),
+    (_zero_width, "declares component-axis width"),
+])
+def test_signed_contribution_chunk_width_mismatch_rejected(corrupt_fn, expected_phrase):
+    """Repair D follow-up (independent-verification finding): a
+    SignedContributionChunk whose `values` tensor's component-axis width
+    disagrees with its own declared [component_id_start, component_id_stop)
+    range -- narrower, wider, or entirely zero-width for a declared
+    NONEMPTY range -- must be rejected with DfpPhase1bCalibrationRunError
+    naming the chunk's range and both the expected and observed widths,
+    never silently concatenated into a wrong-width rho_g."""
+    with pytest.raises(run.DfpPhase1bCalibrationRunError, match=expected_phrase):
+        _run_with_corrupted_chunk(
+            seed_base=_WIDTH_SEED_BASE, component_chunk_size=8, n_to_corrupt=1, corrupt_fn=corrupt_fn,
+        )
+
+
+def test_signed_contribution_chunk_correct_width_accepted():
+    """Control: an UNCORRUPTED run (corrupt_fn is the identity) with the
+    exact same instrumentation plumbing must complete normally -- the new
+    validation must not reject legitimate, self-consistent chunks."""
+    results = _run_with_corrupted_chunk(
+        seed_base=_WIDTH_SEED_BASE, component_chunk_size=8, n_to_corrupt=1, corrupt_fn=lambda v: v,
+    )
+    assert results[0]["rho_g"]["sample_count"] > 0
+
+
+def test_signed_contribution_chunk_width_mismatch_first_chunk():
+    n_chunks = _chunk_count_for(_WIDTH_SEED_BASE, component_chunk_size=8)
+    assert n_chunks >= 3, "fixture assumption violated: need >=3 chunks for first/middle/final coverage"
+    with pytest.raises(run.DfpPhase1bCalibrationRunError, match="declares component-axis width"):
+        _run_with_corrupted_chunk(seed_base=_WIDTH_SEED_BASE, component_chunk_size=8, n_to_corrupt=1, corrupt_fn=_narrow_by_one)
+
+
+def test_signed_contribution_chunk_width_mismatch_middle_chunk():
+    n_chunks = _chunk_count_for(_WIDTH_SEED_BASE, component_chunk_size=8)
+    assert n_chunks >= 3
+    middle = n_chunks // 2 + 1  # 1-indexed, strictly interior
+    assert 1 < middle < n_chunks
+    with pytest.raises(run.DfpPhase1bCalibrationRunError, match="declares component-axis width"):
+        _run_with_corrupted_chunk(seed_base=_WIDTH_SEED_BASE, component_chunk_size=8, n_to_corrupt=middle, corrupt_fn=_narrow_by_one)
+
+
+def test_signed_contribution_chunk_width_mismatch_final_chunk():
+    n_chunks = _chunk_count_for(_WIDTH_SEED_BASE, component_chunk_size=8)
+    assert n_chunks >= 3
+    with pytest.raises(run.DfpPhase1bCalibrationRunError, match="declares component-axis width"):
+        _run_with_corrupted_chunk(seed_base=_WIDTH_SEED_BASE, component_chunk_size=8, n_to_corrupt=n_chunks, corrupt_fn=_narrow_by_one)
+
+
+def test_signed_contribution_chunk_width_mismatch_single_chunk():
+    """component_chunk_size large enough that the whole image is exactly
+    ONE chunk -- corrupting "the only chunk" must still be caught."""
+    n_chunks = _chunk_count_for(_WIDTH_SEED_BASE, component_chunk_size=10_000)
+    assert n_chunks == 1
+    with pytest.raises(run.DfpPhase1bCalibrationRunError, match="declares component-axis width"):
+        _run_with_corrupted_chunk(seed_base=_WIDTH_SEED_BASE, component_chunk_size=10_000, n_to_corrupt=1, corrupt_fn=_narrow_by_one)
+
+
+def test_signed_contribution_chunk_width_mismatch_final_partial_chunk():
+    """component_chunk_size chosen so the image's component_count is NOT
+    evenly divisible by it -- the final chunk is genuinely partial (its
+    own width < component_chunk_size) -- corrupting exactly that partial
+    chunk must still be caught, using ITS OWN (smaller) declared width,
+    never `component_chunk_size` itself."""
+    component_chunk_size = 16
+    n_chunks = _chunk_count_for(_WIDTH_SEED_BASE, component_chunk_size=component_chunk_size)
+    assert n_chunks >= 2
+    with pytest.raises(run.DfpPhase1bCalibrationRunError, match="declares component-axis width"):
+        _run_with_corrupted_chunk(
+            seed_base=_WIDTH_SEED_BASE, component_chunk_size=component_chunk_size, n_to_corrupt=n_chunks, corrupt_fn=_narrow_by_one,
+        )
+
+
+def test_signed_contribution_chunk_width_error_reports_original_undoctored_range():
+    """The raised diagnostic must name the chunk's OWN, ORIGINAL declared
+    range and the TRUE expected width computed from it -- never a width
+    inferred from the corrupted `values` tensor, and never a metadata
+    rewrite that would make the mismatch disappear. Corrupts chunk index 2
+    of a component_chunk_size=8 run (declared range [8, 16), expected
+    width 8) down to width 7, and asserts the exact range/widths appear."""
+    with pytest.raises(run.DfpPhase1bCalibrationRunError) as excinfo:
+        _run_with_corrupted_chunk(seed_base=_WIDTH_SEED_BASE, component_chunk_size=8, n_to_corrupt=2, corrupt_fn=_narrow_by_one)
+    message = str(excinfo.value)
+    assert "[8, 16)" in message, message
+    assert "component-axis width 8" in message, message
+    assert "component-axis width 7" in message, message
+
+
+def test_signed_contribution_chunk_width_mismatch_rejected_before_final_residual():
+    """Rejection must occur BEFORE the frozen
+    compute_signed_margin_conservation_residual is ever reached (and
+    therefore before concatenation, since that residual is the only
+    consumer of the concatenated matrix) -- confirmed by making that
+    function itself fail the test if called."""
+    import src.dfp_phase1b_masked_forward as masked_forward_module
+
+    real_residual = masked_forward_module.compute_signed_margin_conservation_residual
+
+    def must_not_be_called(*a, **k):
+        raise AssertionError("compute_signed_margin_conservation_residual must not be reached for a malformed chunk")
+
+    masked_forward_module.compute_signed_margin_conservation_residual = must_not_be_called
+    try:
+        with pytest.raises(run.DfpPhase1bCalibrationRunError, match="declares component-axis width"):
+            _run_with_corrupted_chunk(seed_base=_WIDTH_SEED_BASE, component_chunk_size=8, n_to_corrupt=1, corrupt_fn=_narrow_by_one)
+    finally:
+        masked_forward_module.compute_signed_margin_conservation_residual = real_residual
+
+
+def test_signed_contribution_chunk_width_mismatch_leaves_no_artifact(tmp_path):
+    """`process_selected_image` never touches the filesystem on its own;
+    this confirms a malformed-chunk rejection specifically leaves no
+    partial or temporary file behind in a directory it could plausibly
+    have written to, matching the project's established artifact-safety
+    test pattern for every other domain-error injection point."""
+    with pytest.raises(run.DfpPhase1bCalibrationRunError, match="declares component-axis width"):
+        _run_with_corrupted_chunk(seed_base=_WIDTH_SEED_BASE, component_chunk_size=8, n_to_corrupt=1, corrupt_fn=_narrow_by_one)
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("exc_type", [KeyboardInterrupt, SystemExit, MemoryError])
+def test_signed_contribution_extraction_never_catches_fatal_exceptions(exc_type):
+    """A fatal exception raised AT the compute_signed_contributions call
+    site itself (independent of the new width-validation logic, which
+    only runs on its RETURN value) must propagate completely uncaught --
+    the new validation code must not have introduced any broad
+    except-Exception/bare-except net around this call."""
+    import src.dfp_phase1b_masked_forward as masked_forward_module
+
+    real_compute = masked_forward_module.compute_signed_contributions
+
+    def raising(*a, **k):
+        raise exc_type("simulated fatal failure during signed-contribution extraction")
+
+    inference, prepared, e13, contracts, n_windows = _build_equivalence_fixture(seed_base=_WIDTH_SEED_BASE)
+    masked_forward_module.compute_signed_contributions = raising
+    try:
+        with pytest.raises(exc_type):
+            run.process_selected_image(
+                inference, prepared, "000000000001", selected_windows_for_image=[0], protocol_identity=e13,
+                contracts=contracts, class_count=_CLASS_COUNT, affinity_power=float(e13["graph"]["affinity_power"]),
+                component_chunk_size=8,
+            )
+    finally:
+        masked_forward_module.compute_signed_contributions = real_compute
+
+
+def test_masked_stitch_failure_translates_to_domain_error(monkeypatch):
+    """Section 12: a RuntimeError injected inside the per-chunk masked
+    `stitch_and_rescale_component_scores` call must propagate as
+    whatever that function itself raises (it already translates
+    apply_window_stitching_forward's own domain errors) -- confirming
+    the per-chunk call site does not swallow or mislabel a failure, and
+    that no partial artifact-shaped result is produced."""
+    import src.dfp_phase1b_masked_forward as masked_forward_module
+
+    inference, prepared, e13, contracts, n_windows = _build_equivalence_fixture(seed_base=8500)
+
+    class _InjectedError(RuntimeError):
+        pass
+
+    call_index = {"n": 0}
+    real_stitch = masked_forward_module.stitch_and_rescale_component_scores
+
+    def failing_stitch(propagated_by_window, **kwargs):
+        # The canonical-numerator stitching call always happens first,
+        # once per window, before the masked per-chunk loop -- distinguish
+        # it by call ORDER, never by `component_count` (a masked chunk's
+        # own component_count is also 1 when component_chunk_size == 1,
+        # indistinguishable from the canonical call's component_count=1).
+        call_index["n"] += 1
+        if call_index["n"] == 2:  # call 1 = canonical; call 2 = first masked chunk
+            raise _InjectedError("simulated per-chunk masked stitching failure")
+        return real_stitch(propagated_by_window, **kwargs)
+
+    monkeypatch.setattr(masked_forward_module, "stitch_and_rescale_component_scores", failing_stitch)
+    monkeypatch.setattr(run, "stitch_and_rescale_component_scores", failing_stitch, raising=False)
+    with pytest.raises(_InjectedError):
+        run.process_selected_image(
+            inference, prepared, "000000000001", selected_windows_for_image=[0], protocol_identity=e13,
+            contracts=contracts, class_count=_CLASS_COUNT, affinity_power=float(e13["graph"]["affinity_power"]),
+            component_chunk_size=1,
+        )

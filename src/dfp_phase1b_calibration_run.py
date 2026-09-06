@@ -127,7 +127,7 @@ import hashlib
 import json
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dataclasses_replace
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
@@ -866,70 +866,22 @@ def process_selected_image(
         # now against two already-agreeing devices.
         membership_rows_aligned = _align_membership_device(membership_rows_full, unary_for_query)
 
-        seed_by_component_parts = []
-        propagated_by_component_parts = []
-        chunk_start = 0
-        while chunk_start < components.component_count:
-            chunk_stop = min(chunk_start + component_chunk_size, components.component_count)
-            membership_slice = membership_rows_aligned[chunk_start:chunk_stop]
-            seed = build_masked_seed_chunk(
-                unary_for_query, membership_slice, list(range(chunk_start, chunk_stop)), list(query_classes),
-                contract=contracts.masked_forward, window_index=window_index,
-            )
-            propagated = propagate_masked_seed_chunk(graph, seed, contract=contracts.masked_forward)
-            # `MaskedSeedChunk.unflatten` returns `[node_count,
-            # component_count_in_chunk, query_class_count]` (N first);
-            # the residual functions below want `[component_count,
-            # node_count, query_class_count]` (R first) -- transpose,
-            # never reinterpret the flattening convention itself.
-            seed_by_component_parts.append(seed.unflatten(seed.seed_flat).transpose(0, 1))
-            propagated_by_component_parts.append(seed.unflatten(propagated.t_final).transpose(0, 1))
-            chunk_start = chunk_stop
-
-        seed_by_component = torch.cat(seed_by_component_parts, dim=0)  # [R_total, N, Q]
-        propagated_by_component = torch.cat(propagated_by_component_parts, dim=0)  # [R_total, N, Q]
-
         canonical_t0_full = window_result.trace.snapshots[0].to(contracts.masked_forward.propagation_dtype)
         canonical_tfinal_full = window_result.trace.snapshots[contracts.recurrence.steps].to(contracts.masked_forward.propagation_dtype)
-        rho_0_summary = compute_seed_reconstruction_residual(seed_by_component, canonical_t0_full[:, list(query_classes)])
-        family_summaries["rho_0"] = summarize_residual_tensor(rho_0_summary.signed)
-        rho_320_summary = compute_propagated_reconstruction_residual(propagated_by_component, canonical_tfinal_full[:, list(query_classes)])
-        family_summaries["rho_320"] = summarize_residual_tensor(rho_320_summary.signed)
 
-        # --- rho_g: window-restricted masked numerator + full-image denominator. ---
-        # stitch_and_rescale_component_scores (and, inside it,
-        # apply_window_stitching_forward) is architecturally CPU-only --
-        # see _align_tensor_to_stitching_plan_device's docstring -- so
-        # the score tensors fed into it are aligned to the (always-CPU)
-        # stitching plan's own device here, once per selected window,
-        # WITHOUT touching seed_by_component/propagated_by_component/
-        # canonical_t0_full/canonical_tfinal_full themselves (rho_0/
-        # rho_320 above already correctly used their original,
-        # unary_window_scores-derived device).
-        seed_by_component_for_stitch = _align_tensor_to_stitching_plan_device(seed_by_component, pullback_plan)
-        propagated_by_component_for_stitch = _align_tensor_to_stitching_plan_device(propagated_by_component, pullback_plan)
+        # --- delta_m^(w): window-restricted CANONICAL numerator + full-image
+        # denominator, and the disputed-pixel/class bookkeeping shared by
+        # every masked component chunk below. Neither of these depends on
+        # the component-chunk loop's structure -- canonical_t0_for_stitch /
+        # canonical_tfinal_for_stitch / m0_w / m320_w always use
+        # component_count=1 (a single "pseudo-component container"), never
+        # components.component_count -- so this is computed exactly ONCE
+        # per window, BEFORE the loop, and reused unchanged by every chunk's
+        # compute_signed_contributions call (which itself requires the same
+        # already-sorted disputed-pixel arrays on every invocation for a
+        # given window).
         canonical_t0_for_stitch = _align_tensor_to_stitching_plan_device(canonical_t0_full, pullback_plan)
         canonical_tfinal_for_stitch = _align_tensor_to_stitching_plan_device(canonical_tfinal_full, pullback_plan)
-
-        node_count = seed_by_component.shape[1]
-        masked_chunk_for_window = PropagatedChunk(
-            # Re-flatten to `[N, R*Q]`, component-major-then-query-class-
-            # major (N first) -- exactly `MaskedSeedChunk`'s own
-            # flattening convention, so `stitch_and_rescale_component_
-            # scores`'s internal `_embed_into_query_union` sees the same
-            # shape it always does from a real `propagate_masked_seed_
-            # chunk` result.
-            t0=seed_by_component_for_stitch.transpose(0, 1).reshape(node_count, -1),
-            t_final=propagated_by_component_for_stitch.transpose(0, 1).reshape(node_count, -1),
-            window_index=window_index, component_id_start=0, component_id_stop=components.component_count,
-            query_class_indices=query_classes, steps_completed=contracts.recurrence.steps,
-        )
-        s0_masked, s_final_masked = stitch_and_rescale_component_scores(
-            {window_index: masked_chunk_for_window}, window_plan=pullback_plan, final_contract=contracts.final_resolution,
-            img_shape=img_shape, ori_shape=ori_shape, component_count=components.component_count, query_class_union=query_classes,
-        )
-
-        # --- delta_m^(w): window-restricted CANONICAL numerator + full-image denominator. ---
         canonical_chunk_for_window = PropagatedChunk(
             t0=canonical_t0_for_stitch[:, list(query_classes)], t_final=canonical_tfinal_for_stitch[:, list(query_classes)],
             window_index=window_index, component_id_start=0, component_id_stop=1,
@@ -949,9 +901,8 @@ def process_selected_image(
         order = torch.argsort(disputed_rows_t * ori_width + disputed_cols_t)
         disputed_rows_t, disputed_cols_t = disputed_rows_t[order], disputed_cols_t[order]
 
-        if disputed_rows_t.numel() == 0:
-            family_summaries["rho_g"] = summarize_residual_tensor(torch.zeros(0, dtype=torch.float64))
-        else:
+        have_disputed_pixels = disputed_rows_t.numel() > 0
+        if have_disputed_pixels:
             a_vals = a_labels[disputed_rows_t.numpy(), disputed_cols_t.numpy()]
             b_vals = b_labels[disputed_rows_t.numpy(), disputed_cols_t.numpy()]
             query_index_of = {cls: idx for idx, cls in enumerate(query_classes)}
@@ -975,11 +926,6 @@ def process_selected_image(
             a_global = torch.as_tensor(a_vals, dtype=torch.int64)
             b_global = torch.as_tensor(b_vals, dtype=torch.int64)
 
-            g_chunk = compute_signed_contributions(
-                s0_masked, s_final_masked, component_count=components.component_count, query_class_union=query_classes,
-                disputed_pixel_rows=disputed_rows_t, disputed_pixel_cols=disputed_cols_t,
-                disputed_pixel_a=a_global, disputed_pixel_b=b_global, ori_width=ori_width, component_id_start=0,
-            )
             m0_at_a = m0_w[0, a_local, disputed_rows_t, disputed_cols_t]
             m0_at_b = m0_w[0, b_local, disputed_rows_t, disputed_cols_t]
             m320_at_a = m320_w[0, a_local, disputed_rows_t, disputed_cols_t]
@@ -988,7 +934,175 @@ def process_selected_image(
             m320_x = (m320_at_b - m320_at_a).to(contracts.masked_forward.accumulation_dtype)
             delta_m_x = m320_x - m0_x
 
-            g_all_components = g_chunk.values.to(contracts.masked_forward.accumulation_dtype)
+        # --- rho_0/rho_320: full seed/propagated reconstruction. These
+        # residual APIs (compute_seed_reconstruction_residual /
+        # compute_propagated_reconstruction_residual) require the full
+        # [component_count, node_count, query_class_count] tensor -- no
+        # chunked variant exists -- and node_count (not inference-
+        # resolution height*width) bounds their size, so this list-
+        # append-then-torch.cat assembly is small and stays exactly as it
+        # was; it is NOT the OOM-causing allocation.
+        #
+        # --- rho_g: window-restricted masked numerator + full-image
+        # denominator, computed PER COMPONENT CHUNK. stitch_and_rescale_
+        # component_scores (and, inside it, apply_window_stitching_forward)
+        # is architecturally CPU-only -- see _align_tensor_to_stitching_
+        # plan_device's docstring -- so each chunk's own t0/t_final are
+        # aligned to the (always-CPU) stitching plan's device immediately
+        # before that chunk's own stitching call, never once for the
+        # full-component tensor. Critically, `stitch_and_rescale_
+        # component_scores` is called here with component_count=
+        # chunk_component_count (never components.component_count unless
+        # that total already fits in one chunk) -- its accumulator
+        # (accumulator_t0/accumulator_final, shaped [1,
+        # component_count*query_class_count, height, width], FP64, CPU)
+        # therefore scales with the CURRENT chunk's size, eliminating the
+        # full-component host-RAM allocation that caused job 21216898's
+        # OOM. `s0_chunk`/`s_final_chunk` are never appended to any list --
+        # only the small resulting SignedContributionChunk (shape
+        # [disputed_pixel_count, chunk_component_count]) survives past
+        # this iteration.
+        seed_by_component_parts = []
+        propagated_by_component_parts = []
+        signed_contribution_chunks = []
+        chunk_start = 0
+        while chunk_start < components.component_count:
+            chunk_stop = min(chunk_start + component_chunk_size, components.component_count)
+            chunk_component_count = chunk_stop - chunk_start
+            assert 0 < chunk_component_count <= component_chunk_size, (
+                f"image {canonical_id} window {window_index}: component chunk [{chunk_start}, {chunk_stop}) "
+                f"has size {chunk_component_count}, expected 0 < size <= component_chunk_size={component_chunk_size}"
+            )
+            membership_slice = membership_rows_aligned[chunk_start:chunk_stop]
+            seed = build_masked_seed_chunk(
+                unary_for_query, membership_slice, list(range(chunk_start, chunk_stop)), list(query_classes),
+                contract=contracts.masked_forward, window_index=window_index,
+            )
+            propagated = propagate_masked_seed_chunk(graph, seed, contract=contracts.masked_forward)
+            # `MaskedSeedChunk.unflatten` returns `[node_count,
+            # component_count_in_chunk, query_class_count]` (N first);
+            # the residual functions below want `[component_count,
+            # node_count, query_class_count]` (R first) -- transpose,
+            # never reinterpret the flattening convention itself.
+            seed_by_component_parts.append(seed.unflatten(seed.seed_flat).transpose(0, 1))
+            propagated_by_component_parts.append(seed.unflatten(propagated.t_final).transpose(0, 1))
+
+            if have_disputed_pixels:
+                # `propagated` (returned by propagate_masked_seed_chunk) is
+                # already a PropagatedChunk with exactly this chunk's own
+                # component_id_start/component_id_stop/query_class_indices
+                # (see propagate_masked_seed_chunk's own contract) and its
+                # t0/t_final are already flattened in the component-major-
+                # then-query-class-major convention stitch_and_rescale_
+                # component_scores expects -- only the device needs to
+                # change, so a NEW PropagatedChunk with the aligned tensors
+                # is built via dataclasses.replace rather than
+                # reconstructing this chunk's geometry from scratch.
+                masked_chunk_for_stitch = dataclasses_replace(
+                    propagated,
+                    t0=_align_tensor_to_stitching_plan_device(propagated.t0, pullback_plan),
+                    t_final=_align_tensor_to_stitching_plan_device(propagated.t_final, pullback_plan),
+                )
+                s0_chunk, s_final_chunk = stitch_and_rescale_component_scores(
+                    {window_index: masked_chunk_for_stitch}, window_plan=pullback_plan, final_contract=contracts.final_resolution,
+                    img_shape=img_shape, ori_shape=ori_shape, component_count=chunk_component_count, query_class_union=query_classes,
+                )
+                g_chunk = compute_signed_contributions(
+                    s0_chunk, s_final_chunk, component_count=chunk_component_count, query_class_union=query_classes,
+                    disputed_pixel_rows=disputed_rows_t, disputed_pixel_cols=disputed_cols_t,
+                    disputed_pixel_a=a_global, disputed_pixel_b=b_global, ori_width=ori_width, component_id_start=chunk_start,
+                )
+                signed_contribution_chunks.append(g_chunk)
+                # s0_chunk/s_final_chunk/masked_chunk_for_stitch go out of
+                # scope at the next loop iteration -- never retained.
+
+            chunk_start = chunk_stop
+
+        seed_by_component = torch.cat(seed_by_component_parts, dim=0)  # [R_total, N, Q]
+        propagated_by_component = torch.cat(propagated_by_component_parts, dim=0)  # [R_total, N, Q]
+
+        rho_0_summary = compute_seed_reconstruction_residual(seed_by_component, canonical_t0_full[:, list(query_classes)])
+        family_summaries["rho_0"] = summarize_residual_tensor(rho_0_summary.signed)
+        rho_320_summary = compute_propagated_reconstruction_residual(propagated_by_component, canonical_tfinal_full[:, list(query_classes)])
+        family_summaries["rho_320"] = summarize_residual_tensor(rho_320_summary.signed)
+
+        if not have_disputed_pixels:
+            family_summaries["rho_g"] = summarize_residual_tensor(torch.zeros(0, dtype=torch.float64))
+        else:
+            # Reassemble the per-chunk SignedContributionChunk results into
+            # the full [disputed_pixel_count, total_component_count] matrix
+            # compute_signed_margin_conservation_residual requires (it sums
+            # over EVERY component, not one arbitrary chunk) -- validating
+            # ascending, contiguous, non-overlapping component-id coverage
+            # of exactly [0, components.component_count) first, and
+            # concatenating only the small `.values` tensors (never the
+            # image-resolution s0_chunk/s_final_chunk) along the component
+            # axis (dim=1).
+            expected_start = 0
+            first_flat_indices = signed_contribution_chunks[0].disputed_pixel_flat_indices
+            for chunk in signed_contribution_chunks:
+                if chunk.component_id_start != expected_start:
+                    raise DfpPhase1bCalibrationRunError(
+                        f"image {canonical_id} window {window_index}: signed-contribution chunk coverage "
+                        f"gap/overlap -- expected component_id_start={expected_start}, got {chunk.component_id_start}"
+                    )
+                # Range validation above only checks component_id_start/
+                # component_id_stop bookkeeping -- it says nothing about
+                # whether `chunk.values` actually HAS that many columns.
+                # A chunk whose `values` tensor is narrower or wider than
+                # its own declared [component_id_start, component_id_stop)
+                # range would otherwise pass the check above, concatenate
+                # cleanly (torch.cat does not know what width was
+                # "expected"), and silently hand compute_signed_margin_
+                # conservation_residual a wrong-width, under- or over-
+                # summed matrix -- never raising. Compute the expected
+                # width from the chunk's OWN declared range (never from
+                # `chunk.values` itself, and never by adjusting
+                # component_id_start/component_id_stop to match whatever
+                # `values` happens to contain) and require every relevant
+                # invariant before this chunk is trusted for concatenation.
+                expected_component_count = chunk.component_id_stop - chunk.component_id_start
+                if expected_component_count <= 0:
+                    raise DfpPhase1bCalibrationRunError(
+                        f"image {canonical_id} window {window_index}: signed-contribution chunk "
+                        f"[{chunk.component_id_start}, {chunk.component_id_stop}) has a non-positive "
+                        f"declared component width {expected_component_count}"
+                    )
+                if not torch.is_tensor(chunk.values) or chunk.values.ndim != 2:
+                    raise DfpPhase1bCalibrationRunError(
+                        f"image {canonical_id} window {window_index}: signed-contribution chunk "
+                        f"[{chunk.component_id_start}, {chunk.component_id_stop}) values must be a 2-D "
+                        f"[disputed_pixel_count, component_count] tensor"
+                    )
+                if chunk.values.shape[1] != expected_component_count:
+                    raise DfpPhase1bCalibrationRunError(
+                        f"image {canonical_id} window {window_index}: signed-contribution chunk "
+                        f"[{chunk.component_id_start}, {chunk.component_id_stop}) declares component-axis "
+                        f"width {expected_component_count} but values has component-axis width "
+                        f"{chunk.values.shape[1]}"
+                    )
+                if chunk.component_count != expected_component_count:
+                    raise DfpPhase1bCalibrationRunError(
+                        f"image {canonical_id} window {window_index}: signed-contribution chunk "
+                        f"[{chunk.component_id_start}, {chunk.component_id_stop}) component_count property "
+                        f"{chunk.component_count} disagrees with its own declared range width "
+                        f"{expected_component_count}"
+                    )
+                if chunk.disputed_pixel_flat_indices != first_flat_indices:
+                    raise DfpPhase1bCalibrationRunError(
+                        f"image {canonical_id} window {window_index}: signed-contribution chunks disagree on "
+                        f"disputed-pixel order"
+                    )
+                expected_start = chunk.component_id_stop
+            if expected_start != components.component_count:
+                raise DfpPhase1bCalibrationRunError(
+                    f"image {canonical_id} window {window_index}: signed-contribution chunks cover "
+                    f"[0, {expected_start}), expected [0, {components.component_count})"
+                )
+
+            g_all_components = torch.cat(
+                [chunk.values for chunk in signed_contribution_chunks], dim=1,
+            ).to(contracts.masked_forward.accumulation_dtype)
             rho_g_summary = compute_signed_margin_conservation_residual(g_all_components, delta_m_x)
             family_summaries["rho_g"] = summarize_residual_tensor(rho_g_summary.signed)
 
