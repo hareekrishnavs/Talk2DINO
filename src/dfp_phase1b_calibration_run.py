@@ -675,6 +675,61 @@ def _align_membership_device(membership: Any, reference: Any) -> Any:
         ) from error
 
 
+def _align_tensor_to_stitching_plan_device(tensor: Any, plan: Any) -> Any:
+    """Move a component/window score tensor onto ``plan``'s own device
+    (``plan.denominator.device``) immediately before it is packaged into
+    a ``PropagatedChunk`` and fed into ``stitch_and_rescale_component_
+    scores`` -- the OPPOSITE direction from ``_align_membership_device``,
+    for a source-verified reason:
+
+    ``stitch_and_rescale_component_scores`` (``src.dfp_phase1b_masked_
+    forward``, left completely unmodified here) constructs its own
+    ``accumulator_t0``/``accumulator_final`` via a bare ``torch.zeros(...,
+    dtype=dtype)`` -- no ``device`` argument, always CPU -- and its own
+    per-window call to the (also unmodified) ``apply_window_stitching_
+    forward`` (``src.dfp_phase1a_stitching_pullback``) builds its
+    per-pixel ``weight`` via ``build_stitch_weight(..., dtype=u.dtype)``
+    -- again no ``device`` argument, always CPU, regardless of ``u``'s
+    own device. Both of those hardcoded-CPU constructions are internal
+    to protected, hash-pinned dependencies this repair may not modify;
+    unlike the real model's own GPU-resident unary score
+    (``unary_window_scores``), there is no way to make this particular
+    call chain honor a non-CPU device at all. ``plan.denominator`` is
+    itself always CPU for the identical reason (``build_stitching_
+    pullback_plan`` never places anything on a non-CPU device either),
+    so aligning to ``plan.denominator.device`` and aligning to a literal
+    CPU device are equivalent today; deriving it from the plan keeps
+    this correct even if that upstream construction ever changes.
+
+    A real GPU job (SLURM 21210326) observed exactly this: ``unary_
+    window_scores``-derived component/window score tensors reaching
+    ``crop * weight / denom_local`` on ``cuda:0`` while ``weight``/
+    ``denom_local`` remained ``cpu``, raising a raw ``RuntimeError``
+    inside ``apply_window_stitching_forward`` (the first, membership,
+    repair had already fixed the earlier ``build_masked_seed_chunk``
+    boundary this job data reached first).
+
+    Never hardcodes ``"cpu"`` literally -- always reads
+    ``plan.denominator.device``. ``Tensor.to(device=...)`` (no ``dtype``
+    argument) changes nothing but placement. A genuine no-op (identical
+    object, no copy) when the device already matches. A ``RuntimeError``
+    from the transfer itself is translated into this module's own
+    ``DfpPhase1bCalibrationRunError``, identifying both devices, with
+    the original exception preserved as ``__cause__``; nothing else is
+    caught here, and ``KeyboardInterrupt``/``SystemExit``/``MemoryError``
+    are never touched."""
+    target_device = plan.denominator.device
+    if tensor.device == target_device:
+        return tensor
+    try:
+        return tensor.to(device=target_device)
+    except RuntimeError as error:
+        raise DfpPhase1bCalibrationRunError(
+            f"stitching-plan score-tensor device alignment failed: could not move a component/window score "
+            f"tensor from {tensor.device} to {target_device} (the stitching plan's own device) -- {error}"
+        ) from error
+
+
 def process_selected_image(
     inference: InferenceProvider, prepared: PreparedImage, canonical_id: str, *,
     selected_windows_for_image: Sequence[int], protocol_identity: Mapping[str, Any],
@@ -842,6 +897,20 @@ def process_selected_image(
         family_summaries["rho_320"] = summarize_residual_tensor(rho_320_summary.signed)
 
         # --- rho_g: window-restricted masked numerator + full-image denominator. ---
+        # stitch_and_rescale_component_scores (and, inside it,
+        # apply_window_stitching_forward) is architecturally CPU-only --
+        # see _align_tensor_to_stitching_plan_device's docstring -- so
+        # the score tensors fed into it are aligned to the (always-CPU)
+        # stitching plan's own device here, once per selected window,
+        # WITHOUT touching seed_by_component/propagated_by_component/
+        # canonical_t0_full/canonical_tfinal_full themselves (rho_0/
+        # rho_320 above already correctly used their original,
+        # unary_window_scores-derived device).
+        seed_by_component_for_stitch = _align_tensor_to_stitching_plan_device(seed_by_component, pullback_plan)
+        propagated_by_component_for_stitch = _align_tensor_to_stitching_plan_device(propagated_by_component, pullback_plan)
+        canonical_t0_for_stitch = _align_tensor_to_stitching_plan_device(canonical_t0_full, pullback_plan)
+        canonical_tfinal_for_stitch = _align_tensor_to_stitching_plan_device(canonical_tfinal_full, pullback_plan)
+
         node_count = seed_by_component.shape[1]
         masked_chunk_for_window = PropagatedChunk(
             # Re-flatten to `[N, R*Q]`, component-major-then-query-class-
@@ -850,8 +919,8 @@ def process_selected_image(
             # scores`'s internal `_embed_into_query_union` sees the same
             # shape it always does from a real `propagate_masked_seed_
             # chunk` result.
-            t0=seed_by_component.transpose(0, 1).reshape(node_count, -1),
-            t_final=propagated_by_component.transpose(0, 1).reshape(node_count, -1),
+            t0=seed_by_component_for_stitch.transpose(0, 1).reshape(node_count, -1),
+            t_final=propagated_by_component_for_stitch.transpose(0, 1).reshape(node_count, -1),
             window_index=window_index, component_id_start=0, component_id_stop=components.component_count,
             query_class_indices=query_classes, steps_completed=contracts.recurrence.steps,
         )
@@ -862,7 +931,7 @@ def process_selected_image(
 
         # --- delta_m^(w): window-restricted CANONICAL numerator + full-image denominator. ---
         canonical_chunk_for_window = PropagatedChunk(
-            t0=canonical_t0_full[:, list(query_classes)], t_final=canonical_tfinal_full[:, list(query_classes)],
+            t0=canonical_t0_for_stitch[:, list(query_classes)], t_final=canonical_tfinal_for_stitch[:, list(query_classes)],
             window_index=window_index, component_id_start=0, component_id_stop=1,
             query_class_indices=query_classes, steps_completed=contracts.recurrence.steps,
         )

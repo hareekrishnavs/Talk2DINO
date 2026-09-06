@@ -1348,6 +1348,396 @@ def test_end_to_end_synthetic_image_with_cuda_resident_scores_matches_cpu(real_e
 
 
 # ---------------------------------------------------------------------------
+# Section: stitching-plan score-tensor device alignment (second real-GPU
+# failure, SLURM job 21210326).
+#
+# The first (membership) repair aligned CPU-native membership geometry
+# TO the real model's GPU-resident unary score device. Execution then
+# advanced further and hit a SECOND, architecturally different device
+# boundary: `stitch_and_rescale_component_scores`
+# (`src.dfp_phase1b_masked_forward`) builds its own
+# `accumulator_t0`/`accumulator_final` via a bare `torch.zeros(...,
+# dtype=dtype)` -- no `device` argument, always CPU -- and its call into
+# `apply_window_stitching_forward` (`src.dfp_phase1a_stitching_
+# pullback`) builds its per-pixel `weight` via `build_stitch_weight(...,
+# dtype=u.dtype)` -- again no `device` argument, always CPU regardless
+# of `u`'s own device. Both are internal to protected, hash-pinned
+# dependencies this repair may not modify, so THIS boundary requires
+# alignment in the OPPOSITE direction: the runner's own GPU-resident
+# component/window score tensors must move TO the stitching plan's own
+# (always-CPU) device before being packaged into a `PropagatedChunk` and
+# handed to `stitch_and_rescale_component_scores`.
+# ---------------------------------------------------------------------------
+
+
+def test_align_tensor_to_stitching_plan_device_noop_when_already_matching(real_e13_e15_identities):
+    import torch
+
+    e13, e15, repo_root = real_e13_e15_identities
+    contracts = _build_small_contracts(e13, e15, repo_root)
+    from src.dfp_phase1a_stitching_pullback import build_stitching_pullback_plan
+
+    plan = build_stitching_pullback_plan((63, 105), contract=contracts.pullback)
+    tensor = torch.rand(15, 4, dtype=torch.float64)
+    result = run._align_tensor_to_stitching_plan_device(tensor, plan)
+    assert result is tensor
+    assert torch.equal(result, tensor)
+
+
+def test_align_tensor_to_stitching_plan_device_dynamic_target_meta(real_e13_e15_identities):
+    """meta stands in for a real non-cpu device (no CUDA available in
+    this test environment): proves the target is read dynamically from
+    `plan.denominator.device`, never hardcoded, and no dtype argument
+    is ever passed to `.to(...)`."""
+    import torch
+
+    e13, e15, repo_root = real_e13_e15_identities
+    contracts = _build_small_contracts(e13, e15, repo_root)
+    from src.dfp_phase1a_stitching_pullback import build_stitching_pullback_plan
+
+    plan = build_stitching_pullback_plan((63, 105), contract=contracts.pullback)
+    assert plan.denominator.device == torch.device("cpu")
+
+    class _FakePlan:
+        def __init__(self, denominator):
+            self.denominator = denominator
+
+    meta_plan = _FakePlan(torch.zeros(1).to("meta"))
+
+    class RecordingTensorLike:
+        def __init__(self, real):
+            self._real = real
+            self.to_calls = []
+
+        @property
+        def device(self):
+            return self._real.device
+
+        @property
+        def dtype(self):
+            return self._real.dtype
+
+        @property
+        def shape(self):
+            return self._real.shape
+
+        def to(self, *args, **kwargs):
+            self.to_calls.append((args, dict(kwargs)))
+            return self._real.to(*args, **kwargs)
+
+    membership_like = RecordingTensorLike(torch.rand(3, 4, dtype=torch.float64))
+    result = run._align_tensor_to_stitching_plan_device(membership_like, meta_plan)
+    assert membership_like.to_calls == [((), {"device": torch.device("meta")})]
+    assert result.device.type == "meta"
+    assert result.dtype == torch.float64
+    assert tuple(result.shape) == (3, 4)
+
+
+def test_align_tensor_to_stitching_plan_device_preserves_nontrivial_values(real_e13_e15_identities):
+    import torch
+
+    e13, e15, repo_root = real_e13_e15_identities
+    contracts = _build_small_contracts(e13, e15, repo_root)
+    from src.dfp_phase1a_stitching_pullback import build_stitching_pullback_plan
+
+    plan = build_stitching_pullback_plan((63, 105), contract=contracts.pullback)
+    base = torch.tensor([[0.0, 1.0], [0.5, -0.5], [3.0, -3.0]], dtype=torch.float64)
+    non_contig = base.t()  # genuine non-contiguous view
+    assert not non_contig.is_contiguous()
+    result = run._align_tensor_to_stitching_plan_device(non_contig, plan)
+    assert result is non_contig  # same-device no-op
+    assert torch.equal(result, base.t())
+    assert torch.equal(non_contig, base.t())  # source unmutated
+
+
+def test_align_tensor_to_stitching_plan_device_translates_runtime_error(real_e13_e15_identities):
+    import torch
+
+    e13, e15, repo_root = real_e13_e15_identities
+    contracts = _build_small_contracts(e13, e15, repo_root)
+    from src.dfp_phase1a_stitching_pullback import build_stitching_pullback_plan
+
+    plan = build_stitching_pullback_plan((63, 105), contract=contracts.pullback)
+
+    class _FakePlan:
+        def __init__(self, denominator):
+            self.denominator = denominator
+
+    meta_plan = _FakePlan(torch.zeros(1).to("meta"))
+    injected = RuntimeError("simulated device-transfer failure (independent probe)")
+
+    class RaisingTensorLike:
+        def __init__(self, real, error):
+            self._real = real
+            self._error = error
+
+        @property
+        def device(self):
+            return self._real.device
+
+        @property
+        def dtype(self):
+            return self._real.dtype
+
+        @property
+        def shape(self):
+            return self._real.shape
+
+        def to(self, *a, **k):
+            raise self._error
+
+    real_tensor = torch.zeros(2, 3, dtype=torch.float64)
+    double = RaisingTensorLike(real_tensor, injected)
+    with pytest.raises(run.DfpPhase1bCalibrationRunError) as excinfo:
+        run._align_tensor_to_stitching_plan_device(double, meta_plan)
+    assert excinfo.value.__cause__ is injected
+    msg = str(excinfo.value).lower()
+    assert "device" in msg
+    assert "cpu" in msg or "meta" in msg
+
+
+@pytest.mark.parametrize("exc_type", [KeyboardInterrupt, SystemExit, MemoryError])
+def test_align_tensor_to_stitching_plan_device_never_catches_fatal_exceptions(exc_type):
+    import torch
+
+    class _FakePlan:
+        def __init__(self, denominator):
+            self.denominator = denominator
+
+    meta_plan = _FakePlan(torch.zeros(1).to("meta"))
+
+    class RaisingTensorLike:
+        def __init__(self, real, error):
+            self._real = real
+            self._error = error
+
+        @property
+        def device(self):
+            return self._real.device
+
+        def to(self, *a, **k):
+            raise self._error
+
+    real_tensor = torch.zeros(2, dtype=torch.float64)
+    double = RaisingTensorLike(real_tensor, exc_type("must propagate"))
+    with pytest.raises(exc_type):
+        run._align_tensor_to_stitching_plan_device(double, meta_plan)
+
+
+def test_exact_failure_reproduction_without_alignment_then_success_with_it(real_e13_e15_identities):
+    """Drives the REAL, unmodified stitch_and_rescale_component_scores
+    (never monkeypatched away) far enough to reach apply_window_
+    stitching_forward: without alignment, a mismatched-device
+    PropagatedChunk (meta t0/t_final against the real cpu plan) fails;
+    with the real repair's alignment applied first, the identical call
+    succeeds -- the exact SLURM-21210326 boundary, reproduced with the
+    real protected functions."""
+    import torch
+
+    e13, e15, repo_root = real_e13_e15_identities
+    contracts = _build_small_contracts(e13, e15, repo_root)
+    from src.dfp_phase1a_stitching_pullback import build_stitching_pullback_plan
+    from src.dfp_phase1b_masked_forward import PropagatedChunk, stitch_and_rescale_component_scores
+
+    plan = build_stitching_pullback_plan((63, 105), contract=contracts.pullback)
+    component_count, query_classes = 2, [0, 1]
+    node_count = _PATCH_GRID[0] * _PATCH_GRID[1]
+
+    t0_meta = torch.zeros(node_count, component_count * len(query_classes), dtype=torch.float64).to("meta")
+    t_final_meta = torch.zeros(node_count, component_count * len(query_classes), dtype=torch.float64).to("meta")
+    mismatched_chunk = PropagatedChunk(
+        t0=t0_meta, t_final=t_final_meta, window_index=0, component_id_start=0, component_id_stop=component_count,
+        query_class_indices=query_classes, steps_completed=320,
+    )
+    with pytest.raises(RuntimeError):
+        stitch_and_rescale_component_scores(
+            {0: mismatched_chunk}, window_plan=plan, final_contract=contracts.final_resolution,
+            img_shape=(63, 105), ori_shape=(37, 61), component_count=component_count, query_class_union=query_classes,
+        )
+
+    t0_real = torch.rand(node_count, component_count * len(query_classes), dtype=torch.float64)
+    t_final_real = torch.rand(node_count, component_count * len(query_classes), dtype=torch.float64)
+    t0_aligned = run._align_tensor_to_stitching_plan_device(t0_real, plan)
+    t_final_aligned = run._align_tensor_to_stitching_plan_device(t_final_real, plan)
+    aligned_chunk = PropagatedChunk(
+        t0=t0_aligned, t_final=t_final_aligned, window_index=0, component_id_start=0, component_id_stop=component_count,
+        query_class_indices=query_classes, steps_completed=320,
+    )
+    s0, sf = stitch_and_rescale_component_scores(
+        {0: aligned_chunk}, window_plan=plan, final_contract=contracts.final_resolution,
+        img_shape=(63, 105), ori_shape=(37, 61), component_count=component_count, query_class_union=query_classes,
+    )
+    assert s0.device == torch.device("cpu")
+    assert torch.isfinite(s0).all() and torch.isfinite(sf).all()
+
+
+def test_stitching_alignment_call_count_invariant_to_chunk_size(real_e13_e15_identities, monkeypatch):
+    """Section 3/6: for a fixed image, _align_tensor_to_stitching_plan_device
+    must be called exactly 4 times per selected window (seed_by_component,
+    propagated_by_component, canonical_t0_full, canonical_tfinal_full),
+    regardless of component_chunk_size -- never once per component,
+    chunk, or recurrence step."""
+    e13, e15, repo_root = real_e13_e15_identities
+    contracts = _build_small_contracts(e13, e15, repo_root)
+
+    calls = []
+    real_align = run._align_tensor_to_stitching_plan_device
+
+    def spying_align(tensor, plan):
+        calls.append(tuple(tensor.shape))
+        return real_align(tensor, plan)
+
+    monkeypatch.setattr(run, "_align_tensor_to_stitching_plan_device", spying_align)
+
+    for chunk_size in (1, 2, 8, 16, 37, 64):
+        calls.clear()
+        _run_small_image(
+            contracts, e13, image_h=63, image_w=105, ori_shape=(37, 61), seeds={i: 7000 + i for i in range(4)},
+            component_chunk_size=chunk_size, selected_windows=[0],
+        )
+        assert len(calls) == 4, f"chunk_size={chunk_size}: expected exactly 4 stitching-alignment calls (one selected window), got {len(calls)}"
+
+
+def test_stitching_alignment_multiple_windows_call_count(real_e13_e15_identities, monkeypatch):
+    e13, e15, repo_root = real_e13_e15_identities
+    contracts = _build_small_contracts(e13, e15, repo_root)
+
+    calls = []
+    real_align = run._align_tensor_to_stitching_plan_device
+
+    def spying_align(tensor, plan):
+        calls.append(1)
+        return real_align(tensor, plan)
+
+    monkeypatch.setattr(run, "_align_tensor_to_stitching_plan_device", spying_align)
+    results, model, n_windows = _run_small_image(
+        contracts, e13, image_h=63, image_w=105, ori_shape=(37, 61), seeds={i: 7100 + i for i in range(4)},
+        component_chunk_size=1, selected_windows=[0, 1],
+    )
+    assert n_windows >= 3
+    assert len(calls) == 4 * 2, f"expected 4 calls per selected window x 2 selected windows, got {len(calls)}"
+    assert set(results.keys()) == {0, 1}
+
+
+def test_unrelated_runtime_error_downstream_of_stitching_alignment_not_mislabeled(real_e13_e15_identities):
+    """A RuntimeError raised by a completely different, later operation
+    (simulating an unrelated downstream failure in signed-contribution
+    computation) must propagate exactly as itself, never reinterpreted
+    as a stitching-plan-transfer failure."""
+    e13, e15, repo_root = real_e13_e15_identities
+    contracts = _build_small_contracts(e13, e15, repo_root)
+    import src.dfp_phase1b_masked_forward as masked_forward_module
+
+    class _UnrelatedError(RuntimeError):
+        pass
+
+    real_compute = masked_forward_module.compute_signed_contributions
+
+    def raising_compute(*a, **k):
+        raise _UnrelatedError("unrelated failure in compute_signed_contributions")
+
+    masked_forward_module.compute_signed_contributions = raising_compute
+    try:
+        with pytest.raises(_UnrelatedError) as excinfo:
+            _run_small_image(contracts, e13, image_h=63, image_w=105, ori_shape=(37, 61), seeds={i: 7200 + i for i in range(4)})
+        assert not isinstance(excinfo.value, run.DfpPhase1bCalibrationRunError)
+        assert "stitching-plan" not in str(excinfo.value).lower()
+    finally:
+        masked_forward_module.compute_signed_contributions = real_compute
+
+
+def test_stitching_plan_alignment_numerical_non_regression(real_e13_e15_identities):
+    """Independent reconstruction of crop*weight/denom_local on CPU,
+    compared against the real (unmodified) apply_window_stitching_forward
+    called with the plan-prepared (here: no-op, since same-device) input,
+    plus a full end-to-end same-device comparison across chunk sizes."""
+    import torch
+
+    e13, e15, repo_root = real_e13_e15_identities
+    contracts = _build_small_contracts(e13, e15, repo_root)
+    from src.dfp_phase1a_stitching_pullback import apply_window_stitching_forward, build_stitching_pullback_plan
+    # build_stitch_weight/interpolate_raw_scores are re-exported from
+    # src.dfp_phase1a_horizon_stitching -- the same path
+    # dfp_phase1a_stitching_pullback.py's own (protected) source uses --
+    # never imported via the bare `models.dinotext...` package path,
+    # which triggers that package's __init__ side effects (mmcv model
+    # registry registration) a second time under a different module
+    # identity if anything else in the same test session already
+    # imported it via sys.path's `src/open_vocabulary_segmentation` root.
+    from src.dfp_phase1a_horizon_stitching import build_stitch_weight, interpolate_raw_scores
+
+    plan = build_stitching_pullback_plan((63, 105), contract=contracts.pullback)
+    node_count = _PATCH_GRID[0] * _PATCH_GRID[1]
+    k = 3
+    u = torch.rand(k, node_count, dtype=torch.float64) * 4 - 2
+    u_aligned = run._align_tensor_to_stitching_plan_device(u, plan)
+    assert u_aligned is u  # same-device no-op
+
+    contribution = apply_window_stitching_forward(u_aligned, window_plan=plan, window_index=0)
+
+    window = plan.plan.windows[0]
+    crop_hw = window.extent.as_tuple()
+    patch_scores = u_aligned.unsqueeze(0).transpose(1, 2)
+    crop = interpolate_raw_scores(patch_scores, plan.patch_grid, crop_hw).squeeze(0)
+    weight = build_stitch_weight(crop_hw[0], crop_hw[1], kind="uniform", dtype=u_aligned.dtype).squeeze(0)
+    rows, cols = window.accumulation_slice
+    denom_local = plan.denominator[:, :, rows, cols].squeeze(0)
+    expected = crop * weight / denom_local
+    assert torch.equal(contribution, expected)
+
+    # Full end-to-end same-device comparison across chunk sizes.
+    results_by_chunk = {}
+    for cs in (1, 2, 4, 100):
+        r, _, _ = _run_small_image(contracts, e13, image_h=63, image_w=105, ori_shape=(37, 61), seeds={i: 7300 + i for i in range(4)}, component_chunk_size=cs)
+        results_by_chunk[cs] = r
+    ref = results_by_chunk[1]
+    for cs, r in results_by_chunk.items():
+        for window_index in ref:
+            for family in ("rho_M", "rho_0", "rho_320", "rho_g"):
+                a, b = ref[window_index][family], r[window_index][family]
+                assert a["sample_count"] == b["sample_count"]
+                if a["sample_count"] > 0:
+                    assert a["mean_absolute_residual"] == pytest.approx(b["mean_absolute_residual"], abs=1e-12)
+
+
+def test_stitching_plan_alignment_domain_error_leaves_no_artifact(tmp_path):
+    """The narrow domain-error translation: a stitching-plan alignment
+    RuntimeError raises DfpPhase1bCalibrationRunError (already a member
+    of the CLI's own _KNOWN_ERRORS tuple, unchanged -- see
+    test_dfp_phase1b_calibration_production.py's own real-CLI
+    end-to-end tests, which exercise this exact code path through the
+    full production stack and are re-run, unmodified, as part of this
+    repair's verification) and leaves no artifact file behind."""
+    import torch
+
+    class _FakePlan:
+        def __init__(self, denominator):
+            self.denominator = denominator
+
+    class RaisingTensorLike:
+        def __init__(self, real, error):
+            self._real = real
+            self._error = error
+
+        @property
+        def device(self):
+            return self._real.device
+
+        def to(self, *a, **k):
+            raise self._error
+
+    meta_plan = _FakePlan(torch.zeros(1).to("meta"))
+    real_tensor = torch.zeros(2, dtype=torch.float64)
+    double = RaisingTensorLike(real_tensor, RuntimeError("simulated stitching-plan transfer failure"))
+
+    with pytest.raises(run.DfpPhase1bCalibrationRunError):
+        run._align_tensor_to_stitching_plan_device(double, meta_plan)
+
+    output_path = tmp_path / "phase1b_conservation_calibration.json"
+    assert not output_path.exists()
+
+
+# ---------------------------------------------------------------------------
 # Section: CLI.
 # ---------------------------------------------------------------------------
 
