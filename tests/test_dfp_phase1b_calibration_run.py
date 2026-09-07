@@ -1892,6 +1892,389 @@ def test_real_device_record_requires_cuda():
         run.real_device_record()
 
 
+# ---------------------------------------------------------------------------
+# Section: Torch-2.12 CUDA driver-version compatibility (real job 21240861:
+# torch._C._cuda_getDriverVersion, the private symbol the OLD code relied
+# on, does not exist in Torch 2.12.0; nor does a public torch.cuda.
+# driver_version). CUDA is never actually initialized by any test below --
+# `torch.cuda.is_available`/`current_device`/`get_device_properties`/
+# `get_device_capability`/`get_device_name` are pure-Python monkeypatched
+# stand-ins, never real driver calls.
+# ---------------------------------------------------------------------------
+
+
+def _install_fake_cuda(monkeypatch, *, total_memory=1024, gpu_name="Fake-H100",
+                        compute_major=9, compute_minor=0, cuda_toolkit_version="13.2"):
+    """Simulate a Torch-2.12-shaped, real-job-21240861-like environment:
+    CUDA reports available with one visible device, but exposes NEITHER
+    a public `torch.cuda.driver_version` accessor NOR the removed
+    private `torch._C._cuda_getDriverVersion` symbol. Every patched
+    attribute is a plain Python callable/value -- none of this touches
+    the real CUDA driver, so `torch.cuda.is_initialized()` remains
+    False throughout, exactly as if no GPU work had ever been
+    attempted."""
+    import torch
+
+    class _FakeProperties:
+        total_memory = 0
+
+    _FakeProperties.total_memory = total_memory
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda idx: _FakeProperties())
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda idx: (compute_major, compute_minor))
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda idx: gpu_name)
+    monkeypatch.setattr(torch.version, "cuda", cuda_toolkit_version)
+    monkeypatch.delattr(torch.cuda, "driver_version", raising=False)
+    monkeypatch.delattr(torch._C, "_cuda_getDriverVersion", raising=False)
+
+
+def test_no_private_cuda_driver_accessor_in_source():
+    """Source/AST regression (Section 7): production code must never
+    reference the removed private symbol `_cuda_getDriverVersion`, and
+    must never introduce a DIFFERENT private `torch._C` symbol as a
+    replacement, and must never import `pynvml`. AST-only (not a raw
+    substring search) so the module's own docstrings -- which legitimately
+    NAME the removed symbol as history/documentation -- do not trip this
+    check; only actual `ast.Attribute`/`ast.Import`/`ast.ImportFrom` nodes
+    count as a real reference."""
+    import ast
+
+    source = Path(run.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                assert "pynvml" not in alias.name.lower(), ast.dump(node)
+        if isinstance(node, ast.Attribute) and node.attr.startswith("_") and "cuda" in node.attr.lower():
+            # The only underscore-prefixed, cuda-named attribute access
+            # this module may perform is on `torch.cuda` itself (e.g.
+            # `torch.cuda.is_available`, not underscore-prefixed) --
+            # assert no `torch._C._<anything with "cuda">` access exists.
+            assert node.attr != "_cuda_getDriverVersion"
+
+
+def test_query_cuda_driver_version_via_nvidia_smi_one_valid_row(monkeypatch):
+    import subprocess as sp
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return sp.CompletedProcess(cmd, 0, stdout=b"570.124.06\n", stderr=b"")
+
+    monkeypatch.setattr(run.subprocess, "run", fake_run)
+    result = run._query_cuda_driver_version_via_nvidia_smi()
+    assert result == "570.124.06"
+    assert len(calls) == 1
+    cmd, kwargs = calls[0]
+    assert cmd == ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"]
+    assert kwargs.get("shell") is False
+
+
+def test_query_cuda_driver_version_via_nvidia_smi_multiple_identical_rows(monkeypatch):
+    import subprocess as sp
+    monkeypatch.setattr(run.subprocess, "run", lambda cmd, **k: sp.CompletedProcess(cmd, 0, stdout=b"570.124.06\n570.124.06\n", stderr=b""))
+    assert run._query_cuda_driver_version_via_nvidia_smi() == "570.124.06"
+
+
+def test_query_cuda_driver_version_via_nvidia_smi_surrounding_whitespace(monkeypatch):
+    import subprocess as sp
+    monkeypatch.setattr(run.subprocess, "run", lambda cmd, **k: sp.CompletedProcess(cmd, 0, stdout=b"  570.124.06  \n", stderr=b""))
+    assert run._query_cuda_driver_version_via_nvidia_smi() == "570.124.06"
+
+
+def test_query_cuda_driver_version_via_nvidia_smi_trailing_newline(monkeypatch):
+    import subprocess as sp
+    monkeypatch.setattr(run.subprocess, "run", lambda cmd, **k: sp.CompletedProcess(cmd, 0, stdout=b"570.124.06\n\n\n", stderr=b""))
+    assert run._query_cuda_driver_version_via_nvidia_smi() == "570.124.06"
+
+
+def test_query_cuda_driver_version_via_nvidia_smi_blank_lines_plus_one_valid_row(monkeypatch):
+    import subprocess as sp
+    monkeypatch.setattr(run.subprocess, "run", lambda cmd, **k: sp.CompletedProcess(cmd, 0, stdout=b"\n   \n570.124.06\n\n", stderr=b""))
+    assert run._query_cuda_driver_version_via_nvidia_smi() == "570.124.06"
+
+
+def test_query_cuda_driver_version_via_nvidia_smi_conflicting_rows_rejected(monkeypatch):
+    import subprocess as sp
+    monkeypatch.setattr(run.subprocess, "run", lambda cmd, **k: sp.CompletedProcess(cmd, 0, stdout=b"570.124.06\n571.00.00\n", stderr=b""))
+    with pytest.raises(run.DfpPhase1bCalibrationRunError, match="conflicting"):
+        run._query_cuda_driver_version_via_nvidia_smi()
+
+
+def test_query_cuda_driver_version_via_nvidia_smi_empty_stdout_rejected(monkeypatch):
+    import subprocess as sp
+    monkeypatch.setattr(run.subprocess, "run", lambda cmd, **k: sp.CompletedProcess(cmd, 0, stdout=b"", stderr=b""))
+    with pytest.raises(run.DfpPhase1bCalibrationRunError, match="no non-blank"):
+        run._query_cuda_driver_version_via_nvidia_smi()
+
+
+def test_query_cuda_driver_version_via_nvidia_smi_whitespace_only_stdout_rejected(monkeypatch):
+    import subprocess as sp
+    monkeypatch.setattr(run.subprocess, "run", lambda cmd, **k: sp.CompletedProcess(cmd, 0, stdout=b"   \n  \n", stderr=b""))
+    with pytest.raises(run.DfpPhase1bCalibrationRunError, match="no non-blank"):
+        run._query_cuda_driver_version_via_nvidia_smi()
+
+
+def test_query_cuda_driver_version_via_nvidia_smi_nul_byte_rejected(monkeypatch):
+    import subprocess as sp
+    monkeypatch.setattr(run.subprocess, "run", lambda cmd, **k: sp.CompletedProcess(cmd, 0, stdout=b"570.12\x004.06\n", stderr=b""))
+    with pytest.raises(run.DfpPhase1bCalibrationRunError, match="NUL"):
+        run._query_cuda_driver_version_via_nvidia_smi()
+
+
+def test_query_cuda_driver_version_via_nvidia_smi_nonzero_exit_with_stderr(monkeypatch):
+    import subprocess as sp
+    monkeypatch.setattr(run.subprocess, "run", lambda cmd, **k: sp.CompletedProcess(cmd, 6, stdout=b"", stderr=b"NVIDIA-SMI has failed"))
+    with pytest.raises(run.DfpPhase1bCalibrationRunError, match="exited with code 6"):
+        run._query_cuda_driver_version_via_nvidia_smi()
+
+
+def test_query_cuda_driver_version_via_nvidia_smi_executable_missing(monkeypatch):
+    def fake_run(cmd, **k):
+        raise FileNotFoundError("nvidia-smi not found")
+    monkeypatch.setattr(run.subprocess, "run", fake_run)
+    with pytest.raises(run.DfpPhase1bCalibrationRunError, match="not found"):
+        run._query_cuda_driver_version_via_nvidia_smi()
+
+
+def test_query_cuda_driver_version_via_nvidia_smi_timeout(monkeypatch):
+    import subprocess as sp
+
+    def fake_run(cmd, **k):
+        raise sp.TimeoutExpired(cmd, k.get("timeout", 10.0))
+    monkeypatch.setattr(run.subprocess, "run", fake_run)
+    with pytest.raises(run.DfpPhase1bCalibrationRunError, match="timed out"):
+        run._query_cuda_driver_version_via_nvidia_smi()
+
+
+def test_query_cuda_driver_version_via_nvidia_smi_undecodable_bytes(monkeypatch):
+    import subprocess as sp
+    monkeypatch.setattr(run.subprocess, "run", lambda cmd, **k: sp.CompletedProcess(cmd, 0, stdout=b"\xff\xfe\x00\x01", stderr=b""))
+    with pytest.raises(run.DfpPhase1bCalibrationRunError, match="UTF-8|NUL"):
+        run._query_cuda_driver_version_via_nvidia_smi()
+
+
+def test_query_cuda_driver_version_via_nvidia_smi_large_stderr_truncated(monkeypatch):
+    import subprocess as sp
+    huge = b"x" * 1_000_000
+    monkeypatch.setattr(run.subprocess, "run", lambda cmd, **k: sp.CompletedProcess(cmd, 1, stdout=b"", stderr=huge))
+    with pytest.raises(run.DfpPhase1bCalibrationRunError) as excinfo:
+        run._query_cuda_driver_version_via_nvidia_smi()
+    assert len(str(excinfo.value)) < 2000, f"diagnostic message not truncated: {len(str(excinfo.value))} chars"
+
+
+def test_query_cuda_driver_version_via_nvidia_smi_shell_metacharacters_treated_as_data(monkeypatch):
+    """A (mocked) nvidia-smi reporting shell-metacharacter-laden text as
+    its driver-version row must be accepted verbatim as an opaque
+    string, never interpreted -- proving these characters are data, not
+    something ever passed through a shell (this function never invokes
+    one)."""
+    import subprocess as sp
+    malicious = "570.00; rm -rf / #"
+    monkeypatch.setattr(run.subprocess, "run", lambda cmd, **k: sp.CompletedProcess(cmd, 0, stdout=malicious.encode("utf-8") + b"\n", stderr=b""))
+    result = run._query_cuda_driver_version_via_nvidia_smi()
+    assert result == malicious
+
+
+def test_query_cuda_driver_version_via_nvidia_smi_never_uses_shell_argument_form(monkeypatch):
+    """The command is always a list (argument vector), never a single
+    shell-interpreted string."""
+    import subprocess as sp
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return sp.CompletedProcess(cmd, 0, stdout=b"570.00\n", stderr=b"")
+
+    monkeypatch.setattr(run.subprocess, "run", fake_run)
+    run._query_cuda_driver_version_via_nvidia_smi()
+    assert isinstance(captured["cmd"], list)
+    assert captured["kwargs"]["shell"] is False
+
+
+# ---------------------------------------------------------------------------
+# Public-accessor compatibility (Section 8): if a future Torch release
+# ever adds a genuine public `torch.cuda.driver_version` accessor.
+# ---------------------------------------------------------------------------
+
+
+def test_query_cuda_driver_version_public_accessor_string_used_no_subprocess(monkeypatch):
+    import torch
+
+    monkeypatch.setattr(torch.cuda, "driver_version", lambda: "580.65.06", raising=False)
+
+    def fail_if_called(cmd, **k):
+        raise AssertionError("subprocess.run must not be called when the public accessor succeeds")
+
+    monkeypatch.setattr(run.subprocess, "run", fail_if_called)
+    assert run._query_cuda_driver_version() == "580.65.06"
+
+
+def test_query_cuda_driver_version_public_accessor_int_used(monkeypatch):
+    import torch
+
+    monkeypatch.setattr(torch.cuda, "driver_version", lambda: 57012406, raising=False)
+    assert run._query_cuda_driver_version() == "57012406"
+
+
+def test_query_cuda_driver_version_public_accessor_bool_rejected(monkeypatch):
+    import torch
+
+    monkeypatch.setattr(torch.cuda, "driver_version", lambda: True, raising=False)
+    with pytest.raises(run.DfpPhase1bCalibrationRunError, match="unusable value"):
+        run._query_cuda_driver_version()
+
+
+def test_query_cuda_driver_version_public_accessor_none_falls_back(monkeypatch):
+    import torch
+    import subprocess as sp
+
+    monkeypatch.setattr(torch.cuda, "driver_version", lambda: None, raising=False)
+    monkeypatch.setattr(run.subprocess, "run", lambda cmd, **k: sp.CompletedProcess(cmd, 0, stdout=b"570.00\n", stderr=b""))
+    assert run._query_cuda_driver_version() == "570.00"
+
+
+def test_query_cuda_driver_version_public_accessor_absent_falls_back(monkeypatch):
+    import torch
+    import subprocess as sp
+
+    monkeypatch.delattr(torch.cuda, "driver_version", raising=False)
+    monkeypatch.setattr(run.subprocess, "run", lambda cmd, **k: sp.CompletedProcess(cmd, 0, stdout=b"570.00\n", stderr=b""))
+    assert run._query_cuda_driver_version() == "570.00"
+
+
+def test_query_cuda_driver_version_public_accessor_empty_string_fails_closed_no_fallback(monkeypatch):
+    """Documented rule: a malformed (but non-None) accessor result FAILS
+    CLOSED rather than silently falling back to a different source."""
+    import torch
+
+    monkeypatch.setattr(torch.cuda, "driver_version", lambda: "   ", raising=False)
+
+    def fail_if_called(cmd, **k):
+        raise AssertionError("must not fall back to nvidia-smi for a malformed non-None accessor result")
+
+    monkeypatch.setattr(run.subprocess, "run", fail_if_called)
+    with pytest.raises(run.DfpPhase1bCalibrationRunError, match="empty value"):
+        run._query_cuda_driver_version()
+
+
+def test_query_cuda_driver_version_public_accessor_runtimeerror_translated_no_fallback(monkeypatch):
+    """Documented rule: an accessor RuntimeError is translated cleanly,
+    never silently retried via nvidia-smi."""
+    import torch
+
+    def raising():
+        raise RuntimeError("simulated accessor failure")
+
+    monkeypatch.setattr(torch.cuda, "driver_version", raising, raising=False)
+
+    def fail_if_called(cmd, **k):
+        raise AssertionError("must not fall back to nvidia-smi after an accessor RuntimeError")
+
+    monkeypatch.setattr(run.subprocess, "run", fail_if_called)
+    with pytest.raises(run.DfpPhase1bCalibrationRunError, match="raised"):
+        run._query_cuda_driver_version()
+
+
+@pytest.mark.parametrize("exc_type", [KeyboardInterrupt, SystemExit, MemoryError])
+def test_query_cuda_driver_version_fatal_exceptions_propagate_from_accessor(monkeypatch, exc_type):
+    import torch
+
+    def raising():
+        raise exc_type("fatal")
+
+    monkeypatch.setattr(torch.cuda, "driver_version", raising, raising=False)
+    with pytest.raises(exc_type):
+        run._query_cuda_driver_version()
+
+
+@pytest.mark.parametrize("exc_type", [KeyboardInterrupt, SystemExit, MemoryError])
+def test_query_cuda_driver_version_fatal_exceptions_propagate_from_nvidia_smi_path(monkeypatch, exc_type):
+    def raising(cmd, **k):
+        raise exc_type("fatal")
+
+    monkeypatch.setattr(run.subprocess, "run", raising)
+    with pytest.raises(exc_type):
+        run._query_cuda_driver_version_via_nvidia_smi()
+
+
+# ---------------------------------------------------------------------------
+# Full real_device_record() success path on a Torch-2.12-shaped fake
+# environment (Section 7): the exact shape of real job 21240861's
+# environment (no public accessor, no private symbol).
+# ---------------------------------------------------------------------------
+
+
+def test_real_device_record_torch212_shaped_environment_succeeds(monkeypatch):
+    import subprocess as sp
+
+    _install_fake_cuda(monkeypatch, cuda_toolkit_version="13.2")
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return sp.CompletedProcess(cmd, 0, stdout=b"570.124.06\n", stderr=b"")
+
+    monkeypatch.setattr(run.subprocess, "run", fake_run)
+
+    record = run.real_device_record()
+    assert record["device_type"] == "cuda"
+    assert record["gpu_model_name"] == "Fake-H100"
+    assert record["cuda_compute_capability"] == "9.0"
+    assert record["total_device_memory_bytes"] == 1024
+    assert record["cuda_driver_version"] == "570.124.06"
+    assert record["cuda_runtime_version"] == "13.2"
+    # Driver version and CUDA toolkit/runtime version must never be
+    # confused with each other, even though they are both version-like
+    # strings for the same physical GPU.
+    assert record["cuda_driver_version"] != record["cuda_runtime_version"]
+    assert len(calls) == 1
+
+    artifact_module._validate_device_record(record, label="device_record")
+
+
+def test_real_device_record_public_accessor_preferred_over_nvidia_smi(monkeypatch):
+    import torch
+
+    _install_fake_cuda(monkeypatch)
+    monkeypatch.setattr(torch.cuda, "driver_version", lambda: "580.65.06", raising=False)
+
+    def fail_if_called(cmd, **k):
+        raise AssertionError("nvidia-smi must not be invoked when a public accessor succeeds")
+
+    monkeypatch.setattr(run.subprocess, "run", fail_if_called)
+    record = run.real_device_record()
+    assert record["cuda_driver_version"] == "580.65.06"
+
+
+def test_real_device_record_driver_query_failure_is_domain_error(monkeypatch):
+    _install_fake_cuda(monkeypatch)
+
+    def fake_run(cmd, **k):
+        raise FileNotFoundError()
+
+    monkeypatch.setattr(run.subprocess, "run", fake_run)
+    with pytest.raises(run.DfpPhase1bCalibrationRunError, match="cuda_driver_version"):
+        run.real_device_record()
+
+
+def test_real_device_record_never_initializes_cuda(monkeypatch):
+    """The fake-CUDA environment used by these tests never touches the
+    real driver -- confirm `torch.cuda.is_initialized()` stays False."""
+    import subprocess as sp
+    import torch
+
+    _install_fake_cuda(monkeypatch)
+    monkeypatch.setattr(run.subprocess, "run", lambda cmd, **k: sp.CompletedProcess(cmd, 0, stdout=b"570.00\n", stderr=b""))
+    assert torch.cuda.is_initialized() is False
+    run.real_device_record()
+    assert torch.cuda.is_initialized() is False
+
+
 def test_build_propagation_precision_record_uses_the_real_recurrence_contract(real_e13_e15_identities):
     e13, e15, repo_root = real_e13_e15_identities
     from src.dfp_phase1a_recurrence_capture import dfp_recurrence_contract_from_protocol

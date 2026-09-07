@@ -434,13 +434,24 @@ def execute_production_calibration(
        (closes the time-of-check-to-time-of-use window between step 1
        and here);
     5. build the real model/inference (only now, after selection);
-    6. for every image containing at least one selected window, prepare
+    6. collect device/software metadata (``real_device_record``/
+       ``real_software_record``) exactly once, immediately after the
+       real CUDA device is selected/validated by step 5 and BEFORE any
+       selected-window scientific computation -- an environmental
+       metadata failure (e.g. a Torch/nvidia-smi incompatibility) is
+       caught here, cheaply, rather than after a real multi-hour,
+       200-window run (see job 21240861, which reached this exact
+       failure only after its scientific computation had already fully
+       completed);
+    7. for every image containing at least one selected window, prepare
        it once and run ``process_selected_image`` (same graph instance,
        k=12, T=320, FP64, exact masked-forward core, exact residuals --
        all inside that already-committed, already-tested function);
-    7. assemble and atomically install the final E16 artifact, re-
-       validating output freshness immediately before installation;
-    8. read the installed artifact back and independently re-validate
+    8. assemble and atomically install the final E16 artifact (reusing
+       step 6's already-collected device/software records verbatim,
+       never re-querying them), re-validating output freshness
+       immediately before installation;
+    9. read the installed artifact back and independently re-validate
        it via the committed validator.
 
     Raises this module's own domain exception (chained) on any
@@ -478,6 +489,21 @@ def execute_production_calibration(
     inference = build_production_inference(resources, device=device, log_dir=effective_log_dir)
     image_preparer = build_production_image_preparer(resources)
 
+    # Collect device/software metadata exactly once, HERE -- immediately
+    # after the real CUDA device has been selected/validated by
+    # build_production_inference above, and BEFORE the first selected-
+    # window scientific computation (process_selected_image, in the loop
+    # below, which runs the real 320-step masked/canonical k12
+    # recurrence for every selected window). Real job 21240861 collected
+    # this only AFTER that entire loop completed -- a full ~1h03m,
+    # 200-window real run -- so an environmental metadata failure (a
+    # Torch/nvidia-smi incompatibility, in that job's case) wasted the
+    # whole run instead of failing fast. `device_record`/`software_record`
+    # are computed once here and reused verbatim below; nothing re-
+    # queries them after the loop or during artifact installation.
+    device_record = real_device_record()
+    software_record = real_software_record(root)
+
     grouped = _group_selected_rows_by_image(selection.selected_rows)
     selected_window_rows: list[dict[str, Any]] = []
     for image_id, rows in grouped.items():
@@ -503,8 +529,8 @@ def execute_production_calibration(
             f"produced {len(selected_window_rows)} completed selected-window rows, expected exactly {WINDOW_COUNT}"
         )
 
-    device_record = real_device_record()
-    software_record = real_software_record(root)
+    # device_record/software_record were already collected above, before
+    # this loop -- reused here verbatim, never re-queried.
     precision_record = build_propagation_precision_record(
         recurrence_contract=resources.contracts.recurrence, component_chunk_size=component_chunk_size,
     )

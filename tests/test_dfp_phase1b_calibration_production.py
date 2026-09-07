@@ -475,6 +475,184 @@ def test_end_to_end_execute_through_real_cli(tmp_path, monkeypatch, small_window
     print(f"end-to-end production adapter test: {call_log}")
 
 
+# ---------------------------------------------------------------------------
+# Section: device/software metadata collection ordering (real job
+# 21240861 collected this only AFTER a full ~1h03m, 200-window real run
+# completed -- an environmental metadata failure therefore wasted the
+# entire run instead of failing fast). These tests reuse the same fake
+# dataset/model wiring `test_end_to_end_execute_through_real_cli` above
+# establishes, at the same real 1024-node/171-class scale.
+# ---------------------------------------------------------------------------
+
+
+def _setup_fake_production_environment(monkeypatch, tmp_path, *, seed_base=99999):
+    """Shared fixture setup (mirrors `test_end_to_end_execute_through_
+    real_cli` above) returning a `call_log` dict this test file's new
+    tests instrument further. Returns (call_log, output_path)."""
+    import torch
+
+    preflight = run.run_preflight(output_path=tmp_path / "phase1b_conservation_calibration.json", mode="fresh")
+    real_selected_ids = preflight.selected_ids
+    native_order = list(reversed(real_selected_ids))
+    fake_dataset = FakeDataset(native_order)
+
+    def geometry_for(cid, ordinal):
+        return 448, 448
+
+    class_count = prod._load_class_count(ROOT)
+    patch_grid = (32, 32)
+    n_patches = patch_grid[0] * patch_grid[1]
+
+    def fake_extract(dataset, native_index, *, canonical_image_id=None, image_root=None):
+        cid = canonical_image_id.rsplit(".", 1)[0]
+        ordinal = real_selected_ids.index(cid)
+        h, w = geometry_for(cid, ordinal)
+        return _make_fake_prepared_image(cid, height=h, width=w, class_count=class_count)
+
+    call_log = {"dataset_only": 0, "inference": 0, "process_selected_image": 0, "install_calibration_artifact": 0, "order": []}
+
+    def fake_build_dataset_only(repo_root, e3_identity):
+        call_log["dataset_only"] += 1
+        return object(), fake_dataset, "fake-config-path"
+
+    def make_generate_patch_snapshot(seed_base):
+        state = {"calls": 0}
+
+        def generate_patch_snapshot(crop, text_embedding):
+            idx = state["calls"]
+            state["calls"] += 1
+            base = torch.zeros(*patch_grid, class_count, dtype=torch.float64)
+            base[: patch_grid[0] // 2, :, 0] = 3.0
+            base[patch_grid[0] // 2 :, :, 1] = 3.0
+            unary = base.reshape(n_patches, class_count)
+            g = torch.Generator().manual_seed(seed_base + idx)
+            direction_a = torch.rand(8, generator=g, dtype=torch.float32)
+            direction_b = torch.rand(8, generator=g, dtype=torch.float32)
+            feats = torch.zeros(patch_grid[0], patch_grid[1], 8, dtype=torch.float32)
+            feats[: patch_grid[0] // 2, :, :] = direction_a
+            feats[patch_grid[0] // 2 :, :, :] = direction_b
+            feats = feats.reshape(n_patches, 8) + torch.rand(n_patches, 8, generator=g, dtype=torch.float32) * 0.02
+            feats = feats / feats.norm(dim=-1, keepdim=True)
+            return SimpleNamespace(unary_scores=[unary], dino_features=[feats])
+
+        return generate_patch_snapshot
+
+    class FakeModel:
+        def __init__(self, seed_base):
+            self.generate_patch_snapshot = make_generate_patch_snapshot(seed_base)
+
+    class FakeInference:
+        def __init__(self, seed_base):
+            self.model = FakeModel(seed_base)
+            self.text_embedding = None
+
+    def fake_build_inference(repo_root, e3_identity, device, *, log_dir):
+        call_log["inference"] += 1
+        assert device == "cuda"
+        return FakeInference(seed_base=seed_base), fake_dataset
+
+    import diagnostics.run_k11_k12_stability as k11stab
+
+    monkeypatch.setattr(k11stab, "_build_dataset_only", fake_build_dataset_only)
+    monkeypatch.setattr(k11stab, "_build_inference", fake_build_inference)
+    monkeypatch.setattr(k11stab, "_extract_prepared_image", fake_extract)
+    monkeypatch.setattr(prod, "verify_backbone_weights_present", lambda e3_identity: (Path("/fake/backbone"), Path("/fake/clip")))
+
+    real_process_selected_image = prod.process_selected_image
+    real_install_calibration_artifact = prod.install_calibration_artifact
+
+    def counting_process_selected_image(*a, **k):
+        call_log["process_selected_image"] += 1
+        call_log["order"].append("process_selected_image")
+        return real_process_selected_image(*a, **k)
+
+    def counting_install(*a, **k):
+        call_log["install_calibration_artifact"] += 1
+        call_log["order"].append("install_calibration_artifact")
+        return real_install_calibration_artifact(*a, **k)
+
+    monkeypatch.setattr(prod, "process_selected_image", counting_process_selected_image)
+    monkeypatch.setattr(prod, "install_calibration_artifact", counting_install)
+
+    output_path = tmp_path / "prod_output" / "phase1b_conservation_calibration.json"
+    output_path.parent.mkdir(parents=True)
+    return call_log, output_path
+
+
+def test_metadata_collected_before_first_window_processing_and_reused_exactly_once(tmp_path, monkeypatch, small_window_count):
+    """Section 10: device/software metadata is collected exactly once,
+    strictly before the first `process_selected_image` call, is never
+    re-queried afterward (including during artifact installation), and
+    the value appearing in the final installed artifact is EXACTLY the
+    one produced by that single early call."""
+    call_log, output_path = _setup_fake_production_environment(monkeypatch, tmp_path)
+
+    fake_device_record = {
+        "device_type": "cuda", "gpu_model_name": "Fake-Order-GPU", "cuda_compute_capability": "9.0",
+        "total_device_memory_bytes": 4096, "cuda_driver_version": "570.11.11", "cuda_runtime_version": "13.2",
+    }
+    device_calls = {"n": 0}
+    software_calls = {"n": 0}
+    real_software_record = prod.real_software_record
+
+    def counting_device_record():
+        device_calls["n"] += 1
+        call_log["order"].append("real_device_record")
+        return fake_device_record
+
+    def counting_software_record(root):
+        software_calls["n"] += 1
+        call_log["order"].append("real_software_record")
+        return real_software_record(root)
+
+    monkeypatch.setattr(prod, "real_device_record", counting_device_record)
+    monkeypatch.setattr(prod, "real_software_record", counting_software_record)
+
+    import diagnostics.run_dfp_phase1b_calibration as cli
+
+    exit_code = cli.main(["execute", "--output", str(output_path), "--mode", "fresh", "--device", "cuda", "--component-chunk-size", "64"])
+    assert exit_code == 0
+
+    assert device_calls["n"] == 1, "real_device_record must be called exactly once"
+    assert software_calls["n"] == 1, "real_software_record must be called exactly once"
+    assert call_log["process_selected_image"] == _TEST_WINDOW_COUNT or call_log["process_selected_image"] >= 1
+
+    # Ordering: device/software metadata precede the FIRST process_
+    # selected_image call, which precedes install_calibration_artifact.
+    order = call_log["order"]
+    first_metadata_idx = min(order.index("real_device_record"), order.index("real_software_record"))
+    first_window_idx = order.index("process_selected_image")
+    install_idx = order.index("install_calibration_artifact")
+    assert first_metadata_idx < first_window_idx < install_idx, order
+
+    with open(output_path, encoding="utf-8") as handle:
+        document = json.load(handle)
+    assert document["device_record"] == fake_device_record, "installed artifact's device_record must be the exact single early-collected value"
+
+
+def test_metadata_collection_failure_prevents_any_scientific_computation(tmp_path, monkeypatch, small_window_count):
+    """Section 10 (the actual job-21240861 defect, verified fixed): if
+    device-metadata collection fails, ZERO windows are processed, ZERO
+    artifacts are installed, and the failure is a clean domain error --
+    never a wasted real computation run."""
+    call_log, output_path = _setup_fake_production_environment(monkeypatch, tmp_path)
+
+    def failing_device_record():
+        raise run.DfpPhase1bCalibrationRunError("cuda_driver_version: simulated nvidia-smi failure")
+
+    monkeypatch.setattr(prod, "real_device_record", failing_device_record)
+
+    import diagnostics.run_dfp_phase1b_calibration as cli
+
+    exit_code = cli.main(["execute", "--output", str(output_path), "--mode", "fresh", "--device", "cuda", "--component-chunk-size", "64"])
+
+    assert exit_code == 2
+    assert call_log["process_selected_image"] == 0, "no window may be scientifically processed after a metadata failure"
+    assert call_log["install_calibration_artifact"] == 0, "no artifact may be installed after a metadata failure"
+    assert not output_path.exists(), "no artifact file of any kind may be left behind"
+    assert list(output_path.parent.glob("*.tmp")) == []
+
+
 def test_end_to_end_execute_rejects_when_output_not_fresh(tmp_path, monkeypatch, small_window_count):
     output_path = tmp_path / "phase1b_conservation_calibration.json"
     output_path.write_text("{}", encoding="utf-8")

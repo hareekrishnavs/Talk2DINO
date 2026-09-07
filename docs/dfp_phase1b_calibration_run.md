@@ -328,6 +328,49 @@ inference/image-preparation dependencies ARE `typing.Protocol`-typed
 so tests can inject small synthetic implementations while production
 wires real Phase 1A execution-context objects.
 
+**CUDA driver-version query (Torch 2.12 compatibility).** Real job
+`21240861` (2026-09-06, `component_chunk_size=16`) completed its entire
+scientific computation successfully -- confirming the per-component-chunk
+streaming repair on real hardware (peak host RSS 15.52 GB of the 80G
+request, no OOM) -- but then failed while assembling `device_record`,
+with `AttributeError: module 'torch._C' has no attribute
+'_cuda_getDriverVersion'`. That private symbol does not exist on the
+production Torch build (2.12.0), and neither does a public
+`torch.cuda.driver_version`. `real_device_record` now calls
+`_query_cuda_driver_version`, which prefers a genuine public Torch
+accessor if one ever exists, and otherwise queries `nvidia-smi` directly
+(`--query-gpu=driver_version --format=csv,noheader`, an explicit
+argument list, `shell=False`, never `bash -c`, never `pynvml`) --
+following the same strategy `torch.utils.collect_env.
+get_nvidia_driver_version` uses for the identical Torch-version gap,
+with a deterministic machine-readable query in place of that helper's
+own human-readable-table parsing. No value is ever fabricated: every
+ordinary environmental failure (missing executable, timeout, nonzero
+exit, empty/malformed/NUL-containing output, or multiple GPUs reporting
+DIFFERENT driver versions) raises `DfpPhase1bCalibrationRunError`
+naming `cuda_driver_version`. `cuda_driver_version` (the installed
+NVIDIA driver) and `cuda_runtime_version` (`torch.version.cuda`, the
+CUDA toolkit/runtime build) remain two distinct, never-confused schema
+fields, exactly as before.
+
+**Collection ordering.** `execute_production_calibration` now collects
+`device_record`/`software_record` exactly once, immediately after the
+real CUDA device is selected (`build_production_inference`) and BEFORE
+the first selected-window scientific computation -- previously this
+happened only after all 200 windows' canonical/masked k12 recurrence
+had already run, which is exactly why job 21240861's environmental
+failure wasted a full ~1h03m real run instead of failing in seconds.
+The collected records are reused verbatim for final artifact assembly;
+neither is queried a second time.
+
+As of this writing, real job 21240861 is still the most recent
+production attempt: it did **not** produce a calibration artifact (no
+`phase1b_conservation_calibration.json`, no partial/temporary file --
+only the harmless job log remains under
+`/scratch/haree/dfp_phase1b_conservation_calibration/coco_stuff_200/`).
+Production calibration has not yet succeeded end-to-end. The next
+execution remains `mode=fresh`, `component_chunk_size=16`.
+
 ## Resume/fresh-only decision
 
 E16 (`evaluation_identities/e16_dfp_phase1b_conservation_calibration.toml`,

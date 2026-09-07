@@ -126,6 +126,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 import tempfile
 from dataclasses import dataclass, replace as dataclasses_replace
 from pathlib import Path
@@ -1147,6 +1148,138 @@ class SoftwareInfoProvider(Protocol):
     def __call__(self) -> Mapping[str, Any]: ...
 
 
+def _get_public_torch_driver_version_accessor() -> Any:
+    """Return ``torch.cuda.driver_version`` if it exists and is callable,
+    else ``None``. Never touches the private, removed-in-Torch-2.12
+    symbol ``torch._C._cuda_getDriverVersion`` -- real production job
+    21240861 (Torch 2.12.0) raised ``AttributeError`` on exactly that
+    symbol; neither it nor a public ``torch.cuda.driver_version``
+    exists in that build. If a future Torch release ever adds a genuine
+    PUBLIC accessor under this name, this is the only place that reads
+    it -- no other private ``torch._C`` symbol is ever substituted."""
+    import torch
+
+    accessor = getattr(torch.cuda, "driver_version", None)
+    return accessor if callable(accessor) else None
+
+
+def _query_cuda_driver_version_via_nvidia_smi(*, timeout_seconds: float = 10.0) -> str:
+    """The only trustworthy driver-version source when Torch itself
+    exposes none (see ``_get_public_torch_driver_version_accessor``'s
+    docstring): query ``nvidia-smi`` directly, exactly as ``torch.utils.
+    collect_env.get_nvidia_driver_version`` does for the identical reason
+    -- neither Torch's public API nor its private C-extension surfaces
+    the installed NVIDIA driver version at all on Torch 2.12. Unlike
+    ``collect_env`` (which runs a bare ``"nvidia-smi"`` string through
+    ``subprocess.Popen(..., shell=True)`` and regex-parses its human-
+    readable default table), this queries the single deterministic
+    machine-readable field via ``--query-gpu``/``--format=csv,noheader``,
+    with an explicit argument list and ``shell=False`` throughout --
+    never a shell, never ``bash -c``, never ``pynvml``.
+
+    Never fabricates a value. Raises ``DfpPhase1bCalibrationRunError``,
+    naming ``cuda_driver_version``, for every ordinary environmental
+    failure: missing executable, timeout, nonzero exit, empty/blank/
+    NUL-containing/undecodable output, or multiple visible GPUs
+    reporting DIFFERENT driver versions (the driver is node-wide, so
+    genuine disagreement between rows means something is wrong with the
+    node, never a value to pick arbitrarily). ``KeyboardInterrupt``/
+    ``SystemExit``/``MemoryError`` are never subclasses of anything this
+    function catches and always propagate unchanged."""
+    command = ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"]
+    try:
+        completed = subprocess.run(command, shell=False, capture_output=True, timeout=timeout_seconds)
+    except FileNotFoundError as error:
+        raise DfpPhase1bCalibrationRunError(
+            "cuda_driver_version: nvidia-smi executable not found on this node -- no trustworthy "
+            "driver-version source is available (a public torch.cuda.driver_version accessor is also absent)"
+        ) from error
+    except subprocess.TimeoutExpired as error:
+        raise DfpPhase1bCalibrationRunError(
+            f"cuda_driver_version: nvidia-smi query timed out after {timeout_seconds}s"
+        ) from error
+
+    if completed.returncode != 0:
+        stderr_text = (completed.stderr or b"").decode("utf-8", errors="replace")[:500]
+        raise DfpPhase1bCalibrationRunError(
+            f"cuda_driver_version: nvidia-smi exited with code {completed.returncode} -- stderr: {stderr_text!r}"
+        )
+
+    try:
+        raw_output = completed.stdout.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise DfpPhase1bCalibrationRunError(
+            "cuda_driver_version: nvidia-smi output could not be decoded as UTF-8"
+        ) from error
+
+    if "\x00" in raw_output:
+        raise DfpPhase1bCalibrationRunError("cuda_driver_version: nvidia-smi output contained a NUL byte")
+
+    rows = [line.strip() for line in raw_output.splitlines()]
+    nonempty_rows = [row for row in rows if row]
+    if not nonempty_rows:
+        raise DfpPhase1bCalibrationRunError(
+            "cuda_driver_version: nvidia-smi produced no non-blank driver-version output"
+        )
+
+    distinct = sorted(set(nonempty_rows))
+    if len(distinct) > 1:
+        raise DfpPhase1bCalibrationRunError(
+            f"cuda_driver_version: nvidia-smi reported conflicting driver versions across visible GPUs: {distinct}"
+        )
+
+    return distinct[0]
+
+
+def _query_cuda_driver_version(*, timeout_seconds: float = 10.0) -> str:
+    """The single entry point ``real_device_record`` uses for
+    ``cuda_driver_version``. Prefers a genuine PUBLIC Torch accessor when
+    one exists; otherwise falls back to ``nvidia-smi`` (see
+    ``_query_cuda_driver_version_via_nvidia_smi``'s docstring for why no
+    other in-process source exists on Torch 2.12). Exactly one rule
+    governs every case below, chosen so this function never silently
+    combines two disagreeing sources:
+
+    - accessor absent or non-callable -> query nvidia-smi;
+    - accessor callable, returns ``None`` -> query nvidia-smi (a
+      ``None`` return is the accessor's own way of saying "nothing to
+      report", the same as it being absent);
+    - accessor callable, returns a non-``None`` but unusable value
+      (wrong type, a ``bool``, or empty/blank after stripping) -> FAIL
+      CLOSED, never fall back -- a real but broken response means the
+      installed Torch's own accessor is malfunctioning, not merely
+      "unavailable", and silently substituting a DIFFERENT source's
+      value here could paper over that;
+    - accessor raises ``RuntimeError`` -> FAIL CLOSED (translated),
+      never fall back, for the identical reason;
+    - fatal exceptions (``KeyboardInterrupt``/``SystemExit``/
+      ``MemoryError``) are never caught and always propagate, from
+      either path."""
+    accessor = _get_public_torch_driver_version_accessor()
+    if accessor is None:
+        return _query_cuda_driver_version_via_nvidia_smi(timeout_seconds=timeout_seconds)
+
+    try:
+        value = accessor()
+    except RuntimeError as error:
+        raise DfpPhase1bCalibrationRunError(
+            f"cuda_driver_version: the public torch.cuda.driver_version() accessor raised {error!r}"
+        ) from error
+
+    if value is None:
+        return _query_cuda_driver_version_via_nvidia_smi(timeout_seconds=timeout_seconds)
+
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise DfpPhase1bCalibrationRunError(
+            f"cuda_driver_version: torch.cuda.driver_version() returned an unusable value {value!r} "
+            f"of type {type(value).__name__}"
+        )
+    text = str(value).strip()
+    if not text:
+        raise DfpPhase1bCalibrationRunError("cuda_driver_version: torch.cuda.driver_version() returned an empty value")
+    return text
+
+
 def real_device_record() -> dict[str, Any]:
     """Query the single real active CUDA device. Requires ``torch.cuda.
     is_available()`` -- this function never fabricates device metadata
@@ -1163,8 +1296,7 @@ def real_device_record() -> dict[str, Any]:
     device_index = torch.cuda.current_device()
     properties = torch.cuda.get_device_properties(device_index)
     major, minor = torch.cuda.get_device_capability(device_index)
-    driver_version = getattr(torch.cuda, "driver_version", None)
-    driver_version = driver_version() if callable(driver_version) else torch._C._cuda_getDriverVersion()
+    driver_version = _query_cuda_driver_version()
     return {
         "device_type": "cuda",
         "gpu_model_name": torch.cuda.get_device_name(device_index),
