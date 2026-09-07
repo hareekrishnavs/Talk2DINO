@@ -45,8 +45,10 @@ import sys
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
+_OVS_ROOT = _REPO_ROOT / "src/open_vocabulary_segmentation"
+for _path in (_REPO_ROOT, _OVS_ROOT):
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
 
 from src.dfp_phase1b_calibration_artifact import DfpPhase1bCalibrationArtifactError, validate_calibration_artifact
 from src.dfp_phase1b_calibration_run import (
@@ -162,7 +164,12 @@ def _cmd_verify_artifact(args: argparse.Namespace) -> int:
             geometry_payload = json.load(handle)
 
         def geometry_provider(canonical_id: str):
-            entry = geometry_payload[canonical_id]
+            try:
+                entry = geometry_payload[canonical_id]
+            except KeyError as error:
+                raise DfpPhase1bCalibrationRunError(
+                    f"geometry JSON {args.geometry_json} lacks the canonical image ID {canonical_id!r}"
+                ) from error
             return ImageGeometry(
                 inference_height=entry["inference_height"], inference_width=entry["inference_width"], patch_size=entry["patch_size"],
             )

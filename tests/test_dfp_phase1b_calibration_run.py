@@ -19,6 +19,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -1821,6 +1822,566 @@ def test_cli_malformed_arguments_exit_before_heavy_import(capsys):
     with pytest.raises(SystemExit) as excinfo:
         cli.main(["preflight", "--mode", "not-a-real-mode", "--output", "/tmp/x.json"])
     assert excinfo.value.code == 2  # argparse's own exit code for a bad choice
+
+
+# ---------------------------------------------------------------------------
+# Section: CLI robustness repair -- standalone `segmentation` import path
+# (the CLI's own module-level sys.path setup must add `src/open_
+# vocabulary_segmentation`, exactly as `diagnostics/run_k11_k12_
+# stability.py` already does, so a bare `verify-artifact --geometry-
+# json` subprocess never raises `ModuleNotFoundError: No module named
+# 'segmentation'`) and the `--geometry-json` missing-canonical-ID
+# domain error (a raw `KeyError` inside `_cmd_verify_artifact`'s
+# `geometry_provider` closure must become a `DfpPhase1bCalibrationRun
+# Error`, chained via `from error`, never a leaked traceback).
+# ---------------------------------------------------------------------------
+
+_CLI_PATH = ROOT / "diagnostics" / "run_dfp_phase1b_calibration.py"
+
+
+def _sanitized_subprocess_env():
+    """A genuinely fresh-process environment for standalone CLI
+    execution: `PYTHONPATH` stripped of every repository-relative entry
+    this TEST FILE's own module-level `sys.path` mutation put there (so
+    the subprocess cannot silently inherit the fix-under-test's own
+    effect via an environment variable), while everything else --
+    `PATH`, the active venv's own interpreter/site-packages, and any
+    legitimate module-provided `PYTHONPATH` entry such as this HPC
+    environment's own OpenCV wheel path -- is preserved unchanged. This
+    is not a fully wiped environment: wiping it entirely would also
+    remove those legitimate, unrelated, non-repository entries that
+    `cv2` itself requires, which has nothing to do with either repair
+    in this file."""
+    import os
+
+    env = dict(os.environ)
+    repo_paths = {str(ROOT), str(ROOT / "src/open_vocabulary_segmentation")}
+    existing = [entry for entry in env.get("PYTHONPATH", "").split(os.pathsep) if entry]
+    env["PYTHONPATH"] = os.pathsep.join(entry for entry in existing if entry not in repo_paths)
+    env["CUDA_VISIBLE_DEVICES"] = ""
+    return env
+
+
+def _real_selected_ids():
+    from src.dfp_phase1b_calibration_identity import load_identity as load_e16_identity
+
+    repo_root = run.repository_root()
+    e16_identity = load_e16_identity(repo_root=repo_root)
+    return list(run.load_subset_manifest(repo_root, e16_identity)["selected_ids"])
+
+
+def _uniform_geometry_payload(ids, *, height=448, width=448, patch_size=14):
+    return {cid: {"inference_height": height, "inference_width": width, "patch_size": patch_size} for cid in ids}
+
+
+def _finite_residual_summary(sample_count=10, value=1e-9):
+    abs_sum = value * sample_count
+    sq_sum = (value**2) * sample_count
+    return {
+        "sample_count": sample_count, "finite_count": sample_count, "non_finite_count": 0,
+        "signed_minimum": -value, "signed_maximum": value,
+        "maximum_absolute_residual": value, "mean_absolute_residual": abs_sum / sample_count,
+        "root_mean_square_residual": math.sqrt(sq_sum / sample_count),
+        "absolute_residual_sum": abs_sum, "squared_residual_sum": sq_sum,
+    }
+
+
+@pytest.fixture(scope="module")
+def real_selected_ids():
+    return _real_selected_ids()
+
+
+@pytest.fixture(scope="module")
+def valid_geometry_verification_fixture(tmp_path_factory, real_selected_ids):
+    """A fully valid, complete, 200-row `phase1b_conservation_
+    calibration.json` document plus a matching `--geometry-json` file,
+    self-consistently reconstructed from the REAL frozen 500-image
+    subset manifest and the REAL E13 crop/stride (both cheap TOML/JSON
+    reads -- no torch, no model, no dataset), but from ARBITRARY
+    uniform per-image geometry rather than any real decoded image --
+    this never reads pixels and never touches the production artifact.
+    Mirrors `tests/test_dfp_phase1b_calibration_artifact.py`'s own
+    `_artifact_document` helper, applied to the CLI's real 500-image
+    manifest instead of a small hand-built universe, purely so the
+    resulting document can be independently re-validated through the
+    real `--geometry-json` candidate-universe path."""
+    ids = real_selected_ids
+    geometry_payload = _uniform_geometry_payload(ids)
+
+    def geometry_provider(canonical_id):
+        entry = geometry_payload[canonical_id]
+        return run.ImageGeometry(
+            inference_height=entry["inference_height"], inference_width=entry["inference_width"], patch_size=entry["patch_size"],
+        )
+
+    window_plan_builder = run.default_window_plan_builder(run.repository_root())
+    universe = run.build_candidate_universe(tuple(ids), geometry_provider=geometry_provider, window_plan_builder=window_plan_builder)
+    result = artifact_module.select_calibration_windows(universe)
+
+    rank_by_index = {t["canonical_candidate_index"]: t["selection_rank"] for t in result.selection_trace}
+    key_by_index = {t["canonical_candidate_index"]: t["selection_key"] for t in result.selection_trace}
+    rows = []
+    for index, record in zip(result.selected_canonical_indices, result.selected_records):
+        row = {
+            **dict(record), "canonical_candidate_index": index,
+            "selection_rank": rank_by_index[index], "selection_key": key_by_index[index], "completed": True,
+        }
+        for family in artifact_module.RESIDUAL_FAMILIES:
+            row[family] = _finite_residual_summary()
+        rows.append(row)
+
+    aggregates = {
+        family: artifact_module.aggregate_residual_summaries([row[family] for row in rows], label=family)
+        for family in artifact_module.RESIDUAL_FAMILIES
+    }
+
+    document = {
+        "schema_name": artifact_module.ARTIFACT_SCHEMA_NAME, "schema_version": artifact_module.ARTIFACT_SCHEMA_VERSION,
+        "complete": True, "final": True,
+        "calibration_identity_sha256": "0" * 64,
+        "bound_e15_protocol_sha256": "1" * 64,
+        "bound_e15_artifacts_sha256": "2" * 64,
+        "bound_masked_forward_sha256": "3" * 64,
+        "repository_commit": "a" * 40,
+        "run_mode": "coco_stuff_500",
+        "bound_subset_manifest_sha256": "4" * 64,
+        "selected_ids_digest": "5" * 64,
+        "candidate_window_count": len(universe),
+        "expected_selected_window_count": artifact_module.WINDOW_COUNT,
+        "completed_selected_window_count": len(rows),
+        "candidate_universe_digest": result.candidate_universe_digest,
+        "selected_windows_digest": result.selected_windows_digest,
+        "selection_trace_digest": result.selection_trace_digest,
+        "device_record": {
+            "device_type": "cuda", "gpu_model_name": "NVIDIA A100", "cuda_compute_capability": "8.0",
+            "total_device_memory_bytes": 42949672960, "cuda_driver_version": "535.104.05", "cuda_runtime_version": "12.2",
+        },
+        "software_record": {
+            "repository_commit": "a" * 40, "python_version": "3.11.5", "torch_version": "2.12.0",
+            "numpy_version": "2.4.2", "cuda_version": "12.2", "cudnn_version": "8.9",
+            "deterministic_algorithms_enabled": True, "tf32_enabled": False, "autocast_enabled": False,
+        },
+        "propagation_precision_record": {
+            "graph_storage_dtype": "float32", "canonical_recurrence_dtype": "float64",
+            "masked_recurrence_dtype": "float64", "residual_accumulation_dtype": "float64",
+            "alpha": 0.98, "steps": 320, "k": 12, "chunk_size": 4,
+        },
+        "selected_window_records": rows,
+        "aggregate_residual_summaries": aggregates,
+    }
+    # Self-check: this fixture must itself be a genuinely valid artifact
+    # before any test relies on it.
+    artifact_module.validate_calibration_artifact(copy.deepcopy(document), candidate_universe=universe)
+
+    tmp_dir = tmp_path_factory.mktemp("geometry_verification")
+    artifact_path = tmp_dir / "phase1b_conservation_calibration.json"
+    artifact_path.write_text(json.dumps(document))
+    geometry_path = tmp_dir / "geometry.json"
+    geometry_path.write_text(json.dumps(geometry_payload))
+    return {
+        "ids": ids, "geometry_payload": geometry_payload, "document": document,
+        "artifact_path": artifact_path, "geometry_path": geometry_path, "tmp_dir": tmp_dir,
+    }
+
+
+# --- Category A: fresh-process, standalone subprocess behavior. --------
+
+
+def test_standalone_subprocess_help_exits_zero_no_traceback(tmp_path):
+    """The actual CLI entry point (`python .../run_dfp_phase1b_
+    calibration.py --help`), run as a genuinely separate process from a
+    directory outside the repository with a sanitized `PYTHONPATH`."""
+    import subprocess as sp
+
+    completed = sp.run(
+        [sys.executable, str(_CLI_PATH), "--help"],
+        cwd=str(tmp_path), env=_sanitized_subprocess_env(), capture_output=True, text=True, timeout=60,
+    )
+    assert completed.returncode == 0
+    assert "Traceback" not in completed.stdout
+    assert "Traceback" not in completed.stderr
+
+
+def test_standalone_subprocess_verify_artifact_geometry_json_exits_zero(tmp_path, valid_geometry_verification_fixture):
+    """The real, literal CLI entry point, exercising the exact
+    `verify-artifact --geometry-json` path that previously raised
+    `ModuleNotFoundError: No module named 'segmentation'` when invoked
+    as a genuinely standalone process (arbitrary cwd outside the repo,
+    sanitized `PYTHONPATH`, no prior import of any Phase 1A/1B module
+    in this process)."""
+    import subprocess as sp
+
+    fixture = valid_geometry_verification_fixture
+    completed = sp.run(
+        [
+            sys.executable, str(_CLI_PATH), "--repo-root", str(ROOT), "verify-artifact",
+            "--artifact", str(fixture["artifact_path"]), "--geometry-json", str(fixture["geometry_path"]),
+        ],
+        cwd=str(tmp_path), env=_sanitized_subprocess_env(), capture_output=True, text=True, timeout=120,
+    )
+    assert completed.returncode == 0
+    assert "PASSES the committed E16 validator" in completed.stdout
+    assert "Traceback" not in completed.stdout
+    assert "Traceback" not in completed.stderr
+
+
+def test_standalone_subprocess_diagnostics_no_k11_k12_import_no_cuda_init(tmp_path, valid_geometry_verification_fixture):
+    """A second, still genuinely fresh subprocess (not the already-
+    import-mutated pytest process) that additionally introspects its
+    own `sys.modules`/CUDA state after a successful `verify-artifact
+    --geometry-json` run, to confirm: the success does not depend on
+    `diagnostics.run_k11_k12_stability` ever having been imported (the
+    calibration CLI's own `sys.path` fix is what makes the standalone
+    import succeed, not a side effect of some other diagnostic module's
+    own path mutation); and CUDA is never initialized (mmcv's own
+    module-level `torch.cuda.is_available()` probe is an expected,
+    unavoidable transitive side effect of importing `segmentation.
+    evaluation` at all -- see the module docstring's own account -- and
+    is not the same as CUDA-context initialization)."""
+    import subprocess as sp
+
+    fixture = valid_geometry_verification_fixture
+    script = (
+        "import sys\n"
+        f"sys.path.insert(0, {str(ROOT / 'diagnostics')!r})\n"
+        "import importlib\n"
+        "cli = importlib.import_module('run_dfp_phase1b_calibration')\n"
+        "exit_code = cli.main([\n"
+        f"    '--repo-root', {str(ROOT)!r}, 'verify-artifact',\n"
+        f"    '--artifact', {str(fixture['artifact_path'])!r}, '--geometry-json', {str(fixture['geometry_path'])!r},\n"
+        "])\n"
+        "print('EXIT_CODE', exit_code)\n"
+        "print('K11_K12_IMPORTED', 'run_k11_k12_stability' in sys.modules or 'diagnostics.run_k11_k12_stability' in sys.modules)\n"
+        "torch_imported = 'torch' in sys.modules\n"
+        "print('TORCH_IMPORTED', torch_imported)\n"
+        "if torch_imported:\n"
+        "    import torch\n"
+        "    print('CUDA_INITIALIZED', torch.cuda.is_initialized())\n"
+        "else:\n"
+        "    print('CUDA_INITIALIZED', False)\n"
+    )
+    completed = sp.run(
+        [sys.executable, "-c", script],
+        cwd=str(tmp_path), env=_sanitized_subprocess_env(), capture_output=True, text=True, timeout=120,
+    )
+    assert "EXIT_CODE 0" in completed.stdout, completed.stdout + completed.stderr
+    assert "K11_K12_IMPORTED False" in completed.stdout
+    assert "CUDA_INITIALIZED False" in completed.stdout
+
+
+def test_standalone_subprocess_help_and_bare_verify_artifact_never_import_torch(tmp_path, valid_geometry_verification_fixture):
+    """`--help` and a bare `verify-artifact` (no `--geometry-json`, so
+    the `segmentation`/mmcv import chain is never reached) must never
+    import torch merely because the CLI's own import-path repair now
+    adds `src/open_vocabulary_segmentation` to `sys.path` -- the repair
+    itself is a pure `sys.path` mutation, not an import."""
+    import subprocess as sp
+
+    fixture = valid_geometry_verification_fixture
+    for extra_args in (["--help"], ["verify-artifact", "--artifact", str(fixture["artifact_path"])]):
+        script = (
+            "import sys\n"
+            f"sys.path.insert(0, {str(ROOT / 'diagnostics')!r})\n"
+            "import importlib\n"
+            "cli = importlib.import_module('run_dfp_phase1b_calibration')\n"
+            "try:\n"
+            f"    exit_code = cli.main({extra_args!r})\n"
+            "except SystemExit as exc:\n"
+            "    exit_code = exc.code\n"
+            "print('EXIT_CODE', exit_code)\n"
+            "print('TORCH_IMPORTED', 'torch' in sys.modules)\n"
+        )
+        completed = sp.run(
+            [sys.executable, "-c", script],
+            cwd=str(tmp_path), env=_sanitized_subprocess_env(), capture_output=True, text=True, timeout=60,
+        )
+        assert "TORCH_IMPORTED False" in completed.stdout, (extra_args, completed.stdout, completed.stderr)
+
+
+# --- Category B: missing-canonical-ID mutation matrix. ------------------
+
+
+def _missing_id_geometry_payload(ids, geometry_payload, case):
+    payload = dict(geometry_payload)
+    if case == "missing_first":
+        missing_id = ids[0]
+        del payload[missing_id]
+    elif case == "missing_middle":
+        missing_id = ids[len(ids) // 2]
+        del payload[missing_id]
+    elif case == "missing_last":
+        missing_id = ids[-1]
+        del payload[missing_id]
+    elif case == "missing_all":
+        missing_id = ids[0]
+        payload = {}
+    elif case == "similar_suffixed_alternative_present":
+        missing_id = ids[0]
+        del payload[missing_id]
+        payload[f"{missing_id}.jpg"] = _uniform_geometry_payload([missing_id])[missing_id]
+    elif case == "reformatted_alternative_present":
+        # Real canonical IDs are zero-padded pure-digit strings, so no
+        # letter case exists to vary; the closest meaningful adversarial
+        # analog to a "wrong-case" key is a differently-formatted (but
+        # human-recognizable) rendering of the very same digits -- here,
+        # the zero-padding stripped -- present instead of the exact
+        # canonical key.
+        missing_id = ids[0]
+        del payload[missing_id]
+        payload[str(int(missing_id))] = _uniform_geometry_payload([missing_id])[missing_id]
+    else:
+        raise AssertionError(case)
+    return payload, missing_id
+
+
+_MISSING_ID_CASES = (
+    "missing_first", "missing_middle", "missing_last",
+    "missing_all", "similar_suffixed_alternative_present", "reformatted_alternative_present",
+)
+
+
+@pytest.mark.parametrize("case", _MISSING_ID_CASES)
+def test_missing_geometry_id_direct_api_raises_run_error_with_cause(tmp_path, valid_geometry_verification_fixture, case):
+    """Direct-API boundary: `_cmd_verify_artifact` (the real function
+    containing the repaired `geometry_provider` closure) raises
+    `DfpPhase1bCalibrationRunError`, chained from the original
+    `KeyError`, naming the exact missing canonical image ID -- never a
+    default, never a skipped record, never a fuzzy match against a
+    similar or differently-formatted key."""
+    sys.path.insert(0, str(ROOT / "diagnostics"))
+    import argparse
+    import importlib
+
+    cli = importlib.import_module("run_dfp_phase1b_calibration")
+    fixture = valid_geometry_verification_fixture
+    payload, missing_id = _missing_id_geometry_payload(fixture["ids"], fixture["geometry_payload"], case)
+
+    geometry_path = tmp_path / f"geometry_{case}.json"
+    geometry_path.write_text(json.dumps(payload))
+    # The KeyError fires before the artifact document is ever inspected,
+    # so any parseable JSON suffices here -- the artifact's own content
+    # is irrelevant to this boundary.
+    artifact_path = tmp_path / "placeholder_artifact.json"
+    artifact_path.write_text("{}")
+
+    args = argparse.Namespace(artifact=str(artifact_path), geometry_json=str(geometry_path), repo_root=ROOT)
+    with pytest.raises(run.DfpPhase1bCalibrationRunError) as excinfo:
+        cli._cmd_verify_artifact(args)
+
+    assert missing_id in str(excinfo.value)
+    assert isinstance(excinfo.value.__cause__, KeyError)
+
+
+@pytest.mark.parametrize("case", _MISSING_ID_CASES)
+def test_missing_geometry_id_cli_exits_two_no_traceback(tmp_path, valid_geometry_verification_fixture, capsys, case):
+    """The real CLI dispatch (`main`): a missing canonical geometry ID
+    is reported as the CLI's own established domain-error contract --
+    exit code 2, the `DFP PHASE 1B CALIBRATION FAIL [verify-artifact]:`
+    prefix, no traceback, no false PASS -- and neither the artifact nor
+    the geometry JSON is modified."""
+    sys.path.insert(0, str(ROOT / "diagnostics"))
+    import importlib
+
+    cli = importlib.import_module("run_dfp_phase1b_calibration")
+    fixture = valid_geometry_verification_fixture
+    payload, missing_id = _missing_id_geometry_payload(fixture["ids"], fixture["geometry_payload"], case)
+
+    geometry_path = tmp_path / f"geometry_{case}.json"
+    geometry_text_before = json.dumps(payload)
+    geometry_path.write_text(geometry_text_before)
+    artifact_path = tmp_path / "placeholder_artifact.json"
+    artifact_text_before = "{}"
+    artifact_path.write_text(artifact_text_before)
+
+    exit_code = cli.main(
+        ["--repo-root", str(ROOT), "verify-artifact", "--artifact", str(artifact_path), "--geometry-json", str(geometry_path)]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert f"DFP PHASE 1B CALIBRATION FAIL [verify-artifact]: geometry JSON" in captured.err
+    assert missing_id in captured.err
+    assert "Traceback" not in captured.err
+    assert "Traceback" not in captured.out
+    assert "PASSES the committed E16 validator" not in captured.out
+    assert geometry_path.read_text() == geometry_text_before
+    assert artifact_path.read_text() == artifact_text_before
+
+
+# --- Category C: exception-boundary controls. ----------------------------
+
+
+def test_geometry_lookup_keyerror_is_the_translated_exception(tmp_path, valid_geometry_verification_fixture):
+    """A controlled, minimal mapping (not the 500-id real manifest) that
+    raises a plain `KeyError` on lookup is what gets translated -- the
+    narrowest possible reproduction of the boundary."""
+    sys.path.insert(0, str(ROOT / "diagnostics"))
+    import argparse
+    import importlib
+
+    cli = importlib.import_module("run_dfp_phase1b_calibration")
+    fixture = valid_geometry_verification_fixture
+    controlled_payload = {}  # every lookup raises plain KeyError
+    geometry_path = tmp_path / "controlled_empty_geometry.json"
+    geometry_path.write_text(json.dumps(controlled_payload))
+    artifact_path = tmp_path / "placeholder.json"
+    artifact_path.write_text("{}")
+
+    args = argparse.Namespace(artifact=str(artifact_path), geometry_json=str(geometry_path), repo_root=ROOT)
+    with pytest.raises(run.DfpPhase1bCalibrationRunError) as excinfo:
+        cli._cmd_verify_artifact(args)
+    assert type(excinfo.value.__cause__) is KeyError
+    assert fixture["ids"][0] in str(excinfo.value)
+
+
+@pytest.mark.parametrize("fatal_exception", [KeyboardInterrupt, SystemExit, MemoryError])
+def test_fatal_exceptions_from_json_load_propagate_uncaught(tmp_path, monkeypatch, fatal_exception):
+    """A fatal exception raised while parsing the geometry JSON --
+    standing in for any fatal exception surfacing before/around the
+    narrow `KeyError` translation -- must propagate uncaught and
+    unwrapped, never becoming `DfpPhase1bCalibrationRunError`."""
+    sys.path.insert(0, str(ROOT / "diagnostics"))
+    import argparse
+    import importlib
+
+    cli = importlib.import_module("run_dfp_phase1b_calibration")
+    geometry_path = tmp_path / "geometry.json"
+    geometry_path.write_text("{}")
+    artifact_path = tmp_path / "placeholder.json"
+    artifact_path.write_text("{}")
+
+    def _raise_fatal(*_a, **_k):
+        raise fatal_exception("simulated fatal condition")
+
+    monkeypatch.setattr(cli.json, "load", _raise_fatal)
+    args = argparse.Namespace(artifact=str(artifact_path), geometry_json=str(geometry_path), repo_root=ROOT)
+    with pytest.raises(fatal_exception):
+        cli._cmd_verify_artifact(args)
+
+
+def test_unrelated_downstream_domain_error_retains_its_own_type(valid_geometry_verification_fixture, tmp_path):
+    """A downstream, unrelated schema-validation failure (a corrupted
+    `schema_name`, caught by `validate_calibration_artifact` -- nothing
+    to do with the geometry-ID lookup at all) must still raise
+    `DfpPhase1bCalibrationArtifactError`, unchanged -- proving the
+    narrow `except KeyError` in `geometry_provider` did not widen to
+    swallow or reclassify unrelated errors."""
+    sys.path.insert(0, str(ROOT / "diagnostics"))
+    import argparse
+    import importlib
+
+    cli = importlib.import_module("run_dfp_phase1b_calibration")
+    fixture = valid_geometry_verification_fixture
+    corrupted_document = copy.deepcopy(fixture["document"])
+    corrupted_document["schema_name"] = "not-the-real-schema-name"
+    artifact_path = tmp_path / "corrupted_artifact.json"
+    artifact_path.write_text(json.dumps(corrupted_document))
+
+    args = argparse.Namespace(artifact=str(artifact_path), geometry_json=str(fixture["geometry_path"]), repo_root=ROOT)
+    with pytest.raises(artifact_module.DfpPhase1bCalibrationArtifactError):
+        cli._cmd_verify_artifact(args)
+
+
+def test_valid_geometry_document_still_passes_unchanged(valid_geometry_verification_fixture):
+    """Control: with every required canonical ID present, the repair
+    changes nothing about the successful path."""
+    sys.path.insert(0, str(ROOT / "diagnostics"))
+    import argparse
+    import importlib
+
+    cli = importlib.import_module("run_dfp_phase1b_calibration")
+    fixture = valid_geometry_verification_fixture
+    args = argparse.Namespace(
+        artifact=str(fixture["artifact_path"]), geometry_json=str(fixture["geometry_path"]), repo_root=ROOT,
+    )
+    assert cli._cmd_verify_artifact(args) == 0
+
+
+# --- Category D: isolation. -----------------------------------------------
+
+
+def test_geometry_verification_never_touches_model_gt_graph_or_recurrence(tmp_path, monkeypatch, valid_geometry_verification_fixture):
+    """Neither the successful nor the missing-ID path ever loads a
+    model/checkpoint, decodes ground-truth labels, or runs graph
+    construction/recurrence -- and neither ever writes the artifact
+    file it was asked to verify."""
+    sys.path.insert(0, str(ROOT / "diagnostics"))
+    import argparse
+    import importlib
+
+    cli = importlib.import_module("run_dfp_phase1b_calibration")
+    fixture = valid_geometry_verification_fixture
+
+    poison_hits: dict[str, int] = {}
+
+    def _poison(name):
+        def _poisoned(*_a, **_k):
+            poison_hits[name] = poison_hits.get(name, 0) + 1
+            raise AssertionError(f"{name} must not be reached during geometry-only verification")
+        return _poisoned
+
+    import torch
+
+    monkeypatch.setattr(torch, "load", _poison("torch.load"))
+    try:
+        from mmcv.runner import CheckpointLoader
+
+        monkeypatch.setattr(CheckpointLoader, "load_checkpoint", staticmethod(_poison("CheckpointLoader.load_checkpoint")))
+    except Exception:
+        pass
+    try:
+        from models.dinotext.cover_dr import graph as graph_mod
+
+        monkeypatch.setattr(graph_mod, "build_directed_topk_graph", _poison("build_directed_topk_graph"))
+    except Exception:
+        pass
+    try:
+        from models.dinotext.cover_dr import finite_step_regime as fsr_mod
+
+        monkeypatch.setattr(fsr_mod, "finite_step_propagate", _poison("finite_step_propagate"))
+    except Exception:
+        pass
+    import src.dfp_phase1b_masked_forward as mf
+
+    monkeypatch.setattr(mf, "build_masked_seed_chunk", _poison("build_masked_seed_chunk"))
+    monkeypatch.setattr(mf, "propagate_masked_seed_chunk", _poison("propagate_masked_seed_chunk"))
+
+    real_open = open
+
+    def _poisoned_open(file, *a, **k):
+        path_str = str(file)
+        if "annotations" in path_str and "val2017" in path_str:
+            poison_hits["gt_open"] = poison_hits.get("gt_open", 0) + 1
+            raise AssertionError(f"GT/annotation file must not be opened: {path_str}")
+        return real_open(file, *a, **k)
+
+    monkeypatch.setattr("builtins.open", _poisoned_open)
+
+    artifact_before = fixture["artifact_path"].read_text()
+    geometry_before = fixture["geometry_path"].read_text()
+
+    args = argparse.Namespace(
+        artifact=str(fixture["artifact_path"]), geometry_json=str(fixture["geometry_path"]), repo_root=ROOT,
+    )
+    assert cli._cmd_verify_artifact(args) == 0
+
+    missing_payload, missing_id = _missing_id_geometry_payload(fixture["ids"], fixture["geometry_payload"], "missing_first")
+    missing_geometry_path = tmp_path / "missing_geometry.json"
+    with real_open(missing_geometry_path, "w") as handle:
+        json.dump(missing_payload, handle)
+    placeholder_artifact_path = tmp_path / "placeholder.json"
+    with real_open(placeholder_artifact_path, "w") as handle:
+        handle.write("{}")
+    args_missing = argparse.Namespace(
+        artifact=str(placeholder_artifact_path), geometry_json=str(missing_geometry_path), repo_root=ROOT,
+    )
+    with pytest.raises(run.DfpPhase1bCalibrationRunError):
+        cli._cmd_verify_artifact(args_missing)
+
+    assert poison_hits == {}
+    assert fixture["artifact_path"].read_text() == artifact_before
+    assert fixture["geometry_path"].read_text() == geometry_before
+    assert torch.cuda.is_initialized() is False
 
 
 # ---------------------------------------------------------------------------
