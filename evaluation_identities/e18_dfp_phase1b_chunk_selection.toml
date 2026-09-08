@@ -1,0 +1,275 @@
+format_version = "Talk2Dino-DFP-Phase1B-Chunk-Selection-Identity-V1"
+
+# ---------------------------------------------------------------------
+# E18: an ADDITIVE SUCCESSOR to E17. E17 froze a purely operational
+# six-trial measurement protocol and explicitly selected no chunk size
+# (`e17...[operational_scope].winner_selection_authorized_by_this_identity
+# = false`). This identity is the separate, later, narrowly-scoped step
+# E17's own [future_step_bindings] deferred: it binds the completed,
+# independently-verified E17 benchmark output (the real
+# `merged_result.json` from SLURM job 21331697, produced at the
+# committed Task 3 HEAD), freezes a deterministic post-hoc selection
+# rule, and records the resulting OPERATIONAL chunk-size choice.
+#
+# This identity does not modify E17, E16, E15, E14, or E13 in any way.
+# It does not freeze a numeric conservation tolerance. It does not
+# authorize full Phase 1B execution or the 5,000-image evaluation. See
+# [authorization_boundary] below -- those booleans are the ground
+# truth for this identity's authority boundary.
+#
+# The selection rule below was frozen as a DETERMINISTIC FUNCTION of
+# the eligibility/statistic/tie-break definitions BEFORE being applied
+# by `src/dfp_phase1b_chunk_selection.py` to the real six verified
+# trials; the winner recorded in [selection_result] is the frozen
+# rule's OUTPUT, not an independently chosen input. The selector module
+# recomputes this from the raw trials on every load and refuses to
+# trust the recorded winner without that recomputation.
+# ---------------------------------------------------------------------
+
+[identity]
+name = "e18-dfp-phase1b-chunk-selection"
+schema_name = "talk2dino-dfp-phase1b-chunk-selection-identity-v1"
+schema_version = 1
+purpose = "Freezes a deterministic, post-hoc-applied operational selection rule over the completed and independently-verified E17 chunk-size benchmark, and records the resulting operational component_chunk_size choice for production use. Selects no scientific metric, defines no conservation tolerance, and authorizes no full Phase 1B or 5,000-image execution."
+creation_status = "narrow_additive_successor_authority -- not yet installed against a committed durable /scratch selection artifact; that installation happens only after independent re-verification and commit"
+successor_of = "e17-dfp-phase1b-chunk-benchmark"
+successor_relation = "additive_only: binds but never edits, reinterprets, or re-hashes any E13-E17 file; consumes E17's completed benchmark output as a read-only input"
+required_ancestor_commit = "e4caef84b98d048f160dc935282679ed20efcc99"
+required_ancestor_relation = "required_ancestor_commit must be an ancestor of (or equal to) the executing repository_commit -- verified via 'git merge-base --is-ancestor <required_ancestor_commit> <repository_commit>', exactly like E17's own convention. This is the exact Task 3 commit that produced the bound merged_result.json; the benchmark code hashes below are only valid for a worktree at or descended from this commit."
+working_branch = "dfp-phase1a-diagnostics"
+
+[operational_scope]
+purpose = "operational_chunk_size_selection"
+scientific_metric = false
+preregistered_hypothesis_test = false
+statistical_significance_claimed = false
+post_hoc_engineering_selection = true
+selection_rule_frozen_before_being_applied_to_trials = true
+conservation_tolerance_defined = false
+full_phase1b_execution_authorized = false
+five_thousand_image_evaluation_authorized = false
+gpu_execution_performed_by_this_step = false
+operational_chunk_size_selected = true
+
+# ---------------------------------------------------------------------
+# Dependency bindings: exact relative path + SHA-256 for every file
+# whose bytes this selection mathematically depends on. Log text is
+# deliberately NOT bound here -- the verified raw trials and merged
+# result are the sole numerical authority.
+# ---------------------------------------------------------------------
+
+[dependency_bindings.e17_identity]
+relative_path = "evaluation_identities/e17_dfp_phase1b_chunk_benchmark.toml"
+sha256 = "cf022800d64b70f08f6f1421c82a278e50ce378c3fe3df0e59384e15814a1876"
+untouched_by_this_identity = true
+
+[dependency_bindings.benchmark_manifest]
+relative_path = "evaluation_subsets/dfp_phase1b_chunk_benchmark_24.json"
+sha256 = "be2c77466a2c1d64f0f39f17f4d073ce1de92dc526a59e47ae8c3dabb8c644ab"
+untouched_by_this_identity = true
+
+[dependency_bindings.benchmark_runner_module]
+relative_path = "src/dfp_phase1b_chunk_benchmark.py"
+sha256 = "d0822e1d0019f717eeacf6ec82eab48caab6c95036a21ca745bd3640fae35c07"
+untouched_by_this_identity = true
+
+[dependency_bindings.benchmark_cli_module]
+relative_path = "diagnostics/run_dfp_phase1b_chunk_benchmark.py"
+sha256 = "ae54c1c473ac55614e6f767e24c80317422cff7a2493a2562eafc8b7c32e8b1e"
+untouched_by_this_identity = true
+
+[dependency_bindings.merged_result]
+relative_path = "merged_result.json"
+relative_path_is_symbolic_not_repository_relative = true
+relative_path_note = "the real completed Task 3 merged result lives under scratch benchmark output, never inside this repository -- see [source_benchmark_run] below for its actual absolute location, bound here by content hash only"
+sha256 = "8acbcd6c71ba537c898c8472950a6391d175186d6c0f8e88a772844bb8141868"
+untouched_by_this_identity = true
+
+[dependency_bindings.selector_module]
+relative_path = "src/dfp_phase1b_chunk_selection.py"
+sha256 = "f8452d6c720e89dd6e4e74e14eac604935d2688006e235987487ec805a8351e5"
+untouched_by_this_identity = "N/A -- this IS this identity's own selector; hashed here so the selection artifact can bind the exact executed selection code"
+self_reference_note = "This TOML records this file's hash; this file does not record this TOML's own hash anywhere -- no circularity."
+
+[dependency_bindings.analysis_cli_module]
+relative_path = "diagnostics/analyze_dfp_phase1b_chunk_benchmark.py"
+sha256 = "f559adb37ed0c78547ecb1c664fabd430102986811120af716c6a29e1b89c5e0"
+untouched_by_this_identity = "N/A -- this is the selection's own CLI, hashed so the selection artifact can bind the exact executed entry point"
+
+# ---------------------------------------------------------------------
+# Source benchmark run: identifies exactly which real, completed,
+# independently-verified Task 3 execution this identity consumes.
+# ---------------------------------------------------------------------
+
+[source_benchmark_run]
+slurm_job_id = "21331697"
+repository_commit = "e4caef84b98d048f160dc935282679ed20efcc99"
+device_type = "cuda"
+gpu_model_name = "NVIDIA H100 80GB HBM3"
+trial_count = 6
+scheduler_state = "COMPLETED"
+scheduler_exit_code = "0:0"
+
+# ---------------------------------------------------------------------
+# Selection contract: the deterministic rule, frozen before being
+# applied. No value in this table may be chosen from an observed
+# timing or memory value.
+# ---------------------------------------------------------------------
+
+[selection_contract]
+candidate_chunk_sizes = [16, 32, 64]
+required_repeats_per_candidate = 2
+required_measured_windows_per_trial = 24
+elapsed_time_field = "timing.primary_elapsed_ns"
+elapsed_time_field_note = "exactly Task 3's own frozen primary-timing field (see e17...[measurement.primary_timing]) -- excludes warm-up, preflight, merge, and verification time; excludes model/dataset construction and checkpoint loading, which are excluded from primary_elapsed_ns by E17's own timing-boundary definition"
+primary_statistic = "arithmetic_mean_of_the_two_complete_measured_trial_primary_elapsed_ns_values"
+tie_definition = "exact equality of the reconstructed arithmetic-mean statistic in integer/half-integer nanoseconds -- no epsilon, no rounding before comparison"
+tie_break_sequence = [
+    "lower_max_host_process_lifetime_peak_rss_bytes",
+    "lower_max_gpu_peak_reserved_bytes",
+    "smaller_numerical_chunk_size",
+]
+
+[selection_contract.eligibility_conditions]
+description = "A candidate chunk size is safe/eligible only if BOTH of its trials satisfy every one of these conditions."
+list = [
+    "trial.complete is true and trial.final is true",
+    "trial passes src.dfp_phase1b_chunk_benchmark.verify_trial_document (the committed Task 3 verifier)",
+    "trial (trial_index, repeat_index, chunk_size) is a member of the frozen E17 trial schedule",
+    "len(trial.window_identity) == required_measured_windows_per_trial (24)",
+    "trial.timing.primary_elapsed_ns is a finite non-negative integer",
+    "every trial.memory.* field is a finite non-negative integer",
+    "trial.abort_status.aborted is false",
+    "trial.device_record.gpu_model_name equals e17...[benchmark_design].required_gpu_model",
+    "trial.device_record.device_type equals e17...[benchmark_design].required_device_type",
+    "trial.software_record is identical across all six trials (checked once, benchmark-wide)",
+    "trial.scientific_output_digests.collection_digest equals the common digest shared by all six trials",
+    "trial.memory.host_process_lifetime_peak_rss_bytes does not exceed the E17 safety_contract host threshold",
+    "trial.memory.gpu_peak_reserved_bytes does not exceed the E17 safety_contract GPU threshold",
+]
+
+# ---------------------------------------------------------------------
+# Safety contract: references E17's own [measurement.safety_guard]
+# values relationally -- invents no new threshold.
+# ---------------------------------------------------------------------
+
+[safety_contract]
+description = "Mirrors e17...[measurement.safety_guard] exactly; validated relationally against the live E17 TOML on every load, never merely hand-copied."
+host_rss_abort_fraction_of_allocation = 0.90
+gpu_reserved_abort_fraction_of_allocation = 0.90
+allocated_host_memory_gib = 80
+allocated_gpu_memory_gib = 80
+comparison_operator = "strictly_greater_than"
+boundary_semantics = "usage > threshold_fraction * allocation is unsafe; usage == threshold_fraction * allocation is safe (matches E17's own boundary_semantics exactly)"
+host_threshold_bytes = 77309411328
+gpu_threshold_bytes = 77309411328
+
+# ---------------------------------------------------------------------
+# Selection result: the frozen rule's OUTPUT over the real, verified
+# six-trial run. Every numeric field here is independently
+# recomputed and compared by the selector module on every load --
+# never trusted as an input.
+# ---------------------------------------------------------------------
+
+[selection_result]
+scientific_output_digest = "0ab0dcf6db4fca0774825b70767d64de5a7d416576071e82faaa1133fabf7bbf"
+all_candidates_scientifically_equal = true
+selected_chunk_size = 16
+selected_mean_elapsed_ns = 490611161126.5
+tie_break_path = "unique_minimum_no_tie_break_needed"
+
+[selection_result.candidates.chunk_16]
+chunk_size = 16
+repeat0_trial_index = 0
+repeat1_trial_index = 5
+repeat0_primary_elapsed_ns = 532762109651
+repeat1_primary_elapsed_ns = 448460212602
+mean_elapsed_ns = 490611161126.5
+max_host_process_lifetime_peak_rss_bytes = 15295516672
+max_gpu_peak_reserved_bytes = 8006926336
+safe = true
+safety_violations = []
+
+[selection_result.candidates.chunk_32]
+chunk_size = 32
+repeat0_trial_index = 1
+repeat1_trial_index = 4
+repeat0_primary_elapsed_ns = 609678129698
+repeat1_primary_elapsed_ns = 435979034279
+mean_elapsed_ns = 522828581988.5
+max_host_process_lifetime_peak_rss_bytes = 27382038528
+max_gpu_peak_reserved_bytes = 7998537728
+safe = true
+safety_violations = []
+
+[selection_result.candidates.chunk_64]
+chunk_size = 64
+repeat0_trial_index = 2
+repeat1_trial_index = 3
+repeat0_primary_elapsed_ns = 584577861113
+repeat1_primary_elapsed_ns = 464970159718
+mean_elapsed_ns = 524774010415.5
+max_host_process_lifetime_peak_rss_bytes = 51819261952
+max_gpu_peak_reserved_bytes = 7998537728
+safe = true
+safety_violations = []
+
+# ---------------------------------------------------------------------
+# Authorization boundary: the ground truth for what this identity does
+# and does not authorize. A verifier must check these booleans
+# directly, never infer them from prose.
+# ---------------------------------------------------------------------
+
+[authorization_boundary]
+operational_chunk_size_selected = true
+conservation_tolerance_defined = false
+full_phase1b_execution_authorized = false
+five_thousand_image_execution_authorized = false
+gpu_execution_performed_by_this_step = false
+
+# ---------------------------------------------------------------------
+# Disclosure: mandatory plain-language limitations, checked for
+# presence (non-empty exact booleans) by the closed-schema validator.
+# ---------------------------------------------------------------------
+
+[disclosure]
+is_operational_engineering_selection = true
+selection_rule_frozen_after_observing_benchmark = true
+not_a_preregistered_scientific_hypothesis_test = true
+two_repeats_do_not_support_statistical_significance = true
+symmetric_trial_order_reduces_but_does_not_eliminate_temporal_cache_order_effects = true
+selection_does_not_change_scientific_results = true
+selection_does_not_define_conservation_tolerance = true
+selection_does_not_authorize_full_phase1b = true
+selection_does_not_authorize_or_implement_5000_image_evaluation = true
+chunk_16_not_claimed_scientifically_superior = true
+chunk_16_is_the_selected_operational_configuration_for_this_hardware_software_binding_only = true
+
+# ---------------------------------------------------------------------
+# Prohibited (mirrors e13/e15/e16/e17's own [prohibited] convention).
+# ---------------------------------------------------------------------
+
+[prohibited]
+list = [
+    "modifying_e13_e14_e15_e16_or_e17_identities",
+    "modifying_the_completed_benchmark_output_or_any_raw_trial",
+    "freezing_a_numeric_conservation_tolerance",
+    "full_phase1b_execution",
+    "five_thousand_image_evaluation_or_sharding_or_merging",
+    "gpu_use_in_this_task",
+    "slurm_submission_in_this_task",
+    "real_benchmark_execution_in_this_task",
+    "trusting_the_recorded_selected_chunk_size_without_recomputation",
+    "inventing_a_safety_threshold_not_present_in_e17",
+    "declaring_chunk_16_scientifically_superior",
+    "claiming_statistical_significance_from_two_repeats",
+]
+
+[future_step_bindings]
+description = "Fields explicitly deferred to a later task, never guessed or invented here."
+next_step_items = [
+    "install the durable phase1b_chunk_selection.json artifact under its committed /scratch destination, after independent re-verification and commit of this identity",
+    "wire the selected operational component_chunk_size into any later full Phase 1B production run configuration (never this identity)",
+    "separately, and only much later, freeze a numeric conservation tolerance (never this identity, never derived from this benchmark)",
+    "separately, and only much later, authorize full Phase 1B execution or the 5,000-image evaluation (never this identity)",
+]
