@@ -10,6 +10,7 @@ production output and adversarially-tampered fixtures."""
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import math
 import os
@@ -776,15 +777,15 @@ def _real_analysis():
 @requires_real_output
 def test_selection_artifact_is_deterministic():
     analysis = _real_analysis()
-    a1 = sel.build_selection_artifact(analysis, e18_sha256="x", e17_sha256="y", manifest_sha256="z", repository_commit="c", command="cmd")
-    a2 = sel.build_selection_artifact(analysis, e18_sha256="x", e17_sha256="y", manifest_sha256="z", repository_commit="c", command="cmd")
+    a1 = sel.build_selection_artifact(analysis, e18_sha256="a" * 64, e17_sha256="y", manifest_sha256="z", repository_commit="c" * 40, analysis_generation_commit="d" * 40, gpu_execution_performed_by_task4=False, command="cmd")
+    a2 = sel.build_selection_artifact(analysis, e18_sha256="a" * 64, e17_sha256="y", manifest_sha256="z", repository_commit="c" * 40, analysis_generation_commit="d" * 40, gpu_execution_performed_by_task4=False, command="cmd")
     assert json.dumps(a1, sort_keys=True) == json.dumps(a2, sort_keys=True)
 
 
 @requires_real_output
 def test_markdown_report_is_deterministic():
     analysis = _real_analysis()
-    artifact = sel.build_selection_artifact(analysis, e18_sha256="x", e17_sha256="y", manifest_sha256="z", repository_commit="c", command="cmd")
+    artifact = sel.build_selection_artifact(analysis, e18_sha256="a" * 64, e17_sha256="y", manifest_sha256="z", repository_commit="c" * 40, analysis_generation_commit="d" * 40, gpu_execution_performed_by_task4=False, command="cmd")
     md1 = sel.render_markdown_report(artifact)
     md2 = sel.render_markdown_report(artifact)
     assert md1 == md2
@@ -794,7 +795,7 @@ def test_markdown_report_is_deterministic():
 @requires_real_output
 def test_write_selection_artifact_no_overwrite_by_default(tmp_path):
     analysis = _real_analysis()
-    artifact = sel.build_selection_artifact(analysis, e18_sha256="x", e17_sha256="y", manifest_sha256="z", repository_commit="c", command="cmd")
+    artifact = sel.build_selection_artifact(analysis, e18_sha256="a" * 64, e17_sha256="y", manifest_sha256="z", repository_commit="c" * 40, analysis_generation_commit="d" * 40, gpu_execution_performed_by_task4=False, command="cmd")
     sel.write_selection_artifact_atomically(artifact, output_dir=tmp_path, basename="phase1b_chunk_selection.json")
     dest = tmp_path / "phase1b_chunk_selection.json"
     original_mtime = dest.stat().st_mtime_ns
@@ -817,7 +818,7 @@ def test_write_selection_artifact_atomic_no_partial_output_on_construction_failu
 @requires_real_output
 def test_write_selection_artifact_allow_overwrite(tmp_path):
     analysis = _real_analysis()
-    artifact = sel.build_selection_artifact(analysis, e18_sha256="x", e17_sha256="y", manifest_sha256="z", repository_commit="c", command="cmd")
+    artifact = sel.build_selection_artifact(analysis, e18_sha256="a" * 64, e17_sha256="y", manifest_sha256="z", repository_commit="c" * 40, analysis_generation_commit="d" * 40, gpu_execution_performed_by_task4=False, command="cmd")
     sel.write_selection_artifact_atomically(artifact, output_dir=tmp_path, basename="phase1b_chunk_selection.json")
     sel.write_selection_artifact_atomically(dict(artifact, note="updated"), output_dir=tmp_path, basename="phase1b_chunk_selection.json", allow_overwrite=True)
     assert json.loads((tmp_path / "phase1b_chunk_selection.json").read_text())["note"] == "updated"
@@ -1317,18 +1318,483 @@ def test_cli_markdown_output_traversal_rejected(tmp_path):
 
 
 @requires_real_output
-def test_cli_valid_basenames_accepted(tmp_path):
-    out_dir = _copy_real_output_to(tmp_path)
-    result = _run_cli("analyze", "--output-dir", str(out_dir), "--output", "phase1b_chunk_selection.json",
-                       "--markdown-output", "phase1b_chunk_selection_report.md")
-    assert result.returncode == 0
+def test_cli_valid_basenames_accepted(fixture_clone, tmp_path):
+    # analyze --output now requires a clean, committed worktree
+    # (Findings-repair round 2, Finding 2) to resolve
+    # analysis_generation_commit -- the REAL repository is legitimately
+    # dirty during active development, so artifact-GENERATION CLI tests
+    # use the isolated, disposable committed clone instead (same
+    # pattern as the E18-hash/generation-commit tests above).
+    clone_root, commit = fixture_clone
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    import shutil as _shutil
+    for f in REAL_OUTPUT_DIR.glob("trial_*.json"):
+        _shutil.copy2(f, out_dir / f.name)
+    _shutil.copy2(REAL_OUTPUT_DIR / "merged_result.json", out_dir / "merged_result.json")
+    cli_path = clone_root / "diagnostics/analyze_dfp_phase1b_chunk_benchmark.py"
+    result = sp.run(
+        [sys.executable, str(cli_path), "--repo-root", str(clone_root), "analyze", "--output-dir", str(out_dir),
+         "--output", "phase1b_chunk_selection.json", "--markdown-output", "phase1b_chunk_selection_report.md"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
     assert (out_dir / "phase1b_chunk_selection.json").exists()
     assert (out_dir / "phase1b_chunk_selection_report.md").exists()
 
 
 @requires_real_output
-def test_cli_double_dot_substring_basename_accepted(tmp_path):
-    out_dir = _copy_real_output_to(tmp_path)
-    result = _run_cli("analyze", "--output-dir", str(out_dir), "--output", "run..v2.json")
-    assert result.returncode == 0
+def test_cli_double_dot_substring_basename_accepted(fixture_clone, tmp_path):
+    clone_root, commit = fixture_clone
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    import shutil as _shutil
+    for f in REAL_OUTPUT_DIR.glob("trial_*.json"):
+        _shutil.copy2(f, out_dir / f.name)
+    _shutil.copy2(REAL_OUTPUT_DIR / "merged_result.json", out_dir / "merged_result.json")
+    cli_path = clone_root / "diagnostics/analyze_dfp_phase1b_chunk_benchmark.py"
+    result = sp.run(
+        [sys.executable, str(cli_path), "--repo-root", str(clone_root), "analyze", "--output-dir", str(out_dir), "--output", "run..v2.json"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
     assert (out_dir / "run..v2.json").exists()
+
+
+# =======================================================================
+# Findings-repair round 2: E18-identity-hash / analysis_generation_commit
+# / no-GPU-disclosure adversarial tests.
+#
+# All generation tests use an ISOLATED, disposable local git clone
+# (git objects are content-addressed, so a local clone touches nothing
+# in the real repository) with the CURRENT in-progress repaired files
+# copied in and committed as one synthetic descendant commit, and a
+# fixture-local E18 with ONLY its selector/analysis-CLI hashes patched
+# to match the fixture's own file bytes -- never the real repository's
+# E18. This is exactly the "temporary committed clone" strategy the
+# repair task itself requires: the durable /scratch artifacts are
+# never touched, and generation never runs against a dirty tree.
+# =======================================================================
+
+import contextlib as _contextlib
+
+
+def _clean_committed_clone(dest_dir):
+    """Clones ROOT, overlays the CURRENT (possibly in-progress/dirty)
+    Task 4 implementation files, patches a fixture-local copy of E18's
+    selector/CLI dependency hashes to match those overlaid bytes, and
+    commits everything as one disposable synthetic commit. Returns
+    (clone_root, commit_sha)."""
+    clone_dir = dest_dir / "clone"
+    result = sp.run(["git", "clone", "-q", str(ROOT), str(clone_dir)], capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, f"git clone failed: {result.stderr}"
+    for rel in (
+        "src/dfp_phase1b_chunk_selection.py",
+        "diagnostics/analyze_dfp_phase1b_chunk_benchmark.py",
+        "tests/test_dfp_phase1b_chunk_selection.py",
+        "docs/dfp_phase1b_chunk_selection.md",
+        "evaluation_identities/e18_dfp_phase1b_chunk_selection.toml",
+    ):
+        dest = clone_dir / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes((ROOT / rel).read_bytes())
+
+    import tomllib as _tomllib
+    e18_path = clone_dir / "evaluation_identities/e18_dfp_phase1b_chunk_selection.toml"
+    doc = _tomllib.load(open(e18_path, "rb"))
+    old_sel = doc["dependency_bindings"]["selector_module"]["sha256"]
+    old_cli = doc["dependency_bindings"]["analysis_cli_module"]["sha256"]
+    new_sel = hashlib.sha256((clone_dir / "src/dfp_phase1b_chunk_selection.py").read_bytes()).hexdigest()
+    new_cli = hashlib.sha256((clone_dir / "diagnostics/analyze_dfp_phase1b_chunk_benchmark.py").read_bytes()).hexdigest()
+    text = e18_path.read_text()
+    assert text.count(old_sel) == 1 and text.count(old_cli) == 1
+    e18_path.write_text(text.replace(old_sel, new_sel, 1).replace(old_cli, new_cli, 1))
+
+    sp.run(["git", "-C", str(clone_dir), "config", "user.email", "dfp-test-fixture@example.invalid"], check=True)
+    sp.run(["git", "-C", str(clone_dir), "config", "user.name", "DFP Test Fixture"], check=True)
+    sp.run(["git", "-C", str(clone_dir), "add", "-A"], check=True)
+    commit_result = sp.run(["git", "-C", str(clone_dir), "commit", "-q", "-m", "fixture: disposable synthetic Task4 repair commit"],
+                            capture_output=True, text=True)
+    assert commit_result.returncode == 0, f"fixture commit failed: {commit_result.stderr}"
+    commit = sp.run(["git", "-C", str(clone_dir), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+    status = sp.run(["git", "-C", str(clone_dir), "status", "--porcelain"], capture_output=True, text=True, check=True)
+    assert status.stdout.strip() == ""
+    return clone_dir, commit
+
+
+@pytest.fixture(scope="module")
+def fixture_clone(tmp_path_factory):
+    dest = tmp_path_factory.mktemp("dfp_task4_fixture_clone")
+    clone_dir, commit = _clean_committed_clone(dest)
+    return clone_dir, commit
+
+
+@_contextlib.contextmanager
+def _fixture_dirty(clone_root, mutate_fn):
+    mutate_fn(clone_root)
+    try:
+        yield
+    finally:
+        sp.run(["git", "-C", str(clone_root), "reset", "-q", "--hard", "HEAD"], check=True)
+        sp.run(["git", "-C", str(clone_root), "clean", "-q", "-fd"], check=True)
+
+
+def _import_fixture_sel(clone_root):
+    """Imports the fixture clone's OWN copy of src.dfp_phase1b_chunk_selection
+    as a fresh module (never the real repo's already-imported module),
+    so tests exercise the exact code committed in the fixture."""
+    import importlib
+    import sys as _sys
+    clone_root = str(clone_root)
+    if clone_root not in _sys.path:
+        _sys.path.insert(0, clone_root)
+    # Force a fresh import bound to this clone's sys.path entry.
+    for mod_name in ("src.dfp_phase1b_chunk_selection",):
+        _sys.modules.pop(mod_name, None)
+    return importlib.import_module("src.dfp_phase1b_chunk_selection")
+
+
+# ---------------------------------------------------------------------
+# Section: E18 identity hash (Findings repair round 2, Finding 1).
+# ---------------------------------------------------------------------
+
+
+def test_e18_hash_exact_real_value_accepted(fixture_clone):
+    clone_root, commit = fixture_clone
+    fsel = _import_fixture_sel(clone_root)
+    real_hash = hashlib.sha256((clone_root / fsel.IDENTITY_RELATIVE_PATH).read_bytes()).hexdigest()
+    analysis = fsel.analyze_benchmark(repo_root=clone_root, output_dir=REAL_OUTPUT_DIR)
+    e18 = fsel.load_e18_identity(clone_root)
+    artifact = fsel.build_selection_artifact(
+        analysis, e18_sha256=real_hash, e17_sha256=e18["dependency_bindings"]["e17_identity"]["sha256"],
+        manifest_sha256=e18["dependency_bindings"]["benchmark_manifest"]["sha256"],
+        repository_commit=analysis["merged"]["code_provenance"]["repository_commit"],
+        analysis_generation_commit=commit, gpu_execution_performed_by_task4=False, command="test",
+    )
+    assert artifact["e18_identity_sha256"] == real_hash
+
+
+@pytest.mark.parametrize("bad_hash", ["", "not-a-hash", "F" * 64, "a" * 63, "a" * 65])
+def test_e18_hash_build_rejects_malformed_values(fixture_clone, bad_hash):
+    clone_root, commit = fixture_clone
+    fsel = _import_fixture_sel(clone_root)
+    analysis = fsel.analyze_benchmark(repo_root=clone_root, output_dir=REAL_OUTPUT_DIR)
+    e18 = fsel.load_e18_identity(clone_root)
+    with pytest.raises(fsel.DfpPhase1bChunkSelectionError):
+        fsel.build_selection_artifact(
+            analysis, e18_sha256=bad_hash, e17_sha256=e18["dependency_bindings"]["e17_identity"]["sha256"],
+            manifest_sha256=e18["dependency_bindings"]["benchmark_manifest"]["sha256"],
+            repository_commit=analysis["merged"]["code_provenance"]["repository_commit"],
+            analysis_generation_commit=commit, gpu_execution_performed_by_task4=False, command="test",
+        )
+
+
+@pytest.mark.parametrize("wrong_hash_source", ["0" * 64, "wrong_file"])
+def test_e18_hash_well_formed_but_incorrect_rejected_by_verifier(fixture_clone, tmp_path, wrong_hash_source):
+    """A syntactically well-formed 64-hex value that is NOT the live
+    E18 file's actual hash (either an all-zero placeholder or the real
+    hash of a different, unrelated repository file) passes build-time
+    FORMAT validation (build only checks shape) but must be rejected
+    by the RELATIONAL verifier, which checks it against live bytes."""
+    fsel, clone_root, artifact = _artifact_and_clone(fixture_clone)
+    if wrong_hash_source == "0" * 64:
+        wrong_hash = "0" * 64
+    else:
+        wrong_hash = hashlib.sha256((clone_root / "src/dfp_phase1b_chunk_benchmark.py").read_bytes()).hexdigest()
+    artifact["e18_identity_sha256"] = wrong_hash
+    p = tmp_path / "a.json"
+    p.write_text(json.dumps(artifact))
+    with pytest.raises(fsel.DfpPhase1bChunkSelectionError):
+        fsel.verify_selection_artifact(p, repo_root=clone_root)
+
+
+def test_e18_bytes_tampered_stale_hash_rejected_by_verifier(fixture_clone, tmp_path):
+    clone_root, commit = fixture_clone
+    fsel = _import_fixture_sel(clone_root)
+    real_hash = hashlib.sha256((clone_root / fsel.IDENTITY_RELATIVE_PATH).read_bytes()).hexdigest()
+    analysis = fsel.analyze_benchmark(repo_root=clone_root, output_dir=REAL_OUTPUT_DIR)
+    e18 = fsel.load_e18_identity(clone_root)
+    artifact = fsel.build_selection_artifact(
+        analysis, e18_sha256=real_hash, e17_sha256=e18["dependency_bindings"]["e17_identity"]["sha256"],
+        manifest_sha256=e18["dependency_bindings"]["benchmark_manifest"]["sha256"],
+        repository_commit=analysis["merged"]["code_provenance"]["repository_commit"],
+        analysis_generation_commit=commit, gpu_execution_performed_by_task4=False, command="test",
+    )
+    artifact_path = tmp_path / "artifact.json"
+    artifact_path.write_text(json.dumps(artifact))
+    # E18 bytes on disk change (tamper), but the artifact's recorded
+    # hash still reflects the OLD bytes -- must be rejected.
+    e18_path = clone_root / fsel.IDENTITY_RELATIVE_PATH
+    original = e18_path.read_bytes()
+    try:
+        e18_path.write_bytes(original + b"\n# tampered\n")
+        with pytest.raises(fsel.DfpPhase1bChunkSelectionError):
+            fsel.verify_selection_artifact(artifact_path, repo_root=clone_root)
+    finally:
+        e18_path.write_bytes(original)
+
+
+def test_e18_stored_hash_tampered_bytes_unchanged_rejected(fixture_clone, tmp_path):
+    clone_root, commit = fixture_clone
+    fsel = _import_fixture_sel(clone_root)
+    real_hash = hashlib.sha256((clone_root / fsel.IDENTITY_RELATIVE_PATH).read_bytes()).hexdigest()
+    analysis = fsel.analyze_benchmark(repo_root=clone_root, output_dir=REAL_OUTPUT_DIR)
+    e18 = fsel.load_e18_identity(clone_root)
+    artifact = fsel.build_selection_artifact(
+        analysis, e18_sha256=real_hash, e17_sha256=e18["dependency_bindings"]["e17_identity"]["sha256"],
+        manifest_sha256=e18["dependency_bindings"]["benchmark_manifest"]["sha256"],
+        repository_commit=analysis["merged"]["code_provenance"]["repository_commit"],
+        analysis_generation_commit=commit, gpu_execution_performed_by_task4=False, command="test",
+    )
+    artifact["e18_identity_sha256"] = "f" * 64  # tamper the STORED hash; E18 bytes untouched
+    artifact_path = tmp_path / "artifact.json"
+    artifact_path.write_text(json.dumps(artifact))
+    with pytest.raises(fsel.DfpPhase1bChunkSelectionError):
+        fsel.verify_selection_artifact(artifact_path, repo_root=clone_root)
+
+
+def test_e18_loader_failure_translated_through_domain_boundary(fixture_clone, tmp_path):
+    clone_root, commit = fixture_clone
+    fsel = _import_fixture_sel(clone_root)
+    bad_e18 = tmp_path / "corrupt.toml"
+    bad_e18.write_text("{not valid toml [[[")
+    with pytest.raises(fsel.DfpPhase1bChunkSelectionError):
+        fsel.load_e18_identity(clone_root, path=bad_e18)
+
+
+@pytest.mark.parametrize("exc_type", [KeyboardInterrupt, SystemExit, MemoryError])
+def test_e18_load_fatal_exceptions_propagate(fixture_clone, exc_type, monkeypatch):
+    clone_root, commit = fixture_clone
+    fsel = _import_fixture_sel(clone_root)
+
+    def poison_open(*a, **k):
+        raise exc_type("probe")
+
+    monkeypatch.setattr("builtins.open", poison_open)
+    with pytest.raises(exc_type):
+        fsel.load_e18_identity(clone_root)
+
+
+def test_cli_e18_verify_protocol_from_arbitrary_cwd_sanitized_pythonpath(fixture_clone, tmp_path):
+    clone_root, commit = fixture_clone
+    cli_path = clone_root / "diagnostics/analyze_dfp_phase1b_chunk_benchmark.py"
+    env = dict(PATH=__import__("os").environ["PATH"], HOME=__import__("os").environ.get("HOME", ""))
+    result = sp.run(
+        [sys.executable, str(cli_path), "--repo-root", str(clone_root), "verify-protocol"],
+        cwd=str(tmp_path), env=env, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "torch" not in result.stdout.lower() or "Traceback" not in result.stderr
+
+
+# ---------------------------------------------------------------------
+# Section: analysis_generation_commit (Findings repair round 2, Finding 2).
+# ---------------------------------------------------------------------
+
+
+def test_generation_commit_full_hex_accepted(fixture_clone):
+    clone_root, commit = fixture_clone
+    fsel = _import_fixture_sel(clone_root)
+    e18 = fsel.load_e18_identity(clone_root)
+    resolved = fsel.resolve_analysis_generation_commit(clone_root, e18_document=e18)
+    assert resolved == commit
+    assert len(resolved) == 40 and resolved == resolved.lower()
+
+
+@pytest.mark.parametrize("bad_commit", [
+    "a" * 39, "a" * 41, "A" * 40, "not-hex-not-hex-not-hex-not-hex-nothx12", "", "g" * 40,
+])
+def test_generation_commit_malformed_rejected_at_build(fixture_clone, bad_commit):
+    clone_root, commit = fixture_clone
+    fsel = _import_fixture_sel(clone_root)
+    analysis = fsel.analyze_benchmark(repo_root=clone_root, output_dir=REAL_OUTPUT_DIR)
+    e18 = fsel.load_e18_identity(clone_root)
+    real_hash = hashlib.sha256((clone_root / fsel.IDENTITY_RELATIVE_PATH).read_bytes()).hexdigest()
+    with pytest.raises(fsel.DfpPhase1bChunkSelectionError):
+        fsel.build_selection_artifact(
+            analysis, e18_sha256=real_hash, e17_sha256=e18["dependency_bindings"]["e17_identity"]["sha256"],
+            manifest_sha256=e18["dependency_bindings"]["benchmark_manifest"]["sha256"],
+            repository_commit=analysis["merged"]["code_provenance"]["repository_commit"],
+            analysis_generation_commit=bad_commit, gpu_execution_performed_by_task4=False, command="test",
+        )
+
+
+def test_generation_commit_nonexistent_rejected(fixture_clone, tmp_path):
+    fsel, clone_root, artifact = _artifact_and_clone(fixture_clone)
+    artifact["analysis_generation_commit"] = "f" * 40  # well-formed, but not a real commit object
+    p = tmp_path / "a.json"
+    p.write_text(json.dumps(artifact))
+    with pytest.raises(fsel.DfpPhase1bChunkSelectionError):
+        fsel.verify_selection_artifact(p, repo_root=clone_root)
+
+
+def test_generation_commit_wrong_ancestor_rejected(fixture_clone, tmp_path):
+    clone_root, commit = fixture_clone
+    fsel = _import_fixture_sel(clone_root)
+    # Build a genuinely unrelated orphan commit in the SAME repo.
+    orphan_dir = tmp_path / "orphan_check"
+    sp.run(["git", "clone", "-q", str(clone_root), str(orphan_dir)], check=True)
+    sp.run(["git", "-C", str(orphan_dir), "config", "user.email", "x@example.invalid"], check=True)
+    sp.run(["git", "-C", str(orphan_dir), "config", "user.name", "X"], check=True)
+    sp.run(["git", "-C", str(orphan_dir), "checkout", "-q", "--orphan", "unrelated"], check=True)
+    sp.run(["git", "-C", str(orphan_dir), "rm", "-rf", "-q", "."], check=True)
+    (orphan_dir / "z.txt").write_text("z")
+    sp.run(["git", "-C", str(orphan_dir), "add", "z.txt"], check=True)
+    sp.run(["git", "-C", str(orphan_dir), "commit", "-q", "-m", "unrelated root"], check=True)
+    orphan_commit = sp.run(["git", "-C", str(orphan_dir), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+    # Fetch that orphan commit into clone_root so it's a real, resolvable object there too.
+    sp.run(["git", "-C", str(clone_root), "fetch", "-q", str(orphan_dir), f"{orphan_commit}:refs/heads/orphan_probe"], check=True)
+    e18 = fsel.load_e18_identity(clone_root)
+    with pytest.raises(ident.DfpPhase1bChunkBenchmarkIdentityError):
+        fsel.verify_ancestor_relation(clone_root, required_ancestor_commit=e18["identity"]["required_ancestor_commit"], repository_commit=orphan_commit)
+
+
+def test_benchmark_source_and_analysis_commits_swapped_rejected(fixture_clone, tmp_path):
+    clone_root, commit = fixture_clone
+    fsel = _import_fixture_sel(clone_root)
+    analysis = fsel.analyze_benchmark(repo_root=clone_root, output_dir=REAL_OUTPUT_DIR)
+    e18 = fsel.load_e18_identity(clone_root)
+    real_hash = hashlib.sha256((clone_root / fsel.IDENTITY_RELATIVE_PATH).read_bytes()).hexdigest()
+    artifact = fsel.build_selection_artifact(
+        analysis, e18_sha256=real_hash, e17_sha256=e18["dependency_bindings"]["e17_identity"]["sha256"],
+        manifest_sha256=e18["dependency_bindings"]["benchmark_manifest"]["sha256"],
+        repository_commit=analysis["merged"]["code_provenance"]["repository_commit"],
+        analysis_generation_commit=commit, gpu_execution_performed_by_task4=False, command="test",
+    )
+    artifact["repository_commit"], artifact["analysis_generation_commit"] = artifact["analysis_generation_commit"], artifact["repository_commit"]
+    artifact_path = tmp_path / "artifact.json"
+    artifact_path.write_text(json.dumps(artifact))
+    with pytest.raises(fsel.DfpPhase1bChunkSelectionError):
+        fsel.verify_selection_artifact(artifact_path, repo_root=clone_root)
+
+
+def test_generation_rejected_when_repository_dirty(fixture_clone):
+    clone_root, commit = fixture_clone
+    fsel = _import_fixture_sel(clone_root)
+    e18 = fsel.load_e18_identity(clone_root)
+    with _fixture_dirty(clone_root, lambda root: (root / "dirty_sentinel_gen.txt").write_text("x")):
+        with pytest.raises(fsel.DfpPhase1bChunkSelectionError):
+            fsel.resolve_analysis_generation_commit(clone_root, e18_document=e18)
+
+
+def test_generation_rejected_when_repository_staged(fixture_clone):
+    clone_root, commit = fixture_clone
+    fsel = _import_fixture_sel(clone_root)
+    e18 = fsel.load_e18_identity(clone_root)
+
+    def stage(root):
+        (root / "docs/dfp_phase1b_chunk_selection.md").write_text("dirty staged\n")
+        sp.run(["git", "-C", str(root), "add", "docs/dfp_phase1b_chunk_selection.md"], check=True)
+
+    with _fixture_dirty(clone_root, stage):
+        with pytest.raises(fsel.DfpPhase1bChunkSelectionError):
+            fsel.resolve_analysis_generation_commit(clone_root, e18_document=e18)
+
+
+def test_clean_committed_clone_generation_succeeds_and_verifies(fixture_clone, tmp_path):
+    clone_root, commit = fixture_clone
+    cli_path = clone_root / "diagnostics/analyze_dfp_phase1b_chunk_benchmark.py"
+    preview = tmp_path / "preview"
+    preview.mkdir()
+    for name in ("merged_result.json",) + tuple(f"trial_{i}.json" for i in ()):
+        pass
+    import shutil as _shutil
+    for f in REAL_OUTPUT_DIR.glob("trial_*.json"):
+        _shutil.copy2(f, preview / f.name)
+    _shutil.copy2(REAL_OUTPUT_DIR / "merged_result.json", preview / "merged_result.json")
+
+    result = sp.run(
+        [sys.executable, str(cli_path), "--repo-root", str(clone_root), "analyze",
+         "--output-dir", str(preview), "--output", "phase1b_chunk_selection.json",
+         "--markdown-output", "phase1b_chunk_selection_report.md"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    artifact = json.loads((preview / "phase1b_chunk_selection.json").read_text())
+    assert artifact["analysis_generation_commit"] == commit
+    assert artifact["selected_chunk_size"] == 16
+    assert artifact["repository_commit"] != artifact["analysis_generation_commit"]
+
+    verify_result = sp.run(
+        [sys.executable, str(cli_path), "--repo-root", str(clone_root), "verify-selection", "--output-dir", str(preview)],
+        capture_output=True, text=True,
+    )
+    assert verify_result.returncode == 0, verify_result.stderr
+
+
+# ---------------------------------------------------------------------
+# Section: no-GPU disclosure (Findings repair round 2, Finding 3).
+# ---------------------------------------------------------------------
+
+
+def _artifact_and_clone(fixture_clone):
+    clone_root, commit = fixture_clone
+    fsel = _import_fixture_sel(clone_root)
+    analysis = fsel.analyze_benchmark(repo_root=clone_root, output_dir=REAL_OUTPUT_DIR)
+    e18 = fsel.load_e18_identity(clone_root)
+    real_hash = hashlib.sha256((clone_root / fsel.IDENTITY_RELATIVE_PATH).read_bytes()).hexdigest()
+    artifact = fsel.build_selection_artifact(
+        analysis, e18_sha256=real_hash, e17_sha256=e18["dependency_bindings"]["e17_identity"]["sha256"],
+        manifest_sha256=e18["dependency_bindings"]["benchmark_manifest"]["sha256"],
+        repository_commit=analysis["merged"]["code_provenance"]["repository_commit"],
+        analysis_generation_commit=commit, gpu_execution_performed_by_task4=False, command="test",
+    )
+    return fsel, clone_root, artifact
+
+
+def test_no_gpu_disclosure_false_accepted(fixture_clone):
+    fsel, clone_root, artifact = _artifact_and_clone(fixture_clone)
+    assert artifact["limitations"]["gpu_execution_performed_by_task4"] is False
+
+
+@pytest.mark.parametrize("bad_value", [True, 0, "false", None])
+def test_no_gpu_disclosure_bad_values_rejected_at_build(fixture_clone, bad_value):
+    clone_root, commit = fixture_clone
+    fsel = _import_fixture_sel(clone_root)
+    analysis = fsel.analyze_benchmark(repo_root=clone_root, output_dir=REAL_OUTPUT_DIR)
+    e18 = fsel.load_e18_identity(clone_root)
+    real_hash = hashlib.sha256((clone_root / fsel.IDENTITY_RELATIVE_PATH).read_bytes()).hexdigest()
+    with pytest.raises(fsel.DfpPhase1bChunkSelectionError):
+        fsel.build_selection_artifact(
+            analysis, e18_sha256=real_hash, e17_sha256=e18["dependency_bindings"]["e17_identity"]["sha256"],
+            manifest_sha256=e18["dependency_bindings"]["benchmark_manifest"]["sha256"],
+            repository_commit=analysis["merged"]["code_provenance"]["repository_commit"],
+            analysis_generation_commit=commit, gpu_execution_performed_by_task4=bad_value, command="test",
+        )
+
+
+@pytest.mark.parametrize("bad_value", [True, 0, "false", None])
+def test_no_gpu_disclosure_bad_values_rejected_by_verifier(fixture_clone, bad_value, tmp_path):
+    fsel, clone_root, artifact = _artifact_and_clone(fixture_clone)
+    artifact["limitations"]["gpu_execution_performed_by_task4"] = bad_value
+    p = tmp_path / "a.json"
+    p.write_text(json.dumps(artifact))
+    with pytest.raises(fsel.DfpPhase1bChunkSelectionError):
+        fsel.verify_selection_artifact(p, repo_root=clone_root)
+
+
+def test_no_gpu_disclosure_missing_key_rejected(fixture_clone, tmp_path):
+    fsel, clone_root, artifact = _artifact_and_clone(fixture_clone)
+    del artifact["limitations"]["gpu_execution_performed_by_task4"]
+    p = tmp_path / "a.json"
+    p.write_text(json.dumps(artifact))
+    with pytest.raises(fsel.DfpPhase1bChunkSelectionError):
+        fsel.verify_selection_artifact(p, repo_root=clone_root)
+
+
+def test_no_gpu_disclosure_unknown_replacement_key_rejected(fixture_clone, tmp_path):
+    fsel, clone_root, artifact = _artifact_and_clone(fixture_clone)
+    del artifact["limitations"]["gpu_execution_performed_by_task4"]
+    artifact["limitations"]["task4_no_gpu_execution"] = True
+    p = tmp_path / "a.json"
+    p.write_text(json.dumps(artifact))
+    with pytest.raises(fsel.DfpPhase1bChunkSelectionError):
+        fsel.verify_selection_artifact(p, repo_root=clone_root)
+
+
+def test_no_gpu_disclosure_json_markdown_consistent(fixture_clone):
+    fsel, clone_root, artifact = _artifact_and_clone(fixture_clone)
+    md = fsel.render_markdown_report(artifact)
+    assert "GPU execution performed by Task 4" in md
+    assert "**False**" in md
+    assert "H100" in md

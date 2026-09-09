@@ -859,26 +859,32 @@ def test_cli_verify_protocol_exits_zero(capsys):
 
 
 @requires_real_inputs
-def test_cli_preflight_against_real_uncommitted_tree_fails_clean_worktree_check(capsys):
-    """The real repository is STILL uncommitted (eight untracked
-    implementation files) -- `preflight` now performs the FULL shared
-    repository-readiness check (Finding repair: it previously omitted
-    the git ancestry/clean-worktree check entirely and would have
-    reported a false PASS here), so it correctly reports exit 2, not a
-    PASS, against the real repository's current dirty working tree.
-    This is expected, intentional behavior and must never be weakened;
-    the genuine positive-path proof lives in
+def test_cli_preflight_against_isolated_dirty_clone_fails_clean_worktree_check(synthetic_clean_clone, capsys):
+    """`preflight` performs the FULL shared repository-readiness check
+    (Finding repair: it previously omitted the git ancestry/clean-
+    worktree check entirely and would have reported a false PASS
+    here). Renamed from a prior revision that asserted this against
+    the REAL repository's own working tree -- that premise became
+    false once Task 3 and Task 4 were legitimately committed, so this
+    now uses the same isolated, disposable synthetic clone every other
+    dirty-tree test in this module uses, deliberately dirtied with one
+    untracked sentinel file, restored via `_temporarily_dirty` before
+    returning. Never depends on, and never mutates, the real
+    repository. The genuine positive-path proof lives in
     test_cli_preflight_passes_on_clean_synthetic_descendant_clone,
-    against a clean temporary clone."""
-    sys.path.insert(0, str(ROOT / "diagnostics"))
-    import importlib
+    against the SAME clone in its clean state."""
+    with _temporarily_dirty(synthetic_clean_clone, lambda root: (root / "isolated_dirty_sentinel.txt").write_text("x")):
+        sys.path.insert(0, str(ROOT / "diagnostics"))
+        import importlib
 
-    cli = importlib.import_module("run_dfp_phase1b_chunk_benchmark")
-    exit_code = cli.main([
-        "preflight", "--artifact", str(ARTIFACT_PATH), "--manifest", str(MANIFEST_PATH),
-        "--workload-bundle-dir", str(WORKLOAD_BUNDLE_DIR),
-    ])
-    captured = capsys.readouterr()
+        cli = importlib.import_module("run_dfp_phase1b_chunk_benchmark")
+        exit_code = cli.main([
+            "--repo-root", str(synthetic_clean_clone),
+            "preflight", "--artifact", str(ARTIFACT_PATH),
+            "--manifest", str(synthetic_clean_clone / "evaluation_subsets/dfp_phase1b_chunk_benchmark_24.json"),
+            "--workload-bundle-dir", str(WORKLOAD_BUNDLE_DIR),
+        ])
+        captured = capsys.readouterr()
     assert exit_code == 2
     assert "PREFLIGHT PASS" not in captured.out
     assert "not clean" in captured.err
@@ -1916,17 +1922,24 @@ def test_preflight_and_run_trial_share_one_readiness_implementation():
         assert forbidden not in calls_by_func["_cmd_preflight"]
 
 
-def test_real_uncommitted_working_tree_readiness_check_fails_as_expected():
-    """The real repository is STILL uncommitted (eight untracked
-    files) -- a readiness check against it MUST fail (dirty worktree).
-    This is expected, correct behavior, never to be weakened."""
+def test_isolated_dirty_clone_working_tree_readiness_check_fails_as_expected(synthetic_clean_clone):
+    """A readiness check against a dirty worktree MUST fail. Renamed
+    from a prior revision that relied on the REAL repository's own
+    working tree being uncommitted -- that premise became false once
+    Task 3 and Task 4 were legitimately committed. Uses the same
+    isolated, disposable synthetic clone every other dirty-tree test
+    in this module uses (deliberately dirtied with one untracked
+    sentinel file, restored via `_temporarily_dirty` before
+    returning), never the real repository."""
     cli = _import_cli()
-    with pytest.raises(bench.DfpPhase1bChunkBenchmarkError, match="not clean"):
-        cli.perform_repository_readiness_check(
-            repo_root=ROOT, artifact_path=ARTIFACT_PATH,
-            manifest_path=MANIFEST_PATH, workload_bundle_dir=WORKLOAD_BUNDLE_DIR,
-            output_path=None, allow_overwrite=False,
-        )
+    with _temporarily_dirty(synthetic_clean_clone, lambda root: (root / "isolated_dirty_sentinel_2.txt").write_text("x")):
+        with pytest.raises(bench.DfpPhase1bChunkBenchmarkError, match="not clean"):
+            cli.perform_repository_readiness_check(
+                repo_root=synthetic_clean_clone, artifact_path=ARTIFACT_PATH,
+                manifest_path=synthetic_clean_clone / "evaluation_subsets/dfp_phase1b_chunk_benchmark_24.json",
+                workload_bundle_dir=WORKLOAD_BUNDLE_DIR,
+                output_path=None, allow_overwrite=False,
+            )
 
 
 # =======================================================================

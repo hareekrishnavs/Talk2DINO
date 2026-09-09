@@ -87,13 +87,13 @@ untouched_by_this_identity = true
 
 [dependency_bindings.selector_module]
 relative_path = "src/dfp_phase1b_chunk_selection.py"
-sha256 = "f8452d6c720e89dd6e4e74e14eac604935d2688006e235987487ec805a8351e5"
+sha256 = "5b2cf7bae64221ce55dbf459a4a4af6ddca30662da458b4bc4c9c7ec56f25639"
 untouched_by_this_identity = "N/A -- this IS this identity's own selector; hashed here so the selection artifact can bind the exact executed selection code"
 self_reference_note = "This TOML records this file's hash; this file does not record this TOML's own hash anywhere -- no circularity."
 
 [dependency_bindings.analysis_cli_module]
 relative_path = "diagnostics/analyze_dfp_phase1b_chunk_benchmark.py"
-sha256 = "f559adb37ed0c78547ecb1c664fabd430102986811120af716c6a29e1b89c5e0"
+sha256 = "8da9f2d985847ee0359d5f5d6468737ff84e49fe022abde897425994f301e1d2"
 untouched_by_this_identity = "N/A -- this is the selection's own CLI, hashed so the selection artifact can bind the exact executed entry point"
 
 # ---------------------------------------------------------------------

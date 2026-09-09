@@ -194,6 +194,48 @@ both payloads fully generated *before* either temporary file is
 written, so a failure at any point leaves neither destination
 installed or modified.
 
+## Artifact provenance fields
+
+The generated JSON/Markdown distinguish two Git commits that are
+almost always different, and must never be confused or swapped:
+
+- `repository_commit` (role documented in the artifact itself as
+  `repository_commit_role`) is the **benchmark-source commit** --
+  the Task 3 commit whose committed code produced the six raw trials
+  and `merged_result.json` this artifact analyzes. Independently
+  cross-checked against the raw trials' own `code_provenance` on
+  every `analyze`/verification call -- never merely echoed from a
+  caller-supplied value.
+- `analysis_generation_commit` (role documented as
+  `analysis_generation_commit_role`) is the **Task 4 generation
+  commit** -- the exact repository commit whose committed
+  `src/dfp_phase1b_chunk_selection.py`/
+  `diagnostics/analyze_dfp_phase1b_chunk_benchmark.py` produced this
+  specific artifact. Obtained via a single `git rev-parse HEAD` read
+  (never re-read, so a concurrent repository change cannot cause it
+  to disagree with itself), only after the repository is confirmed
+  completely clean (tracked and untracked) via the same
+  `require_clean_worktree` gate Task 3's `run-trial` already uses --
+  artifact generation fails closed before writing anything if the
+  tree is dirty. It must be an ancestor of, or equal to, E18's own
+  `required_ancestor_commit` -- not required to equal any particular
+  future HEAD, so verification of an already-generated artifact
+  remains possible from any later descendant commit.
+
+`e18_identity_sha256` is the real SHA-256 of the exact committed
+`evaluation_identities/e18_dfp_phase1b_chunk_selection.toml` bytes,
+obtained only after `analyze` has loaded and relationally validated
+the actual E18 identity (never a blank placeholder, never an
+arbitrary file's hash).
+
+`limitations.gpu_execution_performed_by_task4` is the explicit Task 4
+no-GPU disclosure -- always the exact boolean `false`. This states
+only that **this Task 4 selection/regeneration step** performed no
+GPU execution; it does not and cannot claim the same about Task 3 --
+the real benchmark those six trials came from ran on a real NVIDIA
+H100 GPU. The Markdown report states both facts explicitly, side by
+side.
+
 ## Regenerating and verifying the selection artifact after commit
 
 This implementation task deliberately does **not** install a durable

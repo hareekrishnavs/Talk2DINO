@@ -40,6 +40,7 @@ from src.dfp_phase1b_chunk_benchmark_identity import (
     TRIAL_SCHEDULE,
     DfpPhase1bChunkBenchmarkIdentityError,
     load_identity as load_e17_identity_document,
+    require_clean_worktree,
     resolve_repository_relative_path,
     verify_ancestor_relation,
 )
@@ -838,10 +839,81 @@ def _current_head(repo_root: Path) -> str:
 # ---------------------------------------------------------------------
 
 
+_HEX40 = re.compile(r"^[0-9a-f]{40}$")
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def resolve_analysis_generation_commit(repo_root: Path, *, e18_document: Mapping[str, Any]) -> str:
+    """The SOLE way an ``analysis_generation_commit`` value may be
+    obtained anywhere in this module. Requires the repository to be
+    completely clean (tracked and untracked) via
+    ``require_clean_worktree`` -- the identical gate Task 3's own
+    ``run-trial`` uses before any execution -- so the resulting commit
+    genuinely identifies the exact code that generated the artifact.
+    Reads the commit via a SINGLE ``git rev-parse HEAD`` call (never
+    re-read elsewhere, so a concurrent repository change cannot cause
+    two different commit values to disagree within one generation).
+
+    Validates the result is exactly 40 lowercase hex characters, that
+    the commit object actually exists (``git cat-file -e``), and that
+    it satisfies the E18-required ancestor relationship (an ancestor
+    of, or equal to, ``e18_document``'s own
+    ``identity.required_ancestor_commit`` -- NOT required to equal any
+    particular future HEAD, so that artifact verification remains
+    possible from any later descendant commit; this mirrors E17/E18's
+    own established ancestor-not-equality convention exactly)."""
+    try:
+        commit = require_clean_worktree(repo_root)
+    except DfpPhase1bChunkBenchmarkIdentityError as exc:
+        raise DfpPhase1bChunkSelectionError(
+            f"cannot resolve analysis_generation_commit: repository worktree is not clean -- {exc}"
+        ) from exc
+
+    if not _HEX40.match(commit):
+        raise DfpPhase1bChunkSelectionError(f"analysis_generation_commit must be a 40-lowercase-hex commit id, observed {commit!r}")
+
+    exists = _run_git_analysis_commit_check(repo_root, "cat-file", "-e", f"{commit}^{{commit}}")
+    if exists.returncode != 0:
+        raise DfpPhase1bChunkSelectionError(f"analysis_generation_commit {commit!r} does not exist as a commit object in this repository")
+
+    required_ancestor = e18_document["identity"]["required_ancestor_commit"]
+    try:
+        verify_ancestor_relation(repo_root, required_ancestor_commit=required_ancestor, repository_commit=commit)
+    except DfpPhase1bChunkBenchmarkIdentityError as exc:
+        raise DfpPhase1bChunkSelectionError(
+            f"analysis_generation_commit {commit!r} does not satisfy E18's required-ancestor relationship "
+            f"(required_ancestor_commit={required_ancestor!r}): {exc}"
+        ) from exc
+
+    return commit
+
+
+def _run_git_analysis_commit_check(repo_root: Path, *args: str):
+    import subprocess
+    return subprocess.run(
+        ["git", "-C", str(repo_root), *args], check=False,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+
+
 def build_selection_artifact(
     analysis: Mapping[str, Any], *, e18_sha256: str, e17_sha256: str, manifest_sha256: str,
-    repository_commit: str, command: str,
+    repository_commit: str, analysis_generation_commit: str, gpu_execution_performed_by_task4: bool, command: str,
 ) -> dict[str, Any]:
+    if type(e18_sha256) is not str or not _HEX64.match(e18_sha256):
+        raise DfpPhase1bChunkSelectionError(
+            f"e18_sha256 must be a 64-lowercase-hex SHA-256 string, observed {e18_sha256!r} -- "
+            "refusing to build an artifact with a blank, malformed, or placeholder E18 identity hash"
+        )
+    if type(analysis_generation_commit) is not str or not _HEX40.match(analysis_generation_commit):
+        raise DfpPhase1bChunkSelectionError(
+            f"analysis_generation_commit must be a 40-lowercase-hex commit id, observed {analysis_generation_commit!r}"
+        )
+    if type(gpu_execution_performed_by_task4) is not bool or gpu_execution_performed_by_task4 is not False:
+        raise DfpPhase1bChunkSelectionError(
+            f"gpu_execution_performed_by_task4 must be the exact bool False, observed {gpu_execution_performed_by_task4!r} "
+            f"({type(gpu_execution_performed_by_task4).__name__}) -- Task 4 selection analysis never performs GPU execution"
+        )
     measurements = analysis["measurements"]
     safety = analysis["safety"]
     winner = analysis["winner"]
@@ -872,6 +944,9 @@ def build_selection_artifact(
         "source_merged_result_path": analysis["merged_result_path"],
         "source_merged_result_sha256": sha256_file(Path(analysis["merged_result_path"])),
         "repository_commit": repository_commit,
+        "repository_commit_role": "benchmark_source_commit -- the Task 3 commit whose committed code produced the six raw trials and merged_result.json this artifact analyzes; NOT the commit that generated this artifact",
+        "analysis_generation_commit": analysis_generation_commit,
+        "analysis_generation_commit_role": "the exact Task 4 repository commit whose committed selector/CLI code produced this artifact",
         "common_scientific_output_digest": analysis["common_digest"],
         "all_candidates_scientifically_equal": len({t["scientific_output_digests"]["collection_digest"] for t in analysis["trials"]}) == 1,
         "candidates": {str(cs): candidate_block(cs) for cs in CANDIDATE_CHUNK_SIZES},
@@ -893,6 +968,7 @@ def build_selection_artifact(
             "selection_does_not_define_conservation_tolerance": True,
             "selection_does_not_authorize_full_phase1b": True,
             "selection_does_not_authorize_or_implement_5000_image_evaluation": True,
+            "gpu_execution_performed_by_task4": gpu_execution_performed_by_task4,
         },
         "complete": winner is not None,
         "final": winner is not None,
@@ -908,11 +984,15 @@ def render_markdown_report(artifact: Mapping[str, Any]) -> str:
         "hypothesis test, does not define a conservation tolerance, and does not authorize full "
         "Phase 1B execution or the 5,000-image evaluation.",
         "",
-        f"- Repository commit: `{artifact['repository_commit']}`",
+        f"- Benchmark-source commit (Task 3, produced the raw trials on a real H100 GPU): `{artifact['repository_commit']}`",
+        f"- Analysis-generation commit (Task 4, CPU-only, produced THIS artifact): `{artifact['analysis_generation_commit']}`",
         f"- Source merged result: `{artifact['source_merged_result_path']}`",
         f"- Source merged result SHA-256: `{artifact['source_merged_result_sha256']}`",
+        f"- E18 identity SHA-256: `{artifact['e18_identity_sha256']}`",
         f"- Common scientific-output digest: `{artifact['common_scientific_output_digest']}`",
         f"- All candidates scientifically equal: **{artifact['all_candidates_scientifically_equal']}**",
+        f"- GPU execution performed by Task 4 (this analysis step): **{artifact['limitations']['gpu_execution_performed_by_task4']}** "
+        "-- the Task 3 benchmark itself ran on a real NVIDIA H100; this Task 4 selection/regeneration step is CPU-only and ran no inference.",
         "",
         "## Candidates",
         "",
@@ -941,6 +1021,169 @@ def render_markdown_report(artifact: Mapping[str, Any]) -> str:
         lines.append(f"- {key.replace('_', ' ')}")
     lines.append("")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------
+# Findings-repair round 2: independent verification of the standalone
+# JSON artifact itself (distinct from ``verify_selection``, which
+# verifies E18's own ``[selection_result]`` table). Never trusts any
+# artifact field without either relational re-verification against
+# live bytes/repository state, or full recomputation from the six raw
+# trials.
+# ---------------------------------------------------------------------
+
+_ARTIFACT_TOP_KEYS = frozenset({
+    "schema_name", "schema_version", "identity_name", "e18_identity_sha256", "e17_identity_sha256",
+    "benchmark_manifest_sha256", "source_merged_result_path", "source_merged_result_sha256",
+    "repository_commit", "repository_commit_role", "analysis_generation_commit", "analysis_generation_commit_role",
+    "common_scientific_output_digest", "all_candidates_scientifically_equal", "candidates", "eligible_chunk_sizes",
+    "selection_rule", "selected_chunk_size", "selected_mean_elapsed_ns", "tie_break_path", "limitations",
+    "complete", "final", "command",
+})
+_ARTIFACT_LIMITATIONS_KEYS = frozenset({
+    "is_operational_engineering_selection", "selection_rule_frozen_after_observing_benchmark",
+    "not_a_preregistered_scientific_hypothesis_test", "two_repeats_do_not_support_statistical_significance",
+    "symmetric_trial_order_reduces_but_does_not_eliminate_temporal_cache_order_effects",
+    "selection_does_not_change_scientific_results", "selection_does_not_define_conservation_tolerance",
+    "selection_does_not_authorize_full_phase1b", "selection_does_not_authorize_or_implement_5000_image_evaluation",
+    "gpu_execution_performed_by_task4",
+})
+
+
+def verify_selection_artifact(artifact_path: Path, *, repo_root: Path) -> dict[str, Any]:
+    """Independently re-verifies a generated ``phase1b_chunk_selection.json``
+    artifact end to end: closed schema (including the two Findings-
+    repair-round-2 fields), relational hash/commit verification against
+    live repository state, and full recomputation of every candidate/
+    selection field from the six raw trials -- never trusting any
+    artifact field without independently checking it. Returns the
+    parsed artifact on success."""
+    root = Path(repo_root)
+    try:
+        artifact = json.loads(Path(artifact_path).read_text())
+    except OSError as exc:
+        raise DfpPhase1bChunkSelectionError(f"cannot read artifact {artifact_path}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise DfpPhase1bChunkSelectionError(f"artifact {artifact_path} is not valid JSON: {exc}") from exc
+
+    if not isinstance(artifact, dict):
+        raise DfpPhase1bChunkSelectionError(f"artifact {artifact_path} must be a JSON object")
+    actual_keys = frozenset(artifact.keys())
+    if actual_keys != _ARTIFACT_TOP_KEYS:
+        raise DfpPhase1bChunkSelectionError(
+            f"artifact has the wrong key set -- missing={sorted(_ARTIFACT_TOP_KEYS - actual_keys)} "
+            f"unknown={sorted(actual_keys - _ARTIFACT_TOP_KEYS)}"
+        )
+
+    if artifact["schema_name"] != SELECTION_SCHEMA_NAME or artifact["schema_version"] != SELECTION_SCHEMA_VERSION:
+        raise DfpPhase1bChunkSelectionError("artifact schema_name/schema_version mismatch")
+
+    # --- e18_identity_sha256: format + relational match against the live E18 file ---
+    e18_hash = artifact["e18_identity_sha256"]
+    if type(e18_hash) is not str or not _HEX64.match(e18_hash):
+        raise DfpPhase1bChunkSelectionError(f"artifact e18_identity_sha256 must be a 64-lowercase-hex string, observed {e18_hash!r}")
+    live_e18_path = root / IDENTITY_RELATIVE_PATH
+    live_e18_hash = sha256_file(live_e18_path)
+    if e18_hash != live_e18_hash:
+        raise DfpPhase1bChunkSelectionError(
+            f"artifact e18_identity_sha256 ({e18_hash}) disagrees with the live E18 file's actual hash ({live_e18_hash})"
+        )
+    e18_document = load_e18_identity(root)
+
+    # --- repository_commit (benchmark-source) and analysis_generation_commit: format + relational ---
+    for field, length, pattern in (("repository_commit", 40, _HEX40), ("analysis_generation_commit", 40, _HEX40)):
+        value = artifact[field]
+        if type(value) is not str or not pattern.match(value):
+            raise DfpPhase1bChunkSelectionError(f"artifact.{field} must be a {length}-lowercase-hex commit id, observed {value!r}")
+    if artifact["repository_commit"] == artifact["analysis_generation_commit"]:
+        # Not inherently an error (a generation commit COULD equal the
+        # benchmark-source commit in principle), but Task 4's own code
+        # cannot exist at the exact benchmark-source commit (E17 predates
+        # it), so this combination is never legitimate in practice --
+        # fail closed rather than silently accept a swapped/duplicated pair.
+        raise DfpPhase1bChunkSelectionError(
+            "artifact.repository_commit and artifact.analysis_generation_commit must not be identical -- "
+            "the benchmark-source commit predates any commit containing the Task 4 analysis code"
+        )
+    exists = _run_git_analysis_commit_check(root, "cat-file", "-e", f"{artifact['analysis_generation_commit']}^{{commit}}")
+    if exists.returncode != 0:
+        raise DfpPhase1bChunkSelectionError(f"artifact.analysis_generation_commit {artifact['analysis_generation_commit']!r} does not exist in this repository")
+    try:
+        verify_ancestor_relation(
+            root, required_ancestor_commit=e18_document["identity"]["required_ancestor_commit"],
+            repository_commit=artifact["analysis_generation_commit"],
+        )
+    except DfpPhase1bChunkBenchmarkIdentityError as exc:
+        raise DfpPhase1bChunkSelectionError(f"artifact.analysis_generation_commit fails E18's required-ancestor relationship: {exc}") from exc
+
+    # --- e17/manifest hash fields: relational against live files ---
+    if artifact["e17_identity_sha256"] != e18_document["dependency_bindings"]["e17_identity"]["sha256"]:
+        raise DfpPhase1bChunkSelectionError("artifact e17_identity_sha256 disagrees with E18's own bound E17 hash")
+    if artifact["benchmark_manifest_sha256"] != e18_document["dependency_bindings"]["benchmark_manifest"]["sha256"]:
+        raise DfpPhase1bChunkSelectionError("artifact benchmark_manifest_sha256 disagrees with E18's own bound manifest hash")
+
+    # --- source_merged_result_sha256: relational against the live source file ---
+    source_path = Path(artifact["source_merged_result_path"])
+    actual_source_hash = sha256_file(source_path)
+    if artifact["source_merged_result_sha256"] != actual_source_hash:
+        raise DfpPhase1bChunkSelectionError(
+            f"artifact source_merged_result_sha256 ({artifact['source_merged_result_sha256']}) disagrees with the live "
+            f"source file's actual hash ({actual_source_hash})"
+        )
+
+    # --- gpu_execution_performed_by_task4: exact bool False ---
+    _check_keys(artifact["limitations"], _ARTIFACT_LIMITATIONS_KEYS, "artifact.limitations")
+    gpu_flag = artifact["limitations"]["gpu_execution_performed_by_task4"]
+    if type(gpu_flag) is not bool or gpu_flag is not False:
+        raise DfpPhase1bChunkSelectionError(
+            f"artifact.limitations.gpu_execution_performed_by_task4 must be the exact bool False, observed {gpu_flag!r}"
+        )
+    for key in _ARTIFACT_LIMITATIONS_KEYS - {"gpu_execution_performed_by_task4"}:
+        if artifact["limitations"].get(key) is not True:
+            raise DfpPhase1bChunkSelectionError(f"artifact.limitations.{key} must be the exact bool True")
+
+    # --- full decision-content recomputation from the six raw trials ---
+    analysis = analyze_benchmark(repo_root=root, output_dir=source_path.parent, merged_result_path=source_path)
+
+    # repository_commit (benchmark-source commit) is NEVER trusted from
+    # the artifact -- it must equal the commit the six raw trials'
+    # OWN code_provenance actually recorded, independently of whatever
+    # the artifact claims (this is what catches a repository_commit /
+    # analysis_generation_commit swap that would otherwise pass a
+    # naive self-referential comparison).
+    true_source_commit = analysis["merged"]["code_provenance"]["repository_commit"]
+    if artifact["repository_commit"] != true_source_commit:
+        raise DfpPhase1bChunkSelectionError(
+            f"artifact.repository_commit ({artifact['repository_commit']}) disagrees with the benchmark-source "
+            f"commit independently recorded in the raw trials' own code_provenance ({true_source_commit})"
+        )
+    if artifact["analysis_generation_commit"] == true_source_commit:
+        raise DfpPhase1bChunkSelectionError(
+            "artifact.analysis_generation_commit must not equal the benchmark-source commit -- "
+            "possible repository_commit/analysis_generation_commit swap"
+        )
+
+    expected = build_selection_artifact(
+        analysis, e18_sha256=e18_hash, e17_sha256=artifact["e17_identity_sha256"], manifest_sha256=artifact["benchmark_manifest_sha256"],
+        repository_commit=artifact["repository_commit"], analysis_generation_commit=artifact["analysis_generation_commit"],
+        gpu_execution_performed_by_task4=False, command=artifact["command"],
+    )
+    # source_merged_result_path/command are legitimate per-invocation
+    # provenance and are excluded from the decision-content comparison;
+    # everything else must match exactly.
+    excluded = {"source_merged_result_path", "command"}
+    mismatches = _diff_mapping(
+        {k: v for k, v in expected.items() if k not in excluded},
+        {k: v for k, v in artifact.items() if k not in excluded},
+        path="artifact",
+    )
+    if mismatches:
+        raise DfpPhase1bChunkSelectionError(
+            "artifact decision content disagrees with the independently recomputed payload -- refusing to trust it:\n  "
+            + "\n  ".join(mismatches)
+        )
+
+    return artifact
 
 
 # ---------------------------------------------------------------------
@@ -1131,7 +1374,8 @@ __all__ = [
     "load_and_verify_benchmark_output", "compute_candidate_measurements", "evaluate_candidate_safety",
     "select_winner", "analyze_benchmark", "verify_selection",
     "build_expected_selection_result",
-    "build_selection_artifact", "render_markdown_report",
+    "resolve_analysis_generation_commit",
+    "build_selection_artifact", "render_markdown_report", "verify_selection_artifact",
     "resolve_output_dir", "resolve_safe_output_basename",
     "write_selection_artifact_atomically", "write_markdown_report", "install_selection_bundle",
 ]

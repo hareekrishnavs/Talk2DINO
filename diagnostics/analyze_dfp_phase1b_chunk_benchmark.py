@@ -42,15 +42,18 @@ for _path in (_REPO_ROOT,):
         sys.path.insert(0, str(_path))
 
 from src.dfp_phase1b_chunk_selection import (
+    IDENTITY_RELATIVE_PATH,
     DfpPhase1bChunkSelectionError,
     build_selection_artifact,
     install_selection_bundle,
     load_e18_identity,
     render_markdown_report,
+    resolve_analysis_generation_commit,
     sha256_file,
     verify_e18_against_e17,
     verify_e18_dependency_bindings,
     verify_selection as _verify_selection_impl,
+    verify_selection_artifact,
     write_markdown_report,
     write_selection_artifact_atomically,
 )
@@ -109,11 +112,24 @@ def _cmd_analyze(args: argparse.Namespace) -> int:
     print(f"tie_break_path={analysis['tie_break_path']}")
 
     if args.output is not None or args.markdown_output is not None:
-        e17_binding_path = _REPO_ROOT / "evaluation_identities/e17_dfp_phase1b_chunk_benchmark.toml"
-        manifest_path = _REPO_ROOT / "evaluation_subsets/dfp_phase1b_chunk_benchmark_24.json"
+        # An artifact must never be produced without validating the
+        # actual, real, committed E18 identity first (Findings-repair
+        # round 2, Finding 1) -- never merely hashing an arbitrary
+        # file. This ALSO resolves the exact clean-worktree
+        # analysis_generation_commit (Finding 2) via a single Git read,
+        # and supplies the explicit no-GPU disclosure (Finding 3).
+        e18 = load_e18_identity(repo_root)
+        verify_e18_dependency_bindings(repo_root, e18, merged_result_path=Path(analysis["merged_result_path"]))
+        verify_e18_against_e17(repo_root, e18)
+        e18_sha256 = sha256_file(repo_root / IDENTITY_RELATIVE_PATH)
+        analysis_generation_commit = resolve_analysis_generation_commit(repo_root, e18_document=e18)
         artifact = build_selection_artifact(
-            analysis, e18_sha256="", e17_sha256=sha256_file(e17_binding_path), manifest_sha256=sha256_file(manifest_path),
+            analysis, e18_sha256=e18_sha256,
+            e17_sha256=e18["dependency_bindings"]["e17_identity"]["sha256"],
+            manifest_sha256=e18["dependency_bindings"]["benchmark_manifest"]["sha256"],
             repository_commit=analysis["merged"]["code_provenance"]["repository_commit"],
+            analysis_generation_commit=analysis_generation_commit,
+            gpu_execution_performed_by_task4=False,
             command="analyze_dfp_phase1b_chunk_benchmark.py analyze",
         )
         # --output / --markdown-output are SAFE BASENAMES ONLY, resolved
