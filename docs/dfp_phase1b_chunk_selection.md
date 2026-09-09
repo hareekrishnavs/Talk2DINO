@@ -239,6 +239,23 @@ almost always different, and must never be confused or swapped:
   future HEAD, so verification of an already-generated artifact
   remains possible from any later descendant commit.
 
+`verify_selection_artifact` verifies `analysis_generation_commit` in
+one of two modes. By default it proves only **provenance validity**:
+the field is a real, existing commit that satisfies the ancestor
+relationship above -- current HEAD is never implicitly required, so a
+legitimate historical artifact (generated at an earlier, still-valid
+commit) keeps verifying even after unrelated later commits land.
+Passing the optional `expected_analysis_generation_commit` argument
+additionally proves **exact freshness**: that value is independently
+validated with the same strict rules, then compared byte-for-byte
+against the artifact's own field, rejecting any mismatch -- including
+a syntactically valid ancestor or descendant substituted for the true
+commit. This expected value must come from an external trusted
+context (a caller-held record of which commit actually produced the
+artifact); it is never derived from, or substituted from, the
+untrusted artifact under verification, and the function does not
+attempt to guess which historical commit an auditor intended.
+
 `e18_identity_sha256` is the real SHA-256 of the exact committed
 `evaluation_identities/e18_dfp_phase1b_chunk_selection.toml` bytes,
 obtained only after `analyze` has loaded and relationally validated

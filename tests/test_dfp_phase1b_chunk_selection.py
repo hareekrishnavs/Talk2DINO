@@ -1722,6 +1722,398 @@ def test_clean_committed_clone_generation_succeeds_and_verifies(fixture_clone, t
     assert verify_result.returncode == 0, verify_result.stderr
 
 
+# =======================================================================
+# Section: optional expected-generation-commit freshness check for
+# verify_selection_artifact (Finding 2 from the independent verification
+# of the installed pair -- validator hardening only, never touches
+# production). All fixtures below are disposable tmp_path/fixture_clone
+# state -- never the real production directory.
+# =======================================================================
+
+
+def _clone_parent_commit(clone_root):
+    """The commit fixture_clone's clone was cloned FROM, before its own
+    synthetic overlay commit -- i.e. a real, valid, ancestor-satisfying
+    but now-superseded ("stale parent") commit, exactly mirroring the
+    real e872da51.../1bf47e5d... relationship structurally without
+    hardcoding real repo hashes."""
+    return sp.run(["git", "-C", str(clone_root), "rev-parse", "HEAD^"], capture_output=True, text=True, check=True).stdout.strip()
+
+
+def _make_dangling_descendant_commit(clone_root, parent_commit):
+    """Creates a real, resolvable commit object descending from
+    parent_commit via `git commit-tree` -- NEVER touches clone_root's
+    HEAD, index, or working tree (no ref points at it; it is simply a
+    valid, existing commit object usable as a substitution target)."""
+    tree = sp.run(["git", "-C", str(clone_root), "rev-parse", f"{parent_commit}^{{tree}}"], capture_output=True, text=True, check=True).stdout.strip()
+    result = sp.run(
+        ["git", "-C", str(clone_root), "commit-tree", tree, "-p", parent_commit, "-m", "fixture: dangling descendant probe"],
+        capture_output=True, text=True, check=True,
+    )
+    return result.stdout.strip()
+
+
+# --- positive tests ---
+
+def _real_installed_artifact_copy_with_live_e18_hash(tmp_path, name="installed_copy.json"):
+    """Copies the REAL installed production artifact into a disposable
+    tmp_path file, patching ONLY `e18_identity_sha256` to the actual
+    current live E18 file hash. This is necessary because E18's own
+    hash legitimately changes independently of when the durable
+    production artifact is next regenerated (exactly the case in this
+    repair task itself, which explicitly must not regenerate
+    production) -- these freshness tests target
+    `analysis_generation_commit` behavior specifically and must not be
+    coupled to that separate, already out-of-scope staleness. The real
+    production file is only ever read, never written."""
+    real_artifact_path = REAL_OUTPUT_DIR / "phase1b_chunk_selection.json"
+    artifact = json.loads(real_artifact_path.read_text())
+    artifact["e18_identity_sha256"] = sel.sha256_file(ROOT / sel.IDENTITY_RELATIVE_PATH)
+    p = tmp_path / name
+    p.write_text(json.dumps(artifact, indent=2, sort_keys=True) + "\n")
+    return p, real_artifact_path
+
+
+def test_freshness_real_installed_artifact_matches_actual_head(tmp_path):
+    """Requirement 1/2: the REAL installed production artifact (read
+    via a disposable tmp_path COPY, never mutated) plus its own actual
+    analysis_generation_commit as the expected value passes."""
+    if not _REAL_OUTPUT_AVAILABLE:
+        pytest.skip("no real output")
+    real_artifact_path = REAL_OUTPUT_DIR / "phase1b_chunk_selection.json"
+    if not real_artifact_path.exists():
+        pytest.skip("no installed production artifact present")
+    production_hash_before = hashlib.sha256(real_artifact_path.read_bytes()).hexdigest()
+    copy_path, _ = _real_installed_artifact_copy_with_live_e18_hash(tmp_path)
+    real_commit = json.loads(copy_path.read_text())["analysis_generation_commit"]
+    result = sel.verify_selection_artifact(copy_path, repo_root=ROOT, expected_analysis_generation_commit=real_commit)
+    assert result["analysis_generation_commit"] == real_commit
+    # production untouched by this read-only test -- only the disposable copy was read.
+    assert hashlib.sha256(real_artifact_path.read_bytes()).hexdigest() == production_hash_before
+
+
+def test_freshness_freshly_built_artifact_matches_its_own_commit(fixture_clone, tmp_path):
+    """Requirement 2: a freshly constructed valid artifact plus its
+    exact generation commit passes."""
+    fsel, clone_root, artifact = _artifact_and_clone(fixture_clone)
+    p = tmp_path / "a.json"
+    p.write_text(json.dumps(artifact))
+    result = fsel.verify_selection_artifact(p, repo_root=clone_root, expected_analysis_generation_commit=artifact["analysis_generation_commit"])
+    assert result["analysis_generation_commit"] == artifact["analysis_generation_commit"]
+
+
+def test_freshness_omitted_argument_preserves_historical_behavior(fixture_clone, tmp_path):
+    """Requirement 3: omitting the optional argument preserves existing
+    historical-artifact behavior -- an artifact generated at the
+    clone's real (stale-but-valid) PARENT commit still verifies when no
+    expectation is supplied."""
+    clone_root, commit = fixture_clone
+    fsel = _import_fixture_sel(clone_root)
+    parent_commit = _clone_parent_commit(clone_root)
+    analysis = fsel.analyze_benchmark(repo_root=clone_root, output_dir=REAL_OUTPUT_DIR)
+    e18 = fsel.load_e18_identity(clone_root)
+    real_hash = hashlib.sha256((clone_root / fsel.IDENTITY_RELATIVE_PATH).read_bytes()).hexdigest()
+    artifact = fsel.build_selection_artifact(
+        analysis, e18_sha256=real_hash, e17_sha256=e18["dependency_bindings"]["e17_identity"]["sha256"],
+        manifest_sha256=e18["dependency_bindings"]["benchmark_manifest"]["sha256"],
+        repository_commit=analysis["merged"]["code_provenance"]["repository_commit"],
+        analysis_generation_commit=parent_commit, gpu_execution_performed_by_task4=False, command="test",
+    )
+    p = tmp_path / "historical.json"
+    p.write_text(json.dumps(artifact))
+    result = fsel.verify_selection_artifact(p, repo_root=clone_root)  # no expected_ argument at all
+    assert result["analysis_generation_commit"] == parent_commit
+
+
+def test_freshness_explicit_none_matches_omission(fixture_clone, tmp_path):
+    """Requirement 4: explicit None behaves the same as omission."""
+    clone_root, commit = fixture_clone
+    fsel = _import_fixture_sel(clone_root)
+    parent_commit = _clone_parent_commit(clone_root)
+    analysis = fsel.analyze_benchmark(repo_root=clone_root, output_dir=REAL_OUTPUT_DIR)
+    e18 = fsel.load_e18_identity(clone_root)
+    real_hash = hashlib.sha256((clone_root / fsel.IDENTITY_RELATIVE_PATH).read_bytes()).hexdigest()
+    artifact = fsel.build_selection_artifact(
+        analysis, e18_sha256=real_hash, e17_sha256=e18["dependency_bindings"]["e17_identity"]["sha256"],
+        manifest_sha256=e18["dependency_bindings"]["benchmark_manifest"]["sha256"],
+        repository_commit=analysis["merged"]["code_provenance"]["repository_commit"],
+        analysis_generation_commit=parent_commit, gpu_execution_performed_by_task4=False, command="test",
+    )
+    p = tmp_path / "historical_explicit_none.json"
+    p.write_text(json.dumps(artifact))
+    result = fsel.verify_selection_artifact(p, repo_root=clone_root, expected_analysis_generation_commit=None)
+    assert result["analysis_generation_commit"] == parent_commit
+
+
+def test_freshness_expected_value_not_derived_from_artifact(fixture_clone, tmp_path):
+    """Requirement 5: the expected value is never read from the
+    artifact -- supplying a DIFFERENT (but itself valid) commit than
+    the artifact's own must be rejected, proving the comparison uses
+    the caller's value, not something silently pulled from the
+    artifact under test."""
+    fsel, clone_root, artifact = _artifact_and_clone(fixture_clone)
+    parent_commit = _clone_parent_commit(clone_root)
+    assert parent_commit != artifact["analysis_generation_commit"]
+    p = tmp_path / "a.json"
+    p.write_text(json.dumps(artifact))
+    with pytest.raises(fsel.DfpPhase1bChunkSelectionError, match="does not exactly match"):
+        fsel.verify_selection_artifact(p, repo_root=clone_root, expected_analysis_generation_commit=parent_commit)
+
+
+def test_freshness_other_checks_still_execute_when_freshness_satisfied(fixture_clone, tmp_path):
+    """Requirement 6: existing structural/dependency/selection/
+    provenance checks still execute even when the (matching) freshness
+    check would otherwise pass -- a corrupted digest is still caught."""
+    fsel, clone_root, artifact = _artifact_and_clone(fixture_clone)
+    artifact["common_scientific_output_digest"] = "1" * 64
+    p = tmp_path / "a.json"
+    p.write_text(json.dumps(artifact))
+    with pytest.raises(fsel.DfpPhase1bChunkSelectionError):
+        fsel.verify_selection_artifact(p, repo_root=clone_root, expected_analysis_generation_commit=artifact["analysis_generation_commit"])
+
+
+# --- negative tests ---
+
+def test_freshness_exact_former_adversarial_case_now_rejected(tmp_path):
+    """The exact case from the independent verification finding: the
+    REAL installed artifact's analysis_generation_commit replaced with
+    its valid parent commit, verified with the ACTUAL expected commit
+    supplied -- must change from accepted (pre-fix) to rejected."""
+    if not _REAL_OUTPUT_AVAILABLE:
+        pytest.skip("no real output")
+    real_artifact_path = REAL_OUTPUT_DIR / "phase1b_chunk_selection.json"
+    if not real_artifact_path.exists():
+        pytest.skip("no installed production artifact present")
+    production_hash_before = hashlib.sha256(real_artifact_path.read_bytes()).hexdigest()
+    artifact = json.loads(real_artifact_path.read_text())
+    # See _real_installed_artifact_copy_with_live_e18_hash: E18's own
+    # hash can legitimately differ from what the not-yet-regenerated
+    # production artifact recorded -- irrelevant to this specific
+    # freshness-check test, so pinned to the current live value.
+    artifact["e18_identity_sha256"] = sel.sha256_file(ROOT / sel.IDENTITY_RELATIVE_PATH)
+    real_commit = artifact["analysis_generation_commit"]
+    parent_result = sp.run(["git", "-C", str(ROOT), "rev-parse", f"{real_commit}^"], capture_output=True, text=True)
+    if parent_result.returncode != 0:
+        pytest.skip("cannot resolve real HEAD's parent in this environment")
+    parent_commit = parent_result.stdout.strip()
+    artifact["analysis_generation_commit"] = parent_commit
+    p = tmp_path / "stale_parent.json"
+    p.write_text(json.dumps(artifact))
+
+    # Without the expected argument: still accepted (unchanged default behavior).
+    sel.verify_selection_artifact(p, repo_root=ROOT)
+
+    # With the actual expected commit supplied: now rejected.
+    with pytest.raises(sel.DfpPhase1bChunkSelectionError, match="does not exactly match"):
+        sel.verify_selection_artifact(p, repo_root=ROOT, expected_analysis_generation_commit=real_commit)
+
+    # Production itself was never touched by this test -- only the
+    # disposable tmp_path copy was ever mutated.
+    assert hashlib.sha256(real_artifact_path.read_bytes()).hexdigest() == production_hash_before
+
+
+def test_freshness_artifact_stale_expected_fresh_rejected(fixture_clone, tmp_path):
+    """Negative case 1: artifact says the stale parent; expected is the
+    fresh (child) commit."""
+    clone_root, commit = fixture_clone
+    fsel = _import_fixture_sel(clone_root)
+    parent_commit = _clone_parent_commit(clone_root)
+    analysis = fsel.analyze_benchmark(repo_root=clone_root, output_dir=REAL_OUTPUT_DIR)
+    e18 = fsel.load_e18_identity(clone_root)
+    real_hash = hashlib.sha256((clone_root / fsel.IDENTITY_RELATIVE_PATH).read_bytes()).hexdigest()
+    artifact = fsel.build_selection_artifact(
+        analysis, e18_sha256=real_hash, e17_sha256=e18["dependency_bindings"]["e17_identity"]["sha256"],
+        manifest_sha256=e18["dependency_bindings"]["benchmark_manifest"]["sha256"],
+        repository_commit=analysis["merged"]["code_provenance"]["repository_commit"],
+        analysis_generation_commit=parent_commit, gpu_execution_performed_by_task4=False, command="test",
+    )
+    p = tmp_path / "a.json"
+    p.write_text(json.dumps(artifact))
+    with pytest.raises(fsel.DfpPhase1bChunkSelectionError, match="does not exactly match"):
+        fsel.verify_selection_artifact(p, repo_root=clone_root, expected_analysis_generation_commit=commit)
+
+
+def test_freshness_artifact_fresh_expected_stale_rejected(fixture_clone, tmp_path):
+    """Negative case 2: artifact says the fresh commit; expected is the
+    stale parent."""
+    fsel, clone_root, artifact = _artifact_and_clone(fixture_clone)
+    parent_commit = _clone_parent_commit(clone_root)
+    p = tmp_path / "a.json"
+    p.write_text(json.dumps(artifact))
+    with pytest.raises(fsel.DfpPhase1bChunkSelectionError, match="does not exactly match"):
+        fsel.verify_selection_artifact(p, repo_root=clone_root, expected_analysis_generation_commit=parent_commit)
+
+
+def test_freshness_artifact_replaced_with_another_valid_ancestor_rejected(fixture_clone, tmp_path):
+    """Negative case 3: artifact commit is replaced with another valid
+    ancestor (the clone's real parent, distinct from both the clone's
+    own commit and the true expected commit)."""
+    fsel, clone_root, artifact = _artifact_and_clone(fixture_clone)
+    original_commit = artifact["analysis_generation_commit"]
+    parent_commit = _clone_parent_commit(clone_root)
+    artifact["analysis_generation_commit"] = parent_commit
+    p = tmp_path / "a.json"
+    p.write_text(json.dumps(artifact))
+    with pytest.raises(fsel.DfpPhase1bChunkSelectionError, match="does not exactly match"):
+        fsel.verify_selection_artifact(p, repo_root=clone_root, expected_analysis_generation_commit=original_commit)
+
+
+def test_freshness_artifact_replaced_with_valid_descendant_rejected(fixture_clone, tmp_path):
+    """Negative case 4: artifact commit is replaced with a valid
+    descendant (constructed via `git commit-tree`, never touching the
+    fixture clone's HEAD/working tree) -- ancestor-relationship
+    validity must never substitute for exact equality."""
+    fsel, clone_root, artifact = _artifact_and_clone(fixture_clone)
+    original_commit = artifact["analysis_generation_commit"]
+    descendant = _make_dangling_descendant_commit(clone_root, original_commit)
+    assert descendant != original_commit
+    artifact["analysis_generation_commit"] = descendant
+    p = tmp_path / "a.json"
+    p.write_text(json.dumps(artifact))
+    with pytest.raises(fsel.DfpPhase1bChunkSelectionError, match="does not exactly match"):
+        fsel.verify_selection_artifact(p, repo_root=clone_root, expected_analysis_generation_commit=original_commit)
+
+
+def test_freshness_one_character_commit_mutation_rejected(fixture_clone, tmp_path):
+    """Negative case 5: a single-character mutation of an otherwise
+    well-formed 40-hex commit id."""
+    fsel, clone_root, artifact = _artifact_and_clone(fixture_clone)
+    original_commit = artifact["analysis_generation_commit"]
+    flipped_char = "0" if original_commit[0] != "0" else "1"
+    mutated = flipped_char + original_commit[1:]
+    p = tmp_path / "a.json"
+    p.write_text(json.dumps(artifact))
+    with pytest.raises(fsel.DfpPhase1bChunkSelectionError):
+        fsel.verify_selection_artifact(p, repo_root=clone_root, expected_analysis_generation_commit=mutated)
+
+
+def test_freshness_correct_prefix_incomplete_hash_rejected(fixture_clone, tmp_path):
+    """Negative case 6: correct prefix but incomplete (abbreviated)
+    hash -- must be rejected by format, not accepted as a prefix
+    match."""
+    fsel, clone_root, artifact = _artifact_and_clone(fixture_clone)
+    original_commit = artifact["analysis_generation_commit"]
+    abbreviated = original_commit[:7]
+    p = tmp_path / "a.json"
+    p.write_text(json.dumps(artifact))
+    with pytest.raises(fsel.DfpPhase1bChunkSelectionError, match="40-lowercase-hex"):
+        fsel.verify_selection_artifact(p, repo_root=clone_root, expected_analysis_generation_commit=abbreviated)
+
+
+@pytest.mark.parametrize("bad_expected", [
+    True, False, 12345, 1.5, [], {},
+    "", "   ", "\t\n",
+    "a" * 39, "a" * 41,
+])
+def test_freshness_invalid_expected_types_and_formats_rejected(fixture_clone, tmp_path, bad_expected):
+    """Negative case 7 (part 1): invalid expected types/lengths -- bool,
+    non-string, empty, whitespace-only, wrong length. `None` itself
+    means "omitted" and is excluded from this parametrization (covered
+    separately by test_freshness_explicit_none_matches_omission)."""
+    fsel, clone_root, artifact = _artifact_and_clone(fixture_clone)
+    p = tmp_path / "a.json"
+    p.write_text(json.dumps(artifact))
+    with pytest.raises(fsel.DfpPhase1bChunkSelectionError):
+        fsel.verify_selection_artifact(p, repo_root=clone_root, expected_analysis_generation_commit=bad_expected)
+
+
+@pytest.mark.parametrize("bad_expected", [
+    "A" * 40,  # uppercase
+    " " + "a" * 39,  # leading whitespace, still 40 chars total but not all hex
+    "a" * 39 + " ",  # trailing whitespace
+    "g" * 40,  # non-hex character
+    "not-hex-not-hex-not-hex-not-hex-nothx12",  # non-hex, right length
+    "a" * 20 + "\x00" + "a" * 19,  # NUL-containing, 40 chars
+])
+def test_freshness_invalid_expected_hex_formats_rejected(fixture_clone, tmp_path, bad_expected):
+    """Negative case 7 (part 2): uppercase, leading/trailing whitespace,
+    non-hex characters, and NUL-containing values -- all rejected by
+    the same strict 40-lowercase-hex format rule used for the
+    artifact's own field."""
+    fsel, clone_root, artifact = _artifact_and_clone(fixture_clone)
+    p = tmp_path / "a.json"
+    p.write_text(json.dumps(artifact))
+    with pytest.raises(fsel.DfpPhase1bChunkSelectionError, match="40-lowercase-hex"):
+        fsel.verify_selection_artifact(p, repo_root=clone_root, expected_analysis_generation_commit=bad_expected)
+
+
+def test_freshness_expected_syntactically_valid_but_absent_commit_rejected(fixture_clone, tmp_path):
+    """Negative case 8: expected commit is syntactically valid (40
+    lowercase hex) but does not exist as a real commit object."""
+    fsel, clone_root, artifact = _artifact_and_clone(fixture_clone)
+    p = tmp_path / "a.json"
+    p.write_text(json.dumps(artifact))
+    with pytest.raises(fsel.DfpPhase1bChunkSelectionError, match="does not exist as a commit object"):
+        fsel.verify_selection_artifact(p, repo_root=clone_root, expected_analysis_generation_commit="f" * 40)
+
+
+def test_freshness_expected_valid_but_wrong_object_type_rejected(fixture_clone, tmp_path):
+    """Negative case 7 (part 3): expected value is a syntactically
+    valid 40-hex SHA-1 that resolves to a real object, but NOT a commit
+    (a blob), exercising the same `^{commit}` dereference check used
+    for the artifact's own field."""
+    fsel, clone_root, artifact = _artifact_and_clone(fixture_clone)
+    blob_hash = sp.run(
+        ["git", "-C", str(clone_root), "hash-object", "-w", "--stdin"],
+        input="not a commit\n", capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert len(blob_hash) == 40
+    p = tmp_path / "a.json"
+    p.write_text(json.dumps(artifact))
+    with pytest.raises(fsel.DfpPhase1bChunkSelectionError, match="does not exist as a commit object"):
+        fsel.verify_selection_artifact(p, repo_root=clone_root, expected_analysis_generation_commit=blob_hash)
+
+
+def test_freshness_swapped_benchmark_source_and_generation_commits_still_rejected(fixture_clone, tmp_path):
+    """Negative case 9: benchmark-source and analysis-generation
+    commits swapped -- must still be rejected by the PRE-EXISTING
+    provenance check (independent of the new freshness argument), and
+    remains rejected even when a (necessarily mismatched, since the
+    swap changed analysis_generation_commit) expected value is
+    supplied."""
+    fsel, clone_root, artifact = _artifact_and_clone(fixture_clone)
+    original_generation_commit = artifact["analysis_generation_commit"]
+    artifact["repository_commit"], artifact["analysis_generation_commit"] = (
+        artifact["analysis_generation_commit"], artifact["repository_commit"],
+    )
+    p = tmp_path / "a.json"
+    p.write_text(json.dumps(artifact))
+    with pytest.raises(fsel.DfpPhase1bChunkSelectionError):
+        fsel.verify_selection_artifact(p, repo_root=clone_root, expected_analysis_generation_commit=original_generation_commit)
+
+
+# --- domain-exception-contract / fatal-exception tests ---
+
+def test_freshness_no_raw_python_exceptions_leak(fixture_clone, tmp_path):
+    """Malformed expected values (wrong Python type entirely) must be
+    translated into the domain exception, never a raw TypeError."""
+    fsel, clone_root, artifact = _artifact_and_clone(fixture_clone)
+    p = tmp_path / "a.json"
+    p.write_text(json.dumps(artifact))
+    for bad in (object(), 3.14, [1, 2], {"a": 1}):
+        with pytest.raises(fsel.DfpPhase1bChunkSelectionError):
+            fsel.verify_selection_artifact(p, repo_root=clone_root, expected_analysis_generation_commit=bad)
+
+
+@pytest.mark.parametrize("exc_type", [KeyboardInterrupt, SystemExit, MemoryError])
+def test_freshness_fatal_exceptions_propagate_unchanged(fixture_clone, tmp_path, exc_type, monkeypatch):
+    """A fatal exception raised while resolving the expected-commit's
+    existence must propagate with its exact original type, matching
+    the established convention elsewhere in this module."""
+    fsel, clone_root, artifact = _artifact_and_clone(fixture_clone)
+    p = tmp_path / "a.json"
+    p.write_text(json.dumps(artifact))
+
+    orig_run = fsel._run_git_analysis_commit_check
+    def fatal_run(root, *args):
+        if args and args[-1].startswith("f" * 40):
+            raise exc_type("fatal during expected-commit existence check")
+        return orig_run(root, *args)
+    monkeypatch.setattr(fsel, "_run_git_analysis_commit_check", fatal_run)
+    with pytest.raises(exc_type):
+        fsel.verify_selection_artifact(p, repo_root=clone_root, expected_analysis_generation_commit="f" * 40)
+
+
 # ---------------------------------------------------------------------
 # Section: no-GPU disclosure (Findings repair round 2, Finding 3).
 # ---------------------------------------------------------------------

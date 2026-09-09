@@ -1052,14 +1052,42 @@ _ARTIFACT_LIMITATIONS_KEYS = frozenset({
 })
 
 
-def verify_selection_artifact(artifact_path: Path, *, repo_root: Path) -> dict[str, Any]:
+def verify_selection_artifact(
+    artifact_path: Path, *, repo_root: Path,
+    expected_analysis_generation_commit: str | None = None,
+) -> dict[str, Any]:
     """Independently re-verifies a generated ``phase1b_chunk_selection.json``
     artifact end to end: closed schema (including the two Findings-
     repair-round-2 fields), relational hash/commit verification against
     live repository state, and full recomputation of every candidate/
     selection field from the six raw trials -- never trusting any
     artifact field without independently checking it. Returns the
-    parsed artifact on success."""
+    parsed artifact on success.
+
+    By default (``expected_analysis_generation_commit=None``) this
+    proves PROVENANCE VALIDITY only: the artifact's own
+    ``analysis_generation_commit`` is a real commit that satisfies
+    E18's required-ancestor relationship -- deliberately NOT required
+    to equal the repository's current HEAD, so a legitimate historical
+    artifact (generated at an earlier, still-valid commit) continues
+    to verify even after unrelated later commits land. This mirrors
+    ``resolve_analysis_generation_commit``'s own established
+    ancestor-not-equality convention exactly.
+
+    Passing ``expected_analysis_generation_commit`` additionally proves
+    FRESHNESS: that value is independently validated with the SAME
+    strict 40-lowercase-hex-existing-commit rules as the artifact's own
+    field (never derived from the artifact, never silently defaulted
+    to the current HEAD), then compared for EXACT string equality
+    against the artifact's (already-validated) own
+    ``analysis_generation_commit`` -- any mismatch, including
+    substituting a valid ancestor or descendant commit, is rejected.
+    The expected value MUST come from an external trusted context (a
+    caller-held record of which commit actually produced this
+    artifact, e.g. the committed HEAD at generation time) -- this
+    function has no way to infer, and does not attempt to infer, which
+    historical commit an auditor intended; it only checks the caller's
+    own asserted expectation against the artifact byte-for-byte."""
     root = Path(repo_root)
     try:
         artifact = json.loads(Path(artifact_path).read_text())
@@ -1117,6 +1145,30 @@ def verify_selection_artifact(artifact_path: Path, *, repo_root: Path) -> dict[s
         )
     except DfpPhase1bChunkBenchmarkIdentityError as exc:
         raise DfpPhase1bChunkSelectionError(f"artifact.analysis_generation_commit fails E18's required-ancestor relationship: {exc}") from exc
+
+    # --- optional freshness check: exact equality against a caller-
+    # supplied expected generation commit, distinct from (and layered
+    # on top of, never in place of) the provenance-validity checks
+    # above. Only reached once artifact.analysis_generation_commit
+    # itself is already confirmed to be a well-formed, existing,
+    # ancestor-satisfying commit, so the equality comparison below is
+    # never the first thing that could reject a malformed artifact. ---
+    if expected_analysis_generation_commit is not None:
+        if type(expected_analysis_generation_commit) is not str or not _HEX40.match(expected_analysis_generation_commit):
+            raise DfpPhase1bChunkSelectionError(
+                f"expected_analysis_generation_commit must be a 40-lowercase-hex commit id, observed {expected_analysis_generation_commit!r}"
+            )
+        expected_exists = _run_git_analysis_commit_check(root, "cat-file", "-e", f"{expected_analysis_generation_commit}^{{commit}}")
+        if expected_exists.returncode != 0:
+            raise DfpPhase1bChunkSelectionError(
+                f"expected_analysis_generation_commit {expected_analysis_generation_commit!r} does not exist as a commit object in this repository"
+            )
+        if artifact["analysis_generation_commit"] != expected_analysis_generation_commit:
+            raise DfpPhase1bChunkSelectionError(
+                f"artifact.analysis_generation_commit ({artifact['analysis_generation_commit']}) does not exactly match the "
+                f"externally supplied expected_analysis_generation_commit ({expected_analysis_generation_commit}) -- "
+                "this artifact was not generated from the expected commit"
+            )
 
     # --- e17/manifest hash fields: relational against live files ---
     if artifact["e17_identity_sha256"] != e18_document["dependency_bindings"]["e17_identity"]["sha256"]:
