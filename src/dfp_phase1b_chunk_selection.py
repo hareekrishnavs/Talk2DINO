@@ -23,8 +23,10 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 import tomllib
+import uuid
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -1315,53 +1317,264 @@ def write_markdown_report(
     return dest
 
 
+def _make_sibling_backup(dest: Path) -> tuple[Path, str]:
+    """Creates a same-directory, uniquely-named, independently-verified
+    recovery copy of an EXISTING destination file, used to make an
+    overwrite installation rollback-safe. Prefers a hard link (instant,
+    and trivially guaranteed byte-identical since it names the same
+    inode); falls back to a flushed+fsync'd+closed byte copy if hard
+    links are unsupported on this filesystem (e.g. cross-device), and
+    always independently re-hashes the result against the original
+    before returning. Never leaves a partial or unverified backup
+    behind -- any failure here removes whatever it created and raises
+    ``DfpPhase1bChunkSelectionError`` before any destination is
+    touched. Returns ``(backup_path, original_sha256)``."""
+    original_hash = sha256_file(dest)
+    backup_path = dest.with_name(f".{dest.name}.rollback-{uuid.uuid4().hex}.bak")
+    if backup_path.exists():
+        raise DfpPhase1bChunkSelectionError(f"backup name collision for {dest} -- refusing (unexpected pre-existing {backup_path})")
+    try:
+        try:
+            os.link(dest, backup_path)
+        except OSError:
+            # Cross-device or hard links unsupported here -- fall back
+            # to a safely-written, flushed, fsync'd, closed byte copy.
+            with open(dest, "rb") as src, open(backup_path, "wb") as dst:
+                dst.write(src.read())
+                dst.flush()
+                os.fsync(dst.fileno())
+        backup_hash = sha256_file(backup_path)
+        if backup_hash != original_hash:
+            raise DfpPhase1bChunkSelectionError(
+                f"recovery backup of {dest} does not match the original bytes "
+                f"(expected {original_hash}, observed {backup_hash}) -- refusing to proceed"
+            )
+    except BaseException:
+        if backup_path.exists():
+            backup_path.unlink()
+        raise
+    return backup_path, original_hash
+
+
 def install_selection_bundle(
     artifact: Mapping[str, Any], markdown_text: str, *, output_dir: Path | str,
     json_basename: str = "phase1b_chunk_selection.json", markdown_basename: str = "phase1b_chunk_selection_report.md",
     allow_overwrite: bool = False,
 ) -> tuple[Path, Path]:
-    """Installs the JSON artifact and Markdown report as one atomic
-    pair: BOTH destinations are validated (safety + existing-without-
-    overwrite) and BOTH payloads are fully generated/serialized/staged-
-    self-verified BEFORE either temp file is written, and both renames
-    happen back-to-back -- a failure at any point before both renames
-    complete leaves NEITHER destination installed/modified and no
-    ``.tmp`` residue behind."""
+    """Installs the JSON artifact and Markdown report as a
+    ROLLBACK-SAFE TRANSACTION across two independently-replaced files
+    -- not a literally atomic single filesystem operation (no POSIX
+    primitive replaces two files at once). Both destinations are
+    validated up front; both new payloads are fully generated,
+    serialized, and staged to ``.tmp`` siblings BEFORE either
+    destination is touched; any destination that already exists is
+    first captured as an independently-verified same-directory backup.
+    Each staged ``.tmp`` file is then independently RE-READ FROM DISK
+    and SHA-256-compared against its expected encoded payload --
+    symmetrically for both JSON and Markdown, an exact byte-level check
+    with no tolerance, retry, or normalization -- so a filesystem-level
+    write anomaly affecting either staged file is caught here, strictly
+    before either destination is touched. Only once staging and (when
+    overwriting) backups are verified does installation begin.
+
+    If a failure occurs after either destination has been mutated,
+    every destination this transaction actually mutated is restored:
+    from its verified backup if it pre-existed, or removed if this
+    transaction freshly created it -- never leaving one file new and
+    the other stale, and never merely deleting a just-installed file
+    without restoring what was there before. Each restoration is
+    independently re-verified against the ORIGINAL pre-operation hash.
+    If every mutated destination is successfully restored and
+    verified, the original exception is re-raised unchanged (including
+    ``KeyboardInterrupt``/``SystemExit``/``MemoryError``, which
+    propagate exactly as they would without this transaction wrapper).
+    If restoration itself cannot be completed and verified for some
+    destination, backups are deliberately NOT deleted, and a distinct
+    ``DfpPhase1bChunkSelectionError`` is raised naming the original
+    failure, the rollback failure, which destinations were and were
+    not restored, and the exact remaining backup paths -- this
+    function never claims a destination is unchanged unless that was
+    independently verified.
+
+    This provides a rollback-safe transaction boundary, not crash
+    durability: a process kill or power loss between two of these
+    filesystem operations can still leave a backup file or a `.tmp`
+    staging file on disk (recoverable by hand from the named backup
+    path), though it can never lose the pre-existing content of either
+    destination without leaving that recoverable copy behind.
+
+    On full success, per-destination backups are removed as a
+    best-effort post-commit cleanup step -- a failure removing a
+    backup after both new files are installed and verified does not
+    roll back the already-committed pair; a leftover ``.bak`` sibling
+    in that rare case is harmless residue, safe to delete by hand."""
     resolved_dir = resolve_output_dir(output_dir)
     json_dest = resolve_safe_output_basename(json_basename, output_dir=resolved_dir, label="--output", required_suffix=_JSON_SUFFIX)
     md_dest = resolve_safe_output_basename(markdown_basename, output_dir=resolved_dir, label="--markdown-output", required_suffix=_MARKDOWN_SUFFIX)
     if json_dest == md_dest:
         raise DfpPhase1bChunkSelectionError(f"--output and --markdown-output must not resolve to the same destination: {json_dest}")
-    if json_dest.exists() and not allow_overwrite:
-        raise DfpPhase1bChunkSelectionError(f"refusing to overwrite existing selection artifact {json_dest} (allow_overwrite is False)")
-    if md_dest.exists() and not allow_overwrite:
-        raise DfpPhase1bChunkSelectionError(f"refusing to overwrite existing markdown report {md_dest} (allow_overwrite is False)")
+
+    for dest, label in ((json_dest, "--output"), (md_dest, "--markdown-output")):
+        if dest.is_symlink():
+            raise DfpPhase1bChunkSelectionError(f"{label} target {dest} is a symlink -- refusing")
+        if dest.exists():
+            if not allow_overwrite:
+                raise DfpPhase1bChunkSelectionError(f"refusing to overwrite existing {label} destination {dest} (allow_overwrite is False)")
+            if not dest.is_file():
+                raise DfpPhase1bChunkSelectionError(f"{label} target {dest} exists but is not a regular file -- refusing")
     if type(markdown_text) is not str:
         raise DfpPhase1bChunkSelectionError(f"markdown report content must be a string, observed {type(markdown_text).__name__}")
 
     json_payload = json.dumps(artifact, indent=2, sort_keys=True) + "\n"
     if json.loads(json_payload) != dict(artifact):
         raise DfpPhase1bChunkSelectionError("internal error: serialized selection artifact does not round-trip -- refusing to install")
+    # Expected hashes of the exact encoded payloads, computed ONCE from
+    # the in-memory bytes before anything is written to disk. Both are
+    # symmetrically re-verified against an independent on-disk read of
+    # their respective ``.tmp`` staging file below -- an exact
+    # byte-level SHA-256 check, no tolerance/retry/normalization.
+    expected_json_hash = hashlib.sha256(json_payload.encode("utf-8")).hexdigest()
+    expected_md_hash = hashlib.sha256(markdown_text.encode("utf-8")).hexdigest()
 
     json_tmp = json_dest.with_name(f".{json_dest.name}.tmp")
     md_tmp = md_dest.with_name(f".{md_dest.name}.tmp")
+
+    # --- Preservation: back up whichever destinations currently exist,
+    # verified BEFORE either destination is touched. Fail closed (no
+    # destination mutated, no partial backup left) if either backup
+    # cannot be created and verified. ---
+    backups: dict[Path, tuple[Path, str]] = {}
     try:
-        json_tmp.write_text(json_payload)
-        md_tmp.write_text(markdown_text)
-        json_tmp.replace(json_dest)
+        for dest in (json_dest, md_dest):
+            if dest.exists():
+                backups[dest] = _make_sibling_backup(dest)
+    except BaseException:
+        for backup_path, _original_hash in backups.values():
+            if backup_path.exists():
+                backup_path.unlink()
+        raise
+
+    try:
+        # --- Staging + self-verification (no destination touched yet).
+        # BOTH staged files are written and then independently RE-READ
+        # FROM DISK (the project's standard ``sha256_file`` helper, the
+        # same one used for installed-pair and backup verification --
+        # never merely trusting the in-memory string) and hash-compared
+        # against their expected encoded-payload hash. This is a genuine
+        # round-trip check for each staged file individually, so it also
+        # catches a filesystem-level write anomaly affecting either one
+        # -- symmetric between JSON and Markdown, with no tolerance,
+        # retry, silent fallback, or normalized-text comparison. A
+        # failure here happens strictly before any destination mutation,
+        # so recovery is trivial: nothing to restore, just clean up
+        # whatever backups were already made and re-raise. ---
         try:
-            md_tmp.replace(md_dest)
-        except OSError:
-            # Best-effort rollback: undo the first rename so neither
-            # destination ends up half-installed.
-            if json_dest.exists():
-                json_dest.unlink()
+            json_tmp.write_text(json_payload)
+            staged_json_hash = sha256_file(json_tmp)
+            if staged_json_hash != expected_json_hash:
+                raise DfpPhase1bChunkSelectionError(
+                    f"staged JSON artifact {json_tmp} does not match its expected encoded payload "
+                    f"(expected {expected_json_hash}, observed {staged_json_hash}) -- refusing to install"
+                )
+            md_tmp.write_text(markdown_text)
+            staged_md_hash = sha256_file(md_tmp)
+            if staged_md_hash != expected_md_hash:
+                raise DfpPhase1bChunkSelectionError(
+                    f"staged Markdown report {md_tmp} does not match its expected encoded payload "
+                    f"(expected {expected_md_hash}, observed {staged_md_hash}) -- refusing to install"
+                )
+        except BaseException:
+            for backup_path, _original_hash in backups.values():
+                if backup_path.exists():
+                    backup_path.unlink()
             raise
+
+        # --- Installation: mutation begins here ---
+        mutated: list[Path] = []
+        try:
+            json_tmp.replace(json_dest)
+            mutated.append(json_dest)
+            md_tmp.replace(md_dest)
+            mutated.append(md_dest)
+
+            # --- Installed-pair verification, read back from disk ---
+            if sha256_file(json_dest) != staged_json_hash:
+                raise DfpPhase1bChunkSelectionError(f"post-install verification failed for {json_dest} -- installed bytes disagree with the staged payload")
+            if sha256_file(md_dest) != staged_md_hash:
+                raise DfpPhase1bChunkSelectionError(f"post-install verification failed for {md_dest} -- installed bytes disagree with the staged payload")
+        except BaseException as install_exc:
+            # --- Rollback: restore or remove exactly what THIS
+            # transaction mutated -- both destinations, not merely the
+            # one replaced first. ---
+            restored: list[Path] = []
+            failures: list[str] = []
+            for dest in mutated:
+                if dest in backups:
+                    backup_path, original_hash = backups[dest]
+                    try:
+                        backup_path.replace(dest)
+                        if sha256_file(dest) != original_hash:
+                            failures.append(f"{dest}: restored bytes disagree with the original hash")
+                        else:
+                            restored.append(dest)
+                    except OSError as restore_exc:
+                        failures.append(f"{dest}: restoration failed ({restore_exc})")
+                else:
+                    # This destination did not exist before the
+                    # transaction -- undo its fresh creation, touching
+                    # nothing else.
+                    try:
+                        dest.unlink()
+                        restored.append(dest)
+                    except OSError as remove_exc:
+                        failures.append(f"{dest}: could not remove the newly-created file ({remove_exc})")
+
+            # A destination that was backed up but never actually
+            # reached its replace() call (e.g. the failure happened on
+            # the FIRST replace, before the second was ever attempted)
+            # was never mutated -- nothing to restore for it, but its
+            # backup must still be cleaned up like any other.
+            for dest in backups:
+                if dest not in mutated:
+                    restored.append(dest)
+
+            if failures:
+                remaining_backups = [str(bp) for bp, _h in backups.values() if bp.exists()]
+                raise DfpPhase1bChunkSelectionError(
+                    "installation failed AND rollback could not fully restore the original state -- "
+                    "do not assume any destination is unchanged.\n"
+                    f"  original installation failure: {install_exc!r}\n"
+                    f"  rollback failure(s): {'; '.join(failures)}\n"
+                    f"  successfully restored: {[str(d) for d in restored] or 'none'}\n"
+                    f"  recoverable backup files remaining on disk: {remaining_backups or 'none'}"
+                ) from install_exc
+
+            # Rollback fully succeeded and was independently verified
+            # -- clean up EVERY backup this transaction created
+            # (mutated-and-restored, or simply never reached), then
+            # propagate the ORIGINAL exception completely unchanged
+            # (preserves KeyboardInterrupt/SystemExit/MemoryError and
+            # any other exception's exact type/traceback/chain).
+            for backup_path, _original_hash in backups.values():
+                if backup_path.exists():
+                    backup_path.unlink()
+            raise
+
+        # --- Full success: best-effort post-commit cleanup. A failure
+        # here never rolls back the already-installed, already-verified
+        # new pair -- any leftover backup is harmless residue. ---
+        for backup_path, _original_hash in backups.values():
+            try:
+                if backup_path.exists():
+                    backup_path.unlink()
+            except OSError:
+                pass
+        return json_dest, md_dest
     finally:
         for stray in (json_tmp, md_tmp):
             if stray.exists():
                 stray.unlink()
-    return json_dest, md_dest
+
 
 
 __all__ = [

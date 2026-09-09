@@ -189,10 +189,27 @@ The same validator backs both the CLI and the direct Python API
 `install_selection_bundle`) — the direct API independently rejects an
 unsafe destination even when called without the CLI. When both a JSON
 and a Markdown destination are requested together, `install_selection_bundle`
-installs them as one atomic pair: both destinations are validated and
-both payloads fully generated *before* either temporary file is
-written, so a failure at any point leaves neither destination
-installed or modified.
+installs them as a **rollback-safe two-file transaction** — not a
+literally atomic filesystem operation (no single POSIX primitive
+replaces two files at once). Both destinations are validated up front,
+and both new payloads are fully generated, staged to `.tmp` siblings,
+and independently re-read from disk and SHA-256-verified against their
+expected encoded content *before either destination is changed*. Any
+destination that already exists is first preserved as a verified
+same-directory recovery object. If a failure occurs after a
+destination has been mutated, every destination this transaction
+actually mutated is restored from its verified recovery object (or
+removed, if freshly created) and the restoration itself is
+independently re-verified; if that restoration cannot be completed and
+verified, the recovery object is retained on disk and named in the
+raised error rather than silently discarded. Once the new pair is
+installed and verified, cleanup of the now-unneeded recovery objects
+is best-effort: a failure at that point does not roll back the
+already-valid new pair, and may leave a clearly identified, harmless
+`.bak` residue rather than losing anything. This provides a
+rollback-safe transaction boundary, not crash durability — process
+termination or power loss between two of these filesystem operations
+is not claimed to be covered.
 
 ## Artifact provenance fields
 

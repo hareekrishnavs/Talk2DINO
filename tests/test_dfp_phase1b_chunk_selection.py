@@ -1798,3 +1798,708 @@ def test_no_gpu_disclosure_json_markdown_consistent(fixture_clone):
     assert "GPU execution performed by Task 4" in md
     assert "**False**" in md
     assert "H100" in md
+
+
+# =======================================================================
+# Findings-repair round 3: rollback-safe overwrite transaction for
+# install_selection_bundle. All fixtures below are disposable
+# tmp_path directories -- never the real production directory.
+# =======================================================================
+
+
+def _install_bundle_flaky_replace(fail_on_call, *, raise_type=OSError, message="injected failure"):
+    """Returns a context-manager-free monkeypatch pair: apply
+    `Path.replace = patched` before the operation, and always restore
+    the original afterward via the caller's own try/finally."""
+    orig_replace = Path.replace
+    calls = {"n": 0}
+
+    def patched(self, target):
+        calls["n"] += 1
+        if calls["n"] == fail_on_call:
+            raise raise_type(message)
+        return orig_replace(self, target)
+
+    return orig_replace, patched, calls
+
+
+@pytest.fixture
+def old_pair(tmp_path):
+    j = tmp_path / "x.json"
+    m = tmp_path / "x.md"
+    j.write_text("OLD_JSON_CONTENT")
+    m.write_text("OLD_MD_CONTENT")
+    return j, m
+
+
+def test_overwrite_second_replacement_regression_exact(tmp_path, old_pair):
+    """The exact reproduced defect: both destinations pre-exist, the
+    first replacement succeeds, the second raises -- both originals
+    must survive byte-identical, with no residue."""
+    j, m = old_pair
+    j_hash, m_hash = sel.sha256_file(j), sel.sha256_file(m)
+    orig_replace, patched, calls = _install_bundle_flaky_replace(2)
+    Path.replace = patched
+    try:
+        with pytest.raises(OSError):
+            sel.install_selection_bundle({"a": 1}, "NEW_MD", output_dir=tmp_path, json_basename="x.json", markdown_basename="x.md", allow_overwrite=True)
+    finally:
+        Path.replace = orig_replace
+    assert j.exists() and m.exists()
+    assert j.read_text() == "OLD_JSON_CONTENT"
+    assert m.read_text() == "OLD_MD_CONTENT"
+    assert sel.sha256_file(j) == j_hash
+    assert sel.sha256_file(m) == m_hash
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["x.json", "x.md"]
+
+
+def test_overwrite_success_path(tmp_path, old_pair):
+    j, m = old_pair
+    (tmp_path / "unrelated.txt").write_text("unrelated")
+    j2, m2 = sel.install_selection_bundle({"a": 1}, "NEW_MD_CONTENT", output_dir=tmp_path, json_basename="x.json", markdown_basename="x.md", allow_overwrite=True)
+    assert json.loads(j2.read_text()) == {"a": 1}
+    assert m2.read_text() == "NEW_MD_CONTENT"
+    assert "OLD_JSON_CONTENT" not in j2.read_text()
+    assert "OLD_MD_CONTENT" not in m2.read_text()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["unrelated.txt", "x.json", "x.md"]
+    assert (tmp_path / "unrelated.txt").read_text() == "unrelated"
+
+
+def test_fresh_install_regression_unaffected(tmp_path):
+    j, m = sel.install_selection_bundle({"a": 1}, "MD", output_dir=tmp_path, json_basename="f.json", markdown_basename="f.md")
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["f.json", "f.md"]
+
+
+def test_fresh_install_failure_removes_only_created_files(tmp_path):
+    (tmp_path / "sibling.txt").write_text("keep me")
+    orig_replace, patched, calls = _install_bundle_flaky_replace(2)
+    Path.replace = patched
+    try:
+        with pytest.raises(OSError):
+            sel.install_selection_bundle({"a": 1}, "MD", output_dir=tmp_path, json_basename="g.json", markdown_basename="g.md")
+    finally:
+        Path.replace = orig_replace
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["sibling.txt"]
+    assert (tmp_path / "sibling.txt").read_text() == "keep me"
+
+
+# --- failure-injection matrix ---
+
+def test_inject_first_backup_creation_failure(tmp_path, old_pair, monkeypatch):
+    j, m = old_pair
+    orig = sel._make_sibling_backup
+    calls = {"n": 0}
+
+    def flaky(dest):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise sel.DfpPhase1bChunkSelectionError("injected first-backup failure")
+        return orig(dest)
+    monkeypatch.setattr(sel, "_make_sibling_backup", flaky)
+    with pytest.raises(sel.DfpPhase1bChunkSelectionError):
+        sel.install_selection_bundle({"a": 1}, "MD", output_dir=tmp_path, json_basename="x.json", markdown_basename="x.md", allow_overwrite=True)
+    assert j.read_text() == "OLD_JSON_CONTENT"
+    assert m.read_text() == "OLD_MD_CONTENT"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["x.json", "x.md"]
+
+
+def test_inject_second_backup_creation_failure(tmp_path, old_pair, monkeypatch):
+    j, m = old_pair
+    orig = sel._make_sibling_backup
+    calls = {"n": 0}
+
+    def flaky(dest):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise sel.DfpPhase1bChunkSelectionError("injected second-backup failure")
+        return orig(dest)
+    monkeypatch.setattr(sel, "_make_sibling_backup", flaky)
+    with pytest.raises(sel.DfpPhase1bChunkSelectionError):
+        sel.install_selection_bundle({"a": 1}, "MD", output_dir=tmp_path, json_basename="x.json", markdown_basename="x.md", allow_overwrite=True)
+    # First backup must have been cleaned up too -- no residue.
+    assert j.read_text() == "OLD_JSON_CONTENT"
+    assert m.read_text() == "OLD_MD_CONTENT"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["x.json", "x.md"]
+
+
+def test_inject_backup_verification_failure(tmp_path, old_pair, monkeypatch):
+    j, m = old_pair
+    orig_sha = sel.sha256_file
+    calls = {"n": 0}
+
+    def flaky_sha(path):
+        calls["n"] += 1
+        # Corrupt the verification of the backup (not the original)
+        # the second time sha256_file runs against a backup-shaped path.
+        if calls["n"] == 2 and ".rollback-" in str(path):
+            return "0" * 64
+        return orig_sha(path)
+    monkeypatch.setattr(sel, "sha256_file", flaky_sha)
+    with pytest.raises(sel.DfpPhase1bChunkSelectionError):
+        sel.install_selection_bundle({"a": 1}, "MD", output_dir=tmp_path, json_basename="x.json", markdown_basename="x.md", allow_overwrite=True)
+    assert j.read_text() == "OLD_JSON_CONTENT"
+    assert m.read_text() == "OLD_MD_CONTENT"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["x.json", "x.md"]
+
+
+def test_inject_staged_json_creation_failure(tmp_path, old_pair):
+    j, m = old_pair
+    orig_write_text = Path.write_text
+    calls = {"n": 0}
+
+    def flaky(self, *a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1 and self.name.endswith(".json.tmp"):
+            raise OSError("injected staged-json failure")
+        return orig_write_text(self, *a, **k)
+    Path.write_text = flaky
+    try:
+        with pytest.raises(OSError):
+            sel.install_selection_bundle({"a": 1}, "MD", output_dir=tmp_path, json_basename="x.json", markdown_basename="x.md", allow_overwrite=True)
+    finally:
+        Path.write_text = orig_write_text
+    assert j.read_text() == "OLD_JSON_CONTENT"
+    assert m.read_text() == "OLD_MD_CONTENT"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["x.json", "x.md"]
+
+
+def test_inject_staged_markdown_creation_failure(tmp_path, old_pair):
+    j, m = old_pair
+    orig_write_text = Path.write_text
+
+    def flaky(self, *a, **k):
+        if self.name.endswith(".md.tmp"):
+            raise OSError("injected staged-markdown failure")
+        return orig_write_text(self, *a, **k)
+    Path.write_text = flaky
+    try:
+        with pytest.raises(OSError):
+            sel.install_selection_bundle({"a": 1}, "MD", output_dir=tmp_path, json_basename="x.json", markdown_basename="x.md", allow_overwrite=True)
+    finally:
+        Path.write_text = orig_write_text
+    assert j.read_text() == "OLD_JSON_CONTENT"
+    assert m.read_text() == "OLD_MD_CONTENT"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["x.json", "x.md"]
+
+
+def test_inject_staged_pair_verification_failure(tmp_path, old_pair, monkeypatch):
+    j, m = old_pair
+    orig_sha = sel.sha256_file
+
+    def flaky(path):
+        if str(path).endswith(".json.tmp"):
+            return "1" * 64
+        return orig_sha(path)
+    monkeypatch.setattr(sel, "sha256_file", flaky)
+    with pytest.raises(sel.DfpPhase1bChunkSelectionError):
+        sel.install_selection_bundle({"a": 1}, "MD", output_dir=tmp_path, json_basename="x.json", markdown_basename="x.md", allow_overwrite=True)
+    assert j.read_text() == "OLD_JSON_CONTENT"
+    assert m.read_text() == "OLD_MD_CONTENT"
+
+
+def test_inject_first_destination_replacement_failure(tmp_path, old_pair):
+    j, m = old_pair
+    orig_replace, patched, calls = _install_bundle_flaky_replace(1)
+    Path.replace = patched
+    try:
+        with pytest.raises(OSError):
+            sel.install_selection_bundle({"a": 1}, "MD", output_dir=tmp_path, json_basename="x.json", markdown_basename="x.md", allow_overwrite=True)
+    finally:
+        Path.replace = orig_replace
+    assert j.read_text() == "OLD_JSON_CONTENT"
+    assert m.read_text() == "OLD_MD_CONTENT"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["x.json", "x.md"]
+
+
+def test_inject_second_destination_replacement_failure(tmp_path, old_pair):
+    j, m = old_pair
+    orig_replace, patched, calls = _install_bundle_flaky_replace(2)
+    Path.replace = patched
+    try:
+        with pytest.raises(OSError):
+            sel.install_selection_bundle({"a": 1}, "MD", output_dir=tmp_path, json_basename="x.json", markdown_basename="x.md", allow_overwrite=True)
+    finally:
+        Path.replace = orig_replace
+    assert j.read_text() == "OLD_JSON_CONTENT"
+    assert m.read_text() == "OLD_MD_CONTENT"
+
+
+def test_inject_final_json_verification_failure(tmp_path, old_pair, monkeypatch):
+    j, m = old_pair
+    orig_sha = sel.sha256_file
+    calls = {"n": 0}
+
+    def flaky(path):
+        calls["n"] += 1
+        # Let backup-phase + staging-phase hashing succeed; corrupt
+        # only the POST-INSTALL verification read of json_dest.
+        if str(path).endswith("x.json") and calls["n"] > 2:
+            return "2" * 64
+        return orig_sha(path)
+    monkeypatch.setattr(sel, "sha256_file", flaky)
+    with pytest.raises(sel.DfpPhase1bChunkSelectionError):
+        sel.install_selection_bundle({"a": 1}, "MD", output_dir=tmp_path, json_basename="x.json", markdown_basename="x.md", allow_overwrite=True)
+    assert j.read_text() == "OLD_JSON_CONTENT"
+    assert m.read_text() == "OLD_MD_CONTENT"
+
+
+def test_inject_rollback_first_restoration_failure(tmp_path, old_pair):
+    j, m = old_pair
+    orig_replace = Path.replace
+    calls = {"n": 0}
+
+    def flaky(self, target):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("second install replace fails")
+        if calls["n"] == 3:
+            raise OSError("rollback restore of json fails")
+        return orig_replace(self, target)
+    Path.replace = flaky
+    try:
+        with pytest.raises(sel.DfpPhase1bChunkSelectionError, match="rollback could not fully restore"):
+            sel.install_selection_bundle({"a": 1}, "MD", output_dir=tmp_path, json_basename="x.json", markdown_basename="x.md", allow_overwrite=True)
+    finally:
+        Path.replace = orig_replace
+    # Backups must NOT have been deleted -- recovery evidence preserved.
+    backups = list(tmp_path.glob("*.rollback-*.bak"))
+    assert len(backups) >= 1
+
+
+def test_inject_rollback_verification_failure(tmp_path, old_pair, monkeypatch):
+    """Rollback's replace() succeeds, but the POST-restore hash check
+    fails -- must still be reported as a rollback failure, not a
+    silent success."""
+    j, m = old_pair
+    orig_replace = Path.replace
+    replace_calls = {"n": 0}
+
+    def flaky_replace(self, target):
+        replace_calls["n"] += 1
+        if replace_calls["n"] == 2:
+            raise OSError("second install replace fails")
+        return orig_replace(self, target)
+    Path.replace = flaky_replace
+
+    orig_sha = sel.sha256_file
+    sha_calls = {"n": 0}
+
+    def flaky_sha(path):
+        sha_calls["n"] += 1
+        real = orig_sha(path)
+        return real
+    # Simpler: corrupt sha256_file only for the restored json_dest read
+    # (post-rollback verification), by intercepting AFTER real replace calls settle.
+    def flaky_sha2(path):
+        val = orig_sha(path)
+        if str(path).endswith("x.json") and flaky_replace_state["restoring"]:
+            return "3" * 64
+        return val
+    flaky_replace_state = {"restoring": False}
+
+    def flaky_replace2(self, target):
+        replace_calls["n"] += 1
+        if replace_calls["n"] == 2:
+            raise OSError("second install replace fails")
+        if replace_calls["n"] == 3:
+            flaky_replace_state["restoring"] = True
+        return orig_replace(self, target)
+
+    Path.replace = flaky_replace2
+    monkeypatch.setattr(sel, "sha256_file", flaky_sha2)
+    try:
+        with pytest.raises(sel.DfpPhase1bChunkSelectionError, match="rollback could not fully restore"):
+            sel.install_selection_bundle({"a": 1}, "MD", output_dir=tmp_path, json_basename="x.json", markdown_basename="x.md", allow_overwrite=True)
+    finally:
+        Path.replace = orig_replace
+    backups = list(tmp_path.glob("*.rollback-*.bak"))
+    assert len(backups) >= 1, "backups must be preserved when rollback verification fails"
+
+
+def test_inject_backup_cleanup_failure_after_success_does_not_roll_back(tmp_path, old_pair, monkeypatch):
+    j, m = old_pair
+    orig_unlink = Path.unlink
+
+    def flaky_unlink(self, *a, **k):
+        if ".rollback-" in self.name:
+            raise OSError("injected cleanup failure")
+        return orig_unlink(self, *a, **k)
+    monkeypatch.setattr(Path, "unlink", flaky_unlink)
+    # Must NOT raise -- successful install/verify is never rolled back
+    # merely because best-effort post-commit cleanup fails.
+    j2, m2 = sel.install_selection_bundle({"a": 1}, "NEW_MD", output_dir=tmp_path, json_basename="x.json", markdown_basename="x.md", allow_overwrite=True)
+    assert json.loads(j2.read_text()) == {"a": 1}
+    assert m2.read_text() == "NEW_MD"
+
+
+# --- state and path adversaries ---
+
+def test_only_one_destination_exists(tmp_path):
+    (tmp_path / "x.json").write_text("OLD_JSON")
+    # x.md does not exist.
+    j, m = sel.install_selection_bundle({"a": 1}, "NEW_MD", output_dir=tmp_path, json_basename="x.json", markdown_basename="x.md", allow_overwrite=True)
+    assert json.loads(j.read_text()) == {"a": 1}
+    assert m.read_text() == "NEW_MD"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["x.json", "x.md"]
+
+
+def test_destination_is_symlink_rejected(tmp_path):
+    real = tmp_path / "real.json"
+    real.write_text("REAL")
+    link = tmp_path / "x.json"
+    link.symlink_to(real)
+    with pytest.raises(sel.DfpPhase1bChunkSelectionError):
+        sel.install_selection_bundle({"a": 1}, "MD", output_dir=tmp_path, json_basename="x.json", markdown_basename="x.md", allow_overwrite=True)
+
+
+def test_destination_is_directory_rejected(tmp_path):
+    (tmp_path / "x.json").mkdir()
+    with pytest.raises(sel.DfpPhase1bChunkSelectionError):
+        sel.install_selection_bundle({"a": 1}, "MD", output_dir=tmp_path, json_basename="x.json", markdown_basename="x.md", allow_overwrite=True)
+
+
+def test_backup_name_collision_rejected(tmp_path, old_pair, monkeypatch):
+    j, m = old_pair
+    # Force uuid4 to a fixed value, then pre-create a file at the exact
+    # path _make_sibling_backup would compute for json_dest's backup --
+    # the function must detect and reject this collision rather than
+    # silently overwrite an unrelated pre-existing file.
+    import uuid as uuid_mod
+    fixed = uuid_mod.UUID("12345678123456781234567812345678")
+    monkeypatch.setattr(sel.uuid, "uuid4", lambda: fixed)
+    colliding_path = tmp_path / f".x.json.rollback-{fixed.hex}.bak"
+    colliding_path.write_text("PRE-EXISTING, UNRELATED CONTENT")
+    with pytest.raises(sel.DfpPhase1bChunkSelectionError, match="collision"):
+        sel.install_selection_bundle({"a": 1}, "MD", output_dir=tmp_path, json_basename="x.json", markdown_basename="x.md", allow_overwrite=True)
+    assert j.read_text() == "OLD_JSON_CONTENT"
+    assert m.read_text() == "OLD_MD_CONTENT"
+    assert colliding_path.read_text() == "PRE-EXISTING, UNRELATED CONTENT"
+
+
+def test_caller_input_document_unmodified(tmp_path, old_pair):
+    j, m = old_pair
+    artifact = {"a": 1, "nested": {"b": 2}}
+    snapshot = copy.deepcopy(artifact)
+    sel.install_selection_bundle(artifact, "MD", output_dir=tmp_path, json_basename="x.json", markdown_basename="x.md", allow_overwrite=True)
+    assert artifact == snapshot
+
+
+def test_unrelated_directory_contents_unchanged_on_failure(tmp_path, old_pair):
+    j, m = old_pair
+    (tmp_path / "other_file.txt").write_text("other")
+    (tmp_path / "subdir").mkdir()
+    orig_replace, patched, calls = _install_bundle_flaky_replace(2)
+    Path.replace = patched
+    try:
+        with pytest.raises(OSError):
+            sel.install_selection_bundle({"a": 1}, "MD", output_dir=tmp_path, json_basename="x.json", markdown_basename="x.md", allow_overwrite=True)
+    finally:
+        Path.replace = orig_replace
+    assert (tmp_path / "other_file.txt").read_text() == "other"
+    assert (tmp_path / "subdir").is_dir()
+
+
+# --- exception-domain tests ---
+
+@pytest.mark.parametrize("exc_type", [KeyboardInterrupt, SystemExit, MemoryError])
+def test_fatal_exception_propagates_after_rollback(tmp_path, old_pair, exc_type):
+    j, m = old_pair
+    orig_replace = Path.replace
+    calls = {"n": 0}
+
+    def flaky(self, target):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise exc_type("fatal during second replace")
+        return orig_replace(self, target)
+    Path.replace = flaky
+    try:
+        with pytest.raises(exc_type):
+            sel.install_selection_bundle({"a": 1}, "MD", output_dir=tmp_path, json_basename="x.json", markdown_basename="x.md", allow_overwrite=True)
+    finally:
+        Path.replace = orig_replace
+    # Rollback must still have occurred despite the fatal exception.
+    assert j.read_text() == "OLD_JSON_CONTENT"
+    assert m.read_text() == "OLD_MD_CONTENT"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["x.json", "x.md"]
+
+
+def test_cli_normal_installation_failure_exits_2_no_traceback(tmp_path):
+    """Through the real CLI: an overwrite attempt without --force must
+    exit 2 with a concise diagnostic, no traceback."""
+    real_output = REAL_OUTPUT_DIR if _REAL_OUTPUT_AVAILABLE else None
+    if real_output is None:
+        pytest.skip("no real output")
+    out_dir = _copy_real_output_to(tmp_path)
+    (out_dir / "phase1b_chunk_selection.json").write_text('{"pre-existing": true}')
+    result = _run_cli("analyze", "--output-dir", str(out_dir), "--output", "phase1b_chunk_selection.json")
+    assert result.returncode == 2
+    assert "Traceback" not in result.stderr
+    assert json.loads((out_dir / "phase1b_chunk_selection.json").read_text()) == {"pre-existing": True}
+
+
+# =======================================================================
+# Findings-repair round 4: symmetric staged-file disk verification.
+# Both the JSON and the Markdown ``.tmp`` staging files must be
+# independently re-read from disk and hash-compared against their
+# expected encoded payload BEFORE either destination is ever touched
+# (i.e. before the first ``Path.replace`` call of this transaction).
+# Prior to this round, only the JSON staged file was verified this way
+# -- the Markdown staged hash was computed purely from the in-memory
+# string, so a staged-Markdown corruption was only ever caught by the
+# POST-install verification, after both destinations had already been
+# mutated and required a rollback. All fixtures below are disposable
+# tmp_path directories -- never the real production directory.
+# =======================================================================
+
+
+def _track_replace_calls():
+    """Monkeypatch-free call-count helper: apply the returned `patched`
+    as `Path.replace`, then inspect `calls` -- used to prove a
+    destination was (or, critically, was NOT) ever touched."""
+    orig_replace = Path.replace
+    calls = []
+
+    def patched(self, target):
+        calls.append(self.name)
+        return orig_replace(self, target)
+
+    return orig_replace, patched, calls
+
+
+def test_staged_json_disk_hash_actually_verified(tmp_path):
+    """Positive path: the staged JSON's on-disk SHA-256 is genuinely
+    read back and matches the expected encoded-payload hash, and
+    installation succeeds normally."""
+    artifact = {"marker": "STAGED_JSON_OK", "value": 7}
+    j, m = sel.install_selection_bundle(artifact, "# report\n", output_dir=tmp_path, json_basename="s.json", markdown_basename="s.md")
+    expected = hashlib.sha256((json.dumps(artifact, indent=2, sort_keys=True) + "\n").encode("utf-8")).hexdigest()
+    assert sel.sha256_file(j) == expected
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["s.json", "s.md"]
+
+
+def test_staged_markdown_disk_hash_actually_verified(tmp_path):
+    """Positive path: the staged Markdown's on-disk SHA-256 is
+    genuinely read back (not merely computed from the in-memory
+    string) and matches the expected encoded-payload hash, and
+    installation succeeds normally."""
+    md_text = "# STAGED_MD_OK report\n\nsome content\n"
+    j, m = sel.install_selection_bundle({"marker": "X"}, md_text, output_dir=tmp_path, json_basename="s.json", markdown_basename="s.md")
+    expected = hashlib.sha256(md_text.encode("utf-8")).hexdigest()
+    assert sel.sha256_file(m) == expected
+    assert m.read_text() == md_text
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["s.json", "s.md"]
+
+
+def test_staged_markdown_disk_hash_verification_survives_overwrite_and_rollback(tmp_path, old_pair):
+    """The new staged-Markdown disk verification must not interfere
+    with the already-verified overwrite/rollback transaction: a normal
+    overwrite still succeeds, and the exact second-replacement
+    rollback regression is still exercised correctly with this check
+    in place."""
+    j, m = old_pair
+    j2, m2 = sel.install_selection_bundle({"a": 1}, "NEW_MD", output_dir=tmp_path, json_basename="x.json", markdown_basename="x.md", allow_overwrite=True)
+    assert j2.read_text() == '{\n  "a": 1\n}\n'
+    assert m2.read_text() == "NEW_MD"
+
+
+def test_staged_markdown_corruption_rejected_before_any_destination_mutated(tmp_path, old_pair):
+    """The central regression for this round. Corrupts the ACTUAL
+    BYTES written to the staged Markdown ``.tmp`` file (not merely the
+    hash-check result) after it is written but before it would be
+    hashed, then requires: DfpPhase1bChunkSelectionError naming the
+    staged Markdown/hash mismatch; ZERO calls to Path.replace (i.e.
+    neither destination is EVER touched, not touched-then-rolled-back
+    -- this is what distinguishes the fix from the pre-fix behavior,
+    which mutated both destinations before its later post-install
+    check caught the same corruption); both destinations byte-identical
+    to their originals; no mixed pair; no `.tmp`/`.bak` residue; an
+    unrelated sibling file untouched.
+
+    This test would FAIL against the pre-fix implementation: replayed
+    directly against the pre-fix `install_selection_bundle` (see the
+    verification report), this exact corruption still raises
+    DfpPhase1bChunkSelectionError, but only via the POST-install check,
+    by which point Path.replace has already been called for BOTH
+    destinations (and, for the pre-existing pair here, two more times
+    for rollback) -- i.e. `replace_calls` would be non-empty, failing
+    the assertion below.
+    """
+    j, m = old_pair
+    j_hash, m_hash = sel.sha256_file(j), sel.sha256_file(m)
+    unrelated = tmp_path / "unrelated.txt"
+    unrelated.write_text("do not touch\n")
+    unrelated_hash = sel.sha256_file(unrelated)
+
+    orig_write_text = Path.write_text
+
+    def corrupt_md_write(self, data, *a, **k):
+        if self.name.endswith(".md.tmp"):
+            # Genuinely write DIFFERENT bytes than what was requested --
+            # not a monkeypatched hash result.
+            return orig_write_text(self, data + "CORRUPTED_ON_DISK_BYTES", *a, **k)
+        return orig_write_text(self, data, *a, **k)
+
+    orig_replace, patched_replace, replace_calls = _track_replace_calls()
+    Path.write_text = corrupt_md_write
+    Path.replace = patched_replace
+    try:
+        with pytest.raises(sel.DfpPhase1bChunkSelectionError, match=r"[Ss]taged [Mm]arkdown"):
+            sel.install_selection_bundle({"a": 1}, "NEW_MD_CONTENT", output_dir=tmp_path, json_basename="x.json", markdown_basename="x.md", allow_overwrite=True)
+    finally:
+        Path.write_text = orig_write_text
+        Path.replace = orig_replace
+
+    assert replace_calls == [], f"a destination was mutated before staged verification caught the corruption: {replace_calls}"
+    assert j.exists() and m.exists()
+    assert j.read_text() == "OLD_JSON_CONTENT"
+    assert m.read_text() == "OLD_MD_CONTENT"
+    assert sel.sha256_file(j) == j_hash
+    assert sel.sha256_file(m) == m_hash
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["unrelated.txt", "x.json", "x.md"]
+    assert sel.sha256_file(unrelated) == unrelated_hash
+
+
+def test_staged_json_corruption_rejected_before_any_destination_mutated(tmp_path, old_pair):
+    """Symmetric counterpart for the JSON side (already covered less
+    directly by test_inject_staged_pair_verification_failure, which
+    monkeypatches the hash function rather than corrupting real bytes
+    -- this test corrupts the actual staged JSON bytes on disk)."""
+    j, m = old_pair
+    j_hash, m_hash = sel.sha256_file(j), sel.sha256_file(m)
+
+    orig_write_text = Path.write_text
+
+    def corrupt_json_write(self, data, *a, **k):
+        if self.name.endswith(".json.tmp"):
+            return orig_write_text(self, data + "CORRUPTED", *a, **k)
+        return orig_write_text(self, data, *a, **k)
+
+    orig_replace, patched_replace, replace_calls = _track_replace_calls()
+    Path.write_text = corrupt_json_write
+    Path.replace = patched_replace
+    try:
+        with pytest.raises(sel.DfpPhase1bChunkSelectionError, match=r"[Ss]taged JSON"):
+            sel.install_selection_bundle({"a": 1}, "NEW_MD", output_dir=tmp_path, json_basename="x.json", markdown_basename="x.md", allow_overwrite=True)
+    finally:
+        Path.write_text = orig_write_text
+        Path.replace = orig_replace
+
+    assert replace_calls == []
+    assert j.read_text() == "OLD_JSON_CONTENT"
+    assert m.read_text() == "OLD_MD_CONTENT"
+    assert sel.sha256_file(j) == j_hash
+    assert sel.sha256_file(m) == m_hash
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["x.json", "x.md"]
+
+
+def test_staged_markdown_hash_read_failure_before_mutation(tmp_path, old_pair, monkeypatch):
+    """A genuine failure while hashing the staged Markdown file (e.g.
+    a transient read error) must be raised before either destination
+    is touched, and must leave both originals unchanged."""
+    j, m = old_pair
+    orig_sha = sel.sha256_file
+
+    def flaky_sha(path):
+        if str(path).endswith(".md.tmp"):
+            raise OSError("injected staged-markdown hash-read failure")
+        return orig_sha(path)
+    monkeypatch.setattr(sel, "sha256_file", flaky_sha)
+
+    orig_replace, patched_replace, replace_calls = _track_replace_calls()
+    Path.replace = patched_replace
+    try:
+        with pytest.raises(OSError):
+            sel.install_selection_bundle({"a": 1}, "NEW_MD", output_dir=tmp_path, json_basename="x.json", markdown_basename="x.md", allow_overwrite=True)
+    finally:
+        Path.replace = orig_replace
+
+    assert replace_calls == []
+    assert j.read_text() == "OLD_JSON_CONTENT"
+    assert m.read_text() == "OLD_MD_CONTENT"
+
+
+def test_staged_markdown_hash_read_failure_via_cli_exits_2_no_traceback(tmp_path, monkeypatch, capsys):
+    """The established domain/exit contract still applies: a genuine
+    staged-Markdown hash-read failure, exercised through the real CLI
+    boundary (`diagnostics.analyze_dfp_phase1b_chunk_benchmark.main`),
+    must exit 2 with no traceback -- exactly like every other
+    OSError-domain failure already covered for this module
+    (`_KNOWN_ERRORS` includes OSError at the CLI boundary).
+
+    Exercised in-process (not via subprocess) so the injected failure
+    can be pinpointed to exactly the staged-Markdown hash read, rather
+    than any earlier CLI-only precondition (E18 binding check,
+    clean-worktree check) that a subprocess invocation cannot isolate
+    from mid-repair, uncommitted state. The clean-worktree gate is
+    bypassed here ONLY because it is unrelated to this repair and
+    already covered by its own dedicated tests elsewhere -- nothing
+    about install_selection_bundle or its staged-verification is
+    patched.
+
+    The patch target is `cli.install_selection_bundle.__globals__`
+    itself (not this test file's own top-level `sel` alias) because
+    other tests in this same session (the E18 fixture-clone tests) can
+    repoint `sys.modules["src.dfp_phase1b_chunk_selection"]` at a
+    freshly-imported clone copy; patching by module *name* would then
+    silently miss whichever module object the CLI's already-bound
+    `install_selection_bundle` reference actually executes against.
+    Patching its own `__globals__` mapping directly is unambiguous
+    regardless of test order or any other test's module-cache
+    manipulation."""
+    if not _REAL_OUTPUT_AVAILABLE:
+        pytest.skip("no real output")
+    import importlib
+    cli = importlib.import_module("diagnostics.analyze_dfp_phase1b_chunk_benchmark")
+    out_dir = _copy_real_output_to(tmp_path)
+
+    monkeypatch.setattr(cli, "resolve_analysis_generation_commit", lambda repo_root, e18_document=None: "0" * 40)
+
+    target_globals = cli.install_selection_bundle.__globals__
+    orig_sha = target_globals["sha256_file"]
+
+    def flaky_sha(path):
+        if str(path).endswith(".md.tmp"):
+            raise OSError("injected staged-markdown hash-read failure")
+        return orig_sha(path)
+    monkeypatch.setitem(target_globals, "sha256_file", flaky_sha)
+
+    argv = [
+        "--repo-root", str(ROOT), "analyze", "--output-dir", str(out_dir),
+        "--output", "phase1b_chunk_selection.json", "--markdown-output", "phase1b_chunk_selection_report.md",
+    ]
+    rc = cli.main(argv)
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "Traceback" not in captured.err
+    assert "injected staged-markdown hash-read failure" in captured.err
+    assert not (out_dir / "phase1b_chunk_selection.json").exists()
+    assert not (out_dir / "phase1b_chunk_selection_report.md").exists()
+
+
+@pytest.mark.parametrize("exc_type", [KeyboardInterrupt, SystemExit, MemoryError])
+def test_fatal_exception_during_staged_markdown_hash_read_propagates(tmp_path, old_pair, exc_type, monkeypatch):
+    """A fatal exception raised while hashing the staged Markdown file
+    (before any destination mutation) must propagate with its exact
+    original type, exactly like every other fatal-exception injection
+    point already covered for this transaction."""
+    j, m = old_pair
+    orig_sha = sel.sha256_file
+
+    def fatal_sha(path):
+        if str(path).endswith(".md.tmp"):
+            raise exc_type("fatal during staged markdown hash read")
+        return orig_sha(path)
+    monkeypatch.setattr(sel, "sha256_file", fatal_sha)
+
+    orig_replace, patched_replace, replace_calls = _track_replace_calls()
+    Path.replace = patched_replace
+    try:
+        with pytest.raises(exc_type):
+            sel.install_selection_bundle({"a": 1}, "NEW_MD", output_dir=tmp_path, json_basename="x.json", markdown_basename="x.md", allow_overwrite=True)
+    finally:
+        Path.replace = orig_replace
+
+    assert replace_calls == []
+    assert j.read_text() == "OLD_JSON_CONTENT"
+    assert m.read_text() == "OLD_MD_CONTENT"
