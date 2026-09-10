@@ -1,0 +1,362 @@
+format_version = "Talk2Dino-DFP-Phase1B-Conservation-Tolerance-Identity-V1"
+
+# ---------------------------------------------------------------------
+# E19: an ADDITIVE SUCCESSOR to E16. E16 froze the deterministic
+# 200-window conservation-CALIBRATION protocol and closed artifact
+# schema, and explicitly defined NO numeric conservation tolerance
+# (`e16...[residual_definitions].tolerance_defined_here = false`,
+# `e16...[measurement_versus_tolerance_boundary]
+#  .later_successor_authority_required_to_bind_verified_artifact_and_freeze_tolerance
+#  = true`). This identity is exactly that later, narrowly-scoped step
+# E16's own [future_step_bindings] deferred: it binds the completed,
+# independently-verified phase1b_conservation_calibration.json (200
+# rows, complete=true, final=true, official E16 validator PASS) by
+# content hash and freezes the single numeric conservation tolerance
+# that the already-committed E15 Stage-A/B artifact schema
+# (`e15-dfp-phase1b-artifacts` + `src/dfp_phase1b_artifact_schema.py`)
+# already expects to receive from that calibration artifact.
+#
+# This identity does not modify E16, E15, E14, E13, E17, or E18 in any
+# way -- it only relationally re-verifies their SHA-256 on every load.
+# It runs no inference, loads no model weights, initializes no CUDA,
+# accesses no COCO-Stuff image or annotation, submits no SLURM job,
+# and does NOT authorize the 500-image Phase 1B provenance diagnostic
+# or the 5,000-image evaluation. See [authorization_boundary] below --
+# those booleans are the ground truth for this identity's authority
+# boundary, checked directly by the validator, never inferred from
+# prose.
+#
+# POST-CALIBRATION, PRE-EVALUATION TOLERANCE. The tolerance below was
+# derived AFTER examining the verified calibration artifact and frozen
+# BEFORE any 500-image diagnostic or 5,000-image evaluation result
+# exists. It is a DETERMINISTIC FUNCTION of the calibration
+# observations -- the smallest exact power of two >= the reconstructed
+# maximum absolute governed calibration residual -- with no fitted
+# percentile, confidence interval, manually typed constant, decimal
+# rounding, or evaluation-derived input. The tolerance module
+# recomputes it from the 200 raw calibration rows on every load and
+# refuses to trust the recorded value without that recomputation.
+# ---------------------------------------------------------------------
+
+[identity]
+name = "e19-dfp-phase1b-conservation-tolerance"
+schema_name = "talk2dino-dfp-phase1b-conservation-tolerance-identity-v1"
+schema_version = 1
+status = "frozen_additive_successor_authority"
+purpose = "Binds the completed and independently-verified 200-window phase1b_conservation_calibration.json by content hash and freezes the single numeric conservation tolerance for DFP Phase 1B, derived deterministically as the smallest exact power of two greater than or equal to the reconstructed maximum absolute governed (rho_g) calibration residual. Implements no runner, runs no inference, defines no accuracy metric, and authorizes no 500-image diagnostic, full Phase 1B, or 5,000-image execution."
+successor_of = "e16-dfp-phase1b-conservation-calibration"
+successor_relation = "additive_only: binds but never edits, reinterprets, or re-hashes any E13-E18 file or the verified calibration artifact; consumes the calibration artifact as a read-only input and freezes exactly the one scalar tolerance that e15-dfp-phase1b-artifacts already sources from it"
+does_not_modify_e16 = true
+required_ancestor_commit = "ae1c7d2daed2a8d77fb2f1fbb013501d5c722a28"
+required_ancestor_relation = "required_ancestor_commit must be an ancestor of (or equal to) the executing repository_commit -- verified via 'git merge-base --is-ancestor <required_ancestor_commit> <repository_commit>', exactly like E17/E18's own convention. Every repository-file SHA-256 bound below is valid only for a worktree at or descended from this commit."
+working_branch = "dfp-phase1a-diagnostics"
+
+# ---------------------------------------------------------------------
+# Scope / operational flags (mirrors e18's [operational_scope] shape).
+# ---------------------------------------------------------------------
+
+[operational_scope]
+purpose = "post_calibration_numeric_conservation_tolerance_freeze"
+scientific_accuracy_metric = false
+method_selection_criterion = false
+preregistered_hypothesis_test = false
+post_calibration = true
+pre_evaluation = true
+calibration_data_only = true
+numeric_tolerance_defined = true
+tolerance_derived_from_5000_image_evaluation = false
+real_inference_executed_by_task6a = false
+gpu_execution_performed_by_task6a = false
+full_phase1b_execution_authorized = false
+phase1b_500_image_diagnostic_authorized = false
+phase1b_5000_image_evaluation_authorized = false
+lightweight_method_selected = false
+
+# ---------------------------------------------------------------------
+# Dependency bindings: exact repository-relative path + SHA-256 for
+# every file whose bytes this tolerance freeze depends on, plus the
+# calibration artifact bound by content hash only (it lives under
+# /scratch, never inside the repository). No private absolute cluster
+# path or username appears anywhere in this file.
+# ---------------------------------------------------------------------
+
+[dependency_bindings.e16_calibration_identity]
+relative_path = "evaluation_identities/e16_dfp_phase1b_conservation_calibration.toml"
+sha256 = "01add2460ad032055db2bd73dcc4e3f40b1b7e3dede07d25afbea4f268ecb679"
+untouched_by_this_identity = true
+
+[dependency_bindings.e15_protocol]
+relative_path = "evaluation_identities/e15_dfp_phase1b_protocol.toml"
+sha256 = "98ba30d5268e3548892f80aeff6bdd7719ae9cc663243776746681091f5962fc"
+untouched_by_this_identity = true
+
+[dependency_bindings.e15_artifacts]
+relative_path = "evaluation_identities/e15_dfp_phase1b_artifacts.toml"
+sha256 = "ea271b5ca85fc58d8d5b82ba27b7dcb6a24c84adf9e03b5abb6735a66ce3a2a4"
+untouched_by_this_identity = true
+
+[dependency_bindings.calibration_identity_module]
+relative_path = "src/dfp_phase1b_calibration_identity.py"
+sha256 = "1a9e26df40a9b10fd12279567bba94e8744d991614c261c31716eed9be841bd2"
+untouched_by_this_identity = true
+
+[dependency_bindings.calibration_artifact_validator_module]
+relative_path = "src/dfp_phase1b_calibration_artifact.py"
+sha256 = "76d63afb03500138dc4afb176634b7992aea293ea5899b11cabdceae518ec413"
+untouched_by_this_identity = true
+
+[dependency_bindings.calibration_cli_module]
+relative_path = "diagnostics/run_dfp_phase1b_calibration.py"
+sha256 = "f4334d1178295136b2b9c4c01b599110d593b4494ebf5e6c94662dcc5b3fab43"
+untouched_by_this_identity = true
+
+[dependency_bindings.masked_forward_core]
+relative_path = "src/dfp_phase1b_masked_forward.py"
+sha256 = "72f9b7093379cdbde14691e0dcc97c54eb2563d8bc8690da027409d6c81b56b3"
+untouched_by_this_identity = true
+
+[dependency_bindings.phase1b_artifact_schema_module]
+relative_path = "src/dfp_phase1b_artifact_schema.py"
+sha256 = "c77b321e08e2cdb5bae5f5f48b403fc6ec837a85733ccb43ab4e3a48cc3def68"
+untouched_by_this_identity = "N/A -- the already-committed E15 Stage-A schema module whose validate_stage_a_flat_arrays(conservation_tolerance: float) consumes exactly the scalar this identity freezes; hashed so the freeze is provably matched to that consumer's committed contract"
+
+[dependency_bindings.tolerance_module]
+relative_path = "src/dfp_phase1b_conservation_tolerance.py"
+sha256 = "05cc1082bab642478d158d3509d6ced58339ada0bd10a8ec6f7f12105980654b"
+untouched_by_this_identity = "N/A -- this IS this identity's own loader/validator; hashed here so a tolerance-consuming artifact can bind the exact executed code"
+self_reference_note = "This TOML records that module's hash; that module does not record this TOML's own hash anywhere -- no circularity."
+
+[dependency_bindings.tolerance_cli_module]
+relative_path = "diagnostics/run_dfp_phase1b_conservation_tolerance.py"
+sha256 = "d6f230c1836b81da125d5006ecaeed8ff30ec1ebc3212a1c49ceaa24d4b865a9"
+untouched_by_this_identity = "N/A -- this identity's own CPU-only verification CLI entry point"
+
+[dependency_bindings.calibration_artifact]
+logical_identifier = "phase1b_conservation_calibration.json"
+relative_path_is_symbolic_not_repository_relative = true
+relative_path_note = "the completed calibration artifact lives under the scratch calibration output tree, never inside this repository -- see [calibration_source_binding] for its logical scope; bound here by content hash only"
+sha256 = "f065b143933cf7881e5a31dd663783719a684e6d430e9e7b2bb314ed7e792d22"
+untouched_by_this_identity = true
+
+# ---------------------------------------------------------------------
+# Calibration source binding: identifies exactly which completed,
+# independently-verified calibration run this tolerance is derived
+# from. Device/GPU/precision fields are PROVENANCE only -- they do not
+# add any new execution requirement.
+# ---------------------------------------------------------------------
+
+[calibration_source_binding]
+calibration_artifact_logical_identifier = "phase1b_conservation_calibration.json"
+calibration_artifact_sha256 = "f065b143933cf7881e5a31dd663783719a684e6d430e9e7b2bb314ed7e792d22"
+e16_identity_relative_path = "evaluation_identities/e16_dfp_phase1b_conservation_calibration.toml"
+e16_identity_sha256 = "01add2460ad032055db2bd73dcc4e3f40b1b7e3dede07d25afbea4f268ecb679"
+e16_artifact_schema_name = "talk2dino-dfp-phase1b-conservation-calibration-v1"
+e16_artifact_schema_version = 1
+window_selection_namespace = "talk2dino-dfp-phase1b-calibration-window-selection-v1"
+selected_windows_digest = "f7b31944cd438a987ff2f7e8d0dfb4e01edb85be4b8af1c77fe05f3a69a53974"
+selected_ids_digest = "38c61b8f830475944ae94e3dba88ea62905159a46f30cfd2a951bee67540e770"
+calibration_row_count = 200
+calibration_run_mode = "coco_stuff_500"
+calibration_device_type = "cuda"
+calibration_gpu_model_name = "NVIDIA H100 80GB HBM3"
+propagation_precision_masked_recurrence_dtype = "float64"
+propagation_precision_residual_accumulation_dtype = "float64"
+recurrence_k = 12
+recurrence_step_count = 320
+recurrence_alpha = 0.98
+recorded_component_chunk_size = 16
+source_calibration_repository_commit = "ef738016f7c2d0b7d37cd85cb675854c18a8135c"
+
+# ---------------------------------------------------------------------
+# Governed residual family: exactly one. The already-committed E15
+# Stage-A schema (`e15-dfp-phase1b-artifacts`
+#  .stage_a_schema ... conservation_residual = "float64",
+#  relational rule "sum_component_evidence ~= margin_change (within the
+#  separately bound calibration tolerance ...)") and its committed
+# Python mirror `src/dfp_phase1b_artifact_schema.py
+#  ::validate_stage_a_flat_arrays(*, conservation_tolerance: float)`
+# accept exactly ONE scalar tolerance and compare it against
+# |sum_component_evidence - margin_change| -- i.e. the rho_g residual,
+# which e16-dfp-phase1b-conservation-calibration
+#  .[residual_definitions].primary_measurement names as the primary
+# measurement. rho_M / rho_0 / rho_320 are RECORDED calibration
+# diagnostics; no committed authority binds a tolerance to them, so
+# they are NOT governed here. This structure is read directly from
+# committed authority, never chosen for convenience.
+# ---------------------------------------------------------------------
+
+[governed_residual]
+tolerance_structure = "single_scalar"
+tolerance_structure_source = "e15-dfp-phase1b-artifacts stage_a_schema (conservation_residual = float64; single 'the separately bound calibration tolerance') and its committed mirror src/dfp_phase1b_artifact_schema.py::validate_stage_a_flat_arrays(*, conservation_tolerance: float), which compares exactly |sum_component_evidence - margin_change| (the rho_g residual) against one scalar"
+governed_family = "rho_g"
+governed_family_source = "e16-dfp-phase1b-conservation-calibration.[residual_definitions].primary_measurement = 'rho_g'; the only calibration family any committed conservation-acceptance relation references"
+governed_family_formula = "rho_g^(w)(x) = sum_r g^(w)_{x,r} - delta_m^(w)(x)  (signed component-contribution sum minus the canonical T320-minus-T0 b(x)-a(x) margin change, after the identical final-resolution operator A_final,w)"
+governed_family_units = "final-resolution class-score margin units (same units as margin_change = m320 - m0); real-valued, dimensionless model-score scale; no physical unit"
+governed_family_domain = "final-resolution disputed pixels of the selected window's own final-resolution support where a(x) != b(x)"
+recorded_but_ungoverned_families = ["rho_M", "rho_0", "rho_320"]
+recorded_but_ungoverned_note = "rho_M (membership partition), rho_0 (seed reconstruction), rho_320 (propagated reconstruction) are recorded per E16 so the calibration run itself is independently auditable; no committed authority applies a numeric tolerance to them and this identity freezes none"
+
+# ---------------------------------------------------------------------
+# Derivation inputs: the exact per-family statistics reconstructed
+# from the 200 calibration rows' lowest-level persisted maxima
+# (per-window maximum_absolute_residual), independently re-max'd, and
+# cross-checked against the artifact's aggregate_residual_summaries.
+# The tolerance module rebuilds every one of these on load and
+# rejects any disagreement between row-level reconstruction,
+# aggregate statistics, and the values frozen here.
+# ---------------------------------------------------------------------
+
+[derivation_inputs]
+residual_family_names_in_canonical_order = ["rho_M", "rho_0", "rho_320", "rho_g"]
+reconstruction_source = "max over the 200 selected_window_records of record[family].maximum_absolute_residual; independently re-max'd, never read from aggregate_residual_summaries and trusted"
+row_count_used = 200
+
+[derivation_inputs.rho_M]
+sample_count = 204800
+non_finite_count = 0
+reconstructed_maximum_absolute_residual = 7.771561172376096e-15
+governed = false
+
+[derivation_inputs.rho_0]
+sample_count = 4221952
+non_finite_count = 0
+reconstructed_maximum_absolute_residual = 3.4416913763379853e-15
+governed = false
+
+[derivation_inputs.rho_320]
+sample_count = 4221952
+non_finite_count = 0
+reconstructed_maximum_absolute_residual = 1.3007687971189341e-06
+governed = false
+
+[derivation_inputs.rho_g]
+sample_count = 7887805
+non_finite_count = 0
+reconstructed_maximum_absolute_residual = 5.889683609150431e-07
+governed = true
+
+[derivation_inputs.governed_maximum]
+family = "rho_g"
+observed_maximum_absolute_residual = 5.889683609150431e-07
+observed_maximum_is_exact_power_of_two = false
+selected_binary_exponent = -20
+selected_binary_exponent_definition = "e = frexp(M)[1] when frexp(M)[0] != 0.5 (M not an exact power of two); the frozen tolerance is ldexp(1.0, e) = 2**e"
+previous_power_of_two = 4.76837158203125e-07
+previous_power_of_two_strictly_below_observed_maximum = true
+
+# ---------------------------------------------------------------------
+# Rule: unambiguous machine-readable executable semantics. Prose is
+# secondary; the tolerance module executes exactly this.
+# ---------------------------------------------------------------------
+
+[rule]
+name = "smallest_exact_power_of_two_ge_observed_maximum_absolute_governed_residual"
+aggregation_source = "verified_200_window_calibration_artifact_row_level_maxima_only"
+absolute_value_operation = "abs"
+maximum_operation = "max_over_all_200_rows_of_per_window_maximum_absolute_residual_for_the_governed_family"
+binary_power_of_two_ceiling = "tolerance = 2 ** ceil(log2(M)) for finite M > 0, computed exactly via math.frexp / math.ldexp with no floating-point boundary ambiguity"
+exact_power_of_two_input_behavior = "if M is already an exact power of two, tolerance = M (no doubling)"
+zero_input_behavior = "if M == 0, tolerance = 0"
+comparison_operator = "<="
+comparison_semantics = "conservation is accepted for a pixel when absolute_residual <= tolerance; inclusive; strictly identical to src/dfp_phase1b_artifact_schema.py which fails only when residual > tolerance"
+scope = "single scalar governing the rho_g conservation residual only"
+manually_selected_multiplier_used = false
+percentile_used = false
+confidence_interval_used = false
+fitted_distribution_used = false
+decimal_rounding_used = false
+manually_typed_constant_used = false
+evaluation_result_input_used = false
+
+# ---------------------------------------------------------------------
+# The frozen tolerance. Recomputed from [derivation_inputs] and
+# [rule] on every load; never trusted as a bare input.
+# ---------------------------------------------------------------------
+
+[tolerance]
+conservation_tolerance = 9.5367431640625e-07
+conservation_tolerance_is_power_of_two = true
+conservation_tolerance_binary_exponent = -20
+conservation_tolerance_equals_two_pow_exponent = true
+governed_family = "rho_g"
+comparison_operator = "<="
+acceptance_relation = "absolute_residual <= conservation_tolerance"
+observed_maximum_absolute_residual = 5.889683609150431e-07
+observed_maximum_le_tolerance = true
+tolerance_over_observed_maximum_ratio_lt_two = true
+source_calibration_artifact_sha256 = "f065b143933cf7881e5a31dd663783719a684e6d430e9e7b2bb314ed7e792d22"
+label_post_calibration = "POST-CALIBRATION"
+label_pre_evaluation = "PRE-EVALUATION"
+
+# ---------------------------------------------------------------------
+# Authorization boundary: the ground truth. A verifier checks these
+# booleans directly, never infers them from prose.
+# ---------------------------------------------------------------------
+
+[authorization_boundary]
+post_calibration = true
+pre_evaluation = true
+calibration_data_only = true
+numeric_tolerance_defined = true
+tolerance_derived_from_5000_image_evaluation = false
+real_inference_executed_by_task6a = false
+gpu_execution_performed_by_task6a = false
+full_phase1b_execution_authorized = false
+phase1b_500_image_diagnostic_authorized = false
+phase1b_5000_image_evaluation_authorized = false
+lightweight_method_selected = false
+
+# ---------------------------------------------------------------------
+# Disclosure: mandatory plain-language limitations, checked for
+# presence (exact booleans) by the closed-schema validator.
+# ---------------------------------------------------------------------
+
+[disclosure]
+is_numeric_conservation_threshold_not_accuracy_metric = true
+tolerance_selected_after_examining_calibration_artifact = true
+tolerance_frozen_before_500_image_diagnostic_and_before_5000_image_evaluation = true
+tolerance_is_deterministic_function_of_calibration_observations_only = true
+tolerance_never_smaller_than_largest_observed_governed_calibration_residual = true
+tolerance_envelope_below_factor_of_two_unless_maximum_is_exact_power_of_two = true
+no_fitted_percentile_confidence_interval_or_manual_safety_factor = true
+no_evaluation_derived_information_used = true
+passing_conservation_does_not_imply_good_miou = true
+passing_conservation_does_not_imply_good_boundary_iou = true
+passing_conservation_does_not_imply_good_provenance_quality_or_deployability = true
+task6a_performs_no_inference = true
+full_phase1b_and_5000_image_execution_remain_unauthorized = true
+future_evaluation_results_must_never_revise_this_tolerance_without_a_separately_disclosed_successor_protocol = true
+
+# ---------------------------------------------------------------------
+# Prohibited (mirrors e13/e15/e16/e17/e18's own [prohibited]).
+# ---------------------------------------------------------------------
+
+[prohibited]
+list = [
+    "modifying_e13_e14_e15_e16_e17_or_e18_identities",
+    "modifying_or_regenerating_the_verified_calibration_artifact",
+    "modifying_masked_forward_recurrence_graph_stitching_pullback_or_component_code",
+    "modifying_task3_benchmark_results_or_task4_selection_artifacts",
+    "modifying_any_phase1a_result_or_dataset_manifest",
+    "deriving_the_tolerance_from_a_percentile_fitted_distribution_or_manual_multiplier",
+    "deriving_the_tolerance_from_any_data_outside_the_verified_200_window_artifact",
+    "deriving_or_revising_the_tolerance_from_500_image_or_5000_image_evaluation_results",
+    "decimal_rounding_or_a_manually_typed_tolerance_constant",
+    "trusting_the_recorded_tolerance_without_recomputation_from_the_200_rows",
+    "real_inference_model_or_dataset_access_in_this_task",
+    "cuda_initialization_in_this_task",
+    "slurm_submission_in_this_task",
+    "authorizing_the_500_image_phase1b_diagnostic",
+    "authorizing_full_phase1b_execution_or_the_5000_image_evaluation",
+    "selecting_a_lightweight_method",
+]
+
+[future_step_bindings]
+description = "Fields explicitly deferred to a later task, never guessed or invented here."
+next_step_items = [
+    "independently re-verify this E19 identity and its tolerance module against the committed HEAD",
+    "the 500-image Phase 1B provenance diagnostic (a separate, later, separately-authorized step -- never this identity)",
+    "the Phase 1B execution driver, authorized only after this identity is committed and independently verified",
+    "the 5,000-image Phase 1B evaluation (never this identity)",
+    "a separately disclosed successor protocol if a future evaluation result ever motivates revisiting this tolerance",
+]
