@@ -1,0 +1,259 @@
+format_version = "Talk2Dino-DFP-Phase1B-Provenance-Features-Identity-V1"
+
+# ---------------------------------------------------------------------
+# DFP Phase 1B -- additive successor authority.
+#
+# Freezes the SCIENTIFIC KERNEL that computes the eight E15 Stage-A
+# component-evidence provenance features
+# (n_positive_components, positive_evidence_sum, negative_evidence_sum,
+# top_positive_component_id, top_positive_evidence, top1_positive_share,
+# k_star, phi) from the already-frozen, already-committed signed
+# component-evidence matrix G[x,r] produced by the exact masked-forward
+# provenance core. This identity implements no execution driver, no
+# runner, no profiler, no checkpoint/result writer, no CLI execution
+# command, and no SLURM launcher; it runs no real inference, accesses
+# no COCO-Stuff images or annotations, initializes no CUDA context
+# merely on load, and submits no job.
+#
+# It never redefines a scientific quantity already frozen by
+# e15-dfp-phase1b-protocol / e15-dfp-phase1b-artifacts / the exact
+# masked-forward core; it binds those schemas by hash, reuses their
+# formulas verbatim (never re-derives, re-selects, or re-interprets
+# them), and adds only the numerical kernel that was previously frozen
+# as TEXT-ONLY authority with no corresponding implementation.
+# ---------------------------------------------------------------------
+
+[identity]
+name = "e21-dfp-phase1b-provenance-features"
+schema_name = "talk2dino-dfp-phase1b-provenance-features-identity-v1"
+schema_version = 1
+status = "frozen_additive_successor_authority"
+purpose = "Freezes the numerical kernel that computes the eight E15 Stage-A component-evidence provenance features (n_positive_components, positive_evidence_sum, negative_evidence_sum, top_positive_component_id, top_positive_evidence, top1_positive_share, k_star, phi) from the signed component-evidence matrix G[x,r], exactly per e15-dfp-phase1b-protocol's [provenance_features.component_evidence] formulas. Repairs the gap in which these eight fields were frozen only as TEXT authority with no implementation, blocking the profiled 500-image diagnostic runner. Implements no execution driver, runner, profiler, checkpoint/result writer, CLI execution command, or SLURM launcher. Authorizes no inference, no GPU job, and no 500-image or 5000-image execution."
+successor_of = "e20-dfp-phase1b-diagnostic-execution"
+successor_relation = "additive_only: binds but never edits, reinterprets, or re-hashes any E13-E20 file, the verified calibration artifact, the installed Task 4 selection artifact, or the exact masked-forward core; adds exactly one new scientific-kernel module implementing formulas already frozen verbatim by e15-dfp-phase1b-protocol, plus the loader/CLI/test scaffolding a new authority requires under this repository's convention"
+does_not_modify_e13_through_e20 = true
+required_ancestor_commit = "38df8087abd3e0fbc163523c471c2cdd01e7d96c"
+required_ancestor_relation = "required_ancestor_commit must be an ancestor of (or equal to) the executing repository_commit -- verified via 'git merge-base --is-ancestor <required_ancestor_commit> <repository_commit>', exactly like E17/E18/E19/E20's own convention. Every repository-file SHA-256 bound below is valid only for a worktree at or descended from this commit."
+working_branch = "dfp-phase1a-diagnostics"
+
+# ---------------------------------------------------------------------
+# Scope / operational flags.
+# ---------------------------------------------------------------------
+
+[operational_scope]
+purpose = "stage_a_component_evidence_provenance_feature_kernel_freeze"
+scientific_kernel_only = true
+runner_implemented_by_this_task = false
+profiler_implemented_by_this_task = false
+checkpoint_writer_implemented_by_this_task = false
+result_writer_implemented_by_this_task = false
+cli_execution_command_implemented_by_this_task = false
+slurm_launcher_implemented_by_this_task = false
+real_inference_executed = false
+gpu_execution_performed = false
+coco_stuff_dataset_accessed = false
+cuda_initialized_by_this_identity_on_load = false
+phase1b_500_image_execution_authorized = false
+phase1b_5000_image_exact_provenance_authorized = false
+new_scientific_convention_invented_by_this_task = false
+
+# ---------------------------------------------------------------------
+# Dependency bindings: exact repository-relative path + SHA-256 for
+# every file this identity relationally re-verifies on every load.
+# ---------------------------------------------------------------------
+
+[dependency_bindings.e15_protocol]
+relative_path = "evaluation_identities/e15_dfp_phase1b_protocol.toml"
+sha256 = "98ba30d5268e3548892f80aeff6bdd7719ae9cc663243776746681091f5962fc"
+untouched_by_this_identity = true
+
+[dependency_bindings.e15_artifacts]
+relative_path = "evaluation_identities/e15_dfp_phase1b_artifacts.toml"
+sha256 = "ea271b5ca85fc58d8d5b82ba27b7dcb6a24c84adf9e03b5abb6735a66ce3a2a4"
+untouched_by_this_identity = true
+
+[dependency_bindings.e20_diagnostic_execution_identity]
+relative_path = "evaluation_identities/e20_dfp_phase1b_diagnostic_execution.toml"
+sha256 = "f647bf6bf8230b249d63e8f3b83ab7a4b88abd5aa93aa7babb6673201100dff7"
+untouched_by_this_identity = true
+
+[dependency_bindings.diagnostic_execution_module]
+relative_path = "src/dfp_phase1b_diagnostic_execution.py"
+sha256 = "d39d375957fc8323733c26344a939dd57a85e715094da3f70f2ec9158bf4f57b"
+untouched_by_this_identity = true
+
+[dependency_bindings.masked_forward_core]
+relative_path = "src/dfp_phase1b_masked_forward.py"
+sha256 = "72f9b7093379cdbde14691e0dcc97c54eb2563d8bc8690da027409d6c81b56b3"
+untouched_by_this_identity = true
+
+[dependency_bindings.phase1b_artifact_schema_module]
+relative_path = "src/dfp_phase1b_artifact_schema.py"
+sha256 = "c77b321e08e2cdb5bae5f5f48b403fc6ec837a85733ccb43ab4e3a48cc3def68"
+untouched_by_this_identity = "N/A -- this IS the Stage-A schema/relational validator this kernel's outputs must satisfy; bound here by hash so a downstream consumer can verify the exact validator this kernel's output was designed against, never modified by this identity"
+
+[dependency_bindings.provenance_features_module]
+relative_path = "src/dfp_phase1b_provenance_features.py"
+sha256 = "ace237fe454834a7a0999f16aaf23f01554759d6630a8abb01418800f3becd24"
+untouched_by_this_identity = "N/A -- this IS the new scientific kernel this identity freezes"
+
+[dependency_bindings.provenance_features_identity_module]
+relative_path = "src/dfp_phase1b_provenance_features_identity.py"
+sha256 = "e88507e4034c3965fafe429af5bfc412ed63be50ae17a76eeaba67b51d141070"
+untouched_by_this_identity = "N/A -- this IS this identity's own loader/validator; hashed here so a contract-consuming document can bind the exact executed code"
+self_reference_note = "This TOML records that module's hash; that module does not record this TOML's own hash anywhere -- no circularity."
+
+[dependency_bindings.provenance_features_cli_module]
+relative_path = "diagnostics/run_dfp_phase1b_provenance_features.py"
+sha256 = "ffb39bef8408ae26505f76bc93d0f68334d39689b0546f2407d1afcc1ec13177"
+untouched_by_this_identity = "N/A -- this identity's own CPU-only verification CLI entry point"
+
+# ---------------------------------------------------------------------
+# Kernel binding: the exact public API this identity freezes, and the
+# E15 formulas it reuses verbatim (never re-derived, re-selected, or
+# reinterpreted here -- restated only for cross-reference).
+# ---------------------------------------------------------------------
+
+[kernel_binding]
+module = "src.dfp_phase1b_provenance_features"
+result_type = "ComponentEvidenceFeatures"
+function = "compute_component_evidence_features"
+function_signature = "compute_component_evidence_features(G: torch.Tensor, m320: torch.Tensor, *, component_ids: torch.Tensor) -> ComponentEvidenceFeatures"
+g_input_name = "G"
+g_input_definition = "the already-computed signed component-evidence matrix G[x,r], per e15 [component_evidence_decomposition].signed_component_evidence_formula; this kernel never computes G itself"
+m320_input_name = "m320"
+m320_input_definition = "the per-disputed-pixel propagated margin m320(x), per e15 [margins].m320_definition; e15 [provenance_features.margins_and_controls].propagated_margin_formula aliases propagated_margin = m320 -- this kernel uses the literal m320 name used by the k_star formula itself"
+component_ids_input_name = "component_ids"
+component_ids_input_definition = "the canonical, deterministic component identity for each column of G, independent of column position, per e15 [component_construction].ordering"
+output_fields = [
+    "k_star", "phi", "top1_positive_share", "positive_evidence_sum", "negative_evidence_sum",
+    "n_positive_components", "top_positive_component_id", "top_positive_evidence",
+]
+reused_e15_formulas_verbatim = [
+    "g_plus_definition", "sort_order", "positive_evidence_sum_formula", "negative_evidence_sum_formula",
+    "k_star_definition", "phi_formula", "top1_positive_share_formula",
+]
+formulas_re_derived_by_this_kernel = false
+formulas_re_selected_by_this_kernel = false
+accumulation_dtype = "float64"
+accumulation_dtype_source = "e15 [component_evidence_decomposition].component_sum_accumulation_dtype = 'fp64'"
+tolerance_or_epsilon_used_in_feature_construction = false
+tolerance_or_epsilon_forbidden_source = "e15 [provenance_features.component_evidence].phi_epsilon_forbidden = true; k_star crossing condition uses exact '<=' with no epsilon"
+gpu_or_cpu = "operates on whatever device the caller's input tensors are on; never silently transfers a CUDA tensor to CPU, never initializes CUDA merely to run"
+input_mutation = "never mutates G, m320, or component_ids; every returned tensor is a freshly allocated buffer, never a view into an input tensor"
+
+# ---------------------------------------------------------------------
+# Kernel interface schema: exact input/output tensor shape/dtype
+# contract, restated here for a downstream consumer that binds this
+# identity without reading the kernel module's own docstring.
+# ---------------------------------------------------------------------
+
+[kernel_interface_schema]
+g_shape = "[disputed_pixel_count, component_count]"
+g_dtype = "float64"
+m320_shape = "[disputed_pixel_count]"
+m320_dtype = "float64"
+component_ids_shape = "[component_count]"
+component_ids_dtype = "int64"
+k_star_dtype = "int64"
+phi_dtype = "float64"
+top1_positive_share_dtype = "float64"
+positive_evidence_sum_dtype = "float64"
+negative_evidence_sum_dtype = "float64"
+n_positive_components_dtype = "int64"
+top_positive_component_id_dtype = "int64"
+top_positive_evidence_dtype = "float64"
+output_dtype_source = "src/dfp_phase1b_artifact_schema.py [stage_a_schema.flat_disputed_pixel_members] dtype declarations, already committed and unmodified by this identity"
+zero_disputed_pixel_rows_behavior = "returns zero-length tensors for every field; a legitimate degenerate case, never fabricated"
+non_finite_input_behavior = "reject the whole call (DfpPhase1bProvenanceFeaturesError), never a per-row silent skip"
+duplicate_component_id_behavior = "reject the whole call"
+device_mismatch_behavior = "reject the whole call; never silently move a tensor to another device"
+
+# ---------------------------------------------------------------------
+# Domain invariants this kernel relies on: each a NECESSARY MATHEMATICAL
+# CONSEQUENCE of already-frozen E15 authority (never a new convention
+# invented by this identity), listed here for auditability. When
+# observed violated at runtime, the kernel fails closed rather than
+# inventing a fallback value -- generalizing e15's own
+# k_star_non_finite_case_behavior ("reject an invalid non-finite case
+# rather than inventing infinity") to every domain-invariant violation
+# this kernel can detect.
+# ---------------------------------------------------------------------
+
+[domain_invariants]
+m320_strictly_positive = "m320(x) > 0 for every valid disputed pixel; e15 [margins].m320_definition"
+m0_non_positive = "m0(x) <= 0 for every valid disputed pixel; e15 [margins].m0_definition"
+delta_m_strictly_positive = "delta_m(x) = m320(x) - m0(x) > 0; e15 [margins].delta_m_definition"
+conservation_identity = "sum_r G[x,r] = delta_m(x); e15 [component_evidence_decomposition].conservation_identity"
+positive_evidence_sum_at_least_delta_m = "positive_evidence_sum = delta_m(x) - negative_evidence_sum >= delta_m(x) >= m320(x), because negative_evidence_sum <= 0 and m0(x) <= 0 -- derived, not independently frozen"
+positive_evidence_sum_strictly_positive = "positive_evidence_sum > 0 for every valid disputed pixel; also directly required by src/dfp_phase1b_artifact_schema.py [stage_a_schema.relational_validation]"
+n_positive_components_at_least_one = "n_positive_components >= 1 for every valid disputed pixel; implied by positive_evidence_sum > 0"
+k_star_always_exists_in_range = "a k in [1, n_positive_components] satisfying the k_star crossing condition always exists for a valid disputed pixel, because positive_evidence_sum >= m320(x); k_star is therefore always finite and >= 1, matching e15 k_star_always_finite_for_valid_disputed_pixel = true"
+violation_behavior = "reject with DfpPhase1bProvenanceFeaturesError; never invent a fallback k_star, phi, or share value for a pixel that violates one of the invariants above"
+
+# ---------------------------------------------------------------------
+# Authorization boundary.
+# ---------------------------------------------------------------------
+
+[authorization_boundary]
+authority_and_kernel_only_task = true
+scientific_kernel_only = true
+runner_implemented_by_this_task = false
+profiler_implemented_by_this_task = false
+checkpoint_writer_implemented_by_this_task = false
+result_writer_implemented_by_this_task = false
+cli_execution_command_implemented_by_this_task = false
+slurm_launcher_implemented_by_this_task = false
+real_inference_executed = false
+gpu_execution_performed = false
+coco_stuff_dataset_accessed = false
+phase1b_500_image_execution_authorized = false
+phase1b_5000_image_exact_provenance_authorized = false
+
+# ---------------------------------------------------------------------
+# Disclosure.
+# ---------------------------------------------------------------------
+
+[disclosure]
+this_identity_repairs_a_missing_implementation_gap = true
+the_eight_stage_a_fields_were_previously_text_only_authority = true
+no_new_scientific_formula_invented = true
+no_e15_decision_re_derived_or_re_selected = true
+kernel_does_not_compute_g_or_m320_itself = true
+kernel_does_not_run_masked_propagation = true
+kernel_does_not_access_coco_stuff_images_or_annotations = true
+kernel_does_not_initialize_cuda_on_import = true
+this_task_does_not_resume_runner_implementation = true
+runner_implementation_requires_separate_explicit_authorization = true
+500_image_execution_requires_separate_explicit_authorization = true
+5000_image_exact_provenance_requires_separate_explicit_authorization = true
+
+# ---------------------------------------------------------------------
+# Prohibited.
+# ---------------------------------------------------------------------
+
+[prohibited]
+list = [
+    "modifying_e13_through_e20_identities",
+    "modifying_the_verified_calibration_artifact_or_installed_task4_selection_artifact",
+    "modifying_masked_forward_recurrence_graph_stitching_pullback_or_component_code",
+    "redefining_g_plus_sort_order_positive_evidence_sum_negative_evidence_sum_k_star_or_phi_formulas",
+    "inventing_a_missing_e15_decision_via_this_successor_authority",
+    "implementing_a_runner_profiler_checkpoint_writer_result_writer_or_cli_execution_command",
+    "implementing_a_slurm_launcher",
+    "running_real_inference_or_initializing_cuda",
+    "accessing_coco_stuff_images_or_annotations",
+    "authorizing_the_500_image_diagnostic_execution",
+    "authorizing_exact_masked_forward_provenance_on_the_5000_image_validation_set",
+    "adding_a_concentration_diagnostic_not_authorized_by_e15 (gini_entropy_or_similar)",
+    "creating_a_circular_hash_dependency",
+]
+
+[future_step_bindings]
+description = "Fields explicitly deferred to a later task, never guessed or invented here."
+next_step_items = [
+    "independently re-verify this E21 identity, kernel, and its loader/CLI module against the committed HEAD",
+    "resume implementation of the profiled, resumable 500-image diagnostic runner bound by E20, now unblocked by this kernel",
+    "explicitly authorize the 500-image diagnostic execution itself -- never this identity",
+    "the 5,000-image exact masked-forward provenance question -- never this identity",
+]
