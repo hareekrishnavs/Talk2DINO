@@ -1,0 +1,704 @@
+format_version = "Talk2Dino-DFP-Phase1B-Diagnostic-Execution-Identity-V1"
+
+# ---------------------------------------------------------------------
+# DFP Phase 1B Task 6B -- additive successor authority.
+#
+# Freezes the execution, checkpoint, profiling, and final-result CONTRACT
+# for one future offline mechanistic/provenance diagnostic run over the
+# already-frozen 500-image COCO-Stuff subset (1,090 canonical sliding
+# windows), reusing the exact masked-forward provenance core unmodified.
+#
+# This identity implements no execution driver, no profiler, no
+# checkpoint writer, no result writer, no CLI execution command, and no
+# SLURM launcher. It runs no inference and submits no GPU job. It does
+# not authorize the future 500-image run -- only its contract.
+#
+# It never redefines a scientific quantity already frozen by
+# e15-dfp-phase1b-protocol / e15-dfp-phase1b-artifacts / the exact
+# masked-forward core; it binds those schemas by hash and adds only
+# population-specific values (already fixed by e15/e16/e18/e19) and new
+# operational (non-scientific) profiling/checkpoint-progress fields.
+# ---------------------------------------------------------------------
+
+[identity]
+name = "e20-dfp-phase1b-diagnostic-execution"
+schema_name = "talk2dino-dfp-phase1b-diagnostic-execution-identity-v1"
+schema_version = 1
+status = "frozen_additive_successor_authority"
+purpose = "Freezes the execution population (500 images / 1090 canonical windows), the exact scientific-execution binding (unmodified masked-forward provenance core), the operational profiling contract, the checkpoint/resume schema, and the final-result bundle schema for one future single-GPU offline mechanistic/provenance diagnostic run. Implements no execution driver, profiler, checkpoint writer, result writer, CLI execution command, or SLURM launcher. Authorizes no inference, no GPU job, and no exact masked-forward provenance on the full 5,000-image validation set."
+successor_of = "e19-dfp-phase1b-conservation-tolerance"
+successor_relation = "additive_only: binds but never edits, reinterprets, or re-hashes any E13-E19 file, the verified calibration artifact, or the installed Task 4 selection artifact; packages the already-frozen E15 Stage-A/Stage-B scientific schemas, E16 candidate-window-universe geometry, E18 operational chunk size, and E19 conservation tolerance into one execution/checkpoint/profiling/result contract for a not-yet-authorized future run"
+does_not_modify_e13_through_e19 = true
+required_ancestor_commit = "90bcf71671d69523bdc686fc695fdfb02b083a68"
+required_ancestor_relation = "required_ancestor_commit must be an ancestor of (or equal to) the executing repository_commit -- verified via 'git merge-base --is-ancestor <required_ancestor_commit> <repository_commit>', exactly like E17/E18/E19's own convention. Every repository-file SHA-256 bound below is valid only for a worktree at or descended from this commit."
+working_branch = "dfp-phase1a-diagnostics"
+
+# ---------------------------------------------------------------------
+# Scope / operational flags.
+# ---------------------------------------------------------------------
+
+[operational_scope]
+purpose = "post_tolerance_500_image_diagnostic_execution_contract_freeze"
+scientific_accuracy_metric = false
+authority_only_task = true
+execution_driver_implemented_by_task6b = false
+profiler_implemented_by_task6b = false
+checkpoint_writer_implemented_by_task6b = false
+result_writer_implemented_by_task6b = false
+cli_execution_command_implemented_by_task6b = false
+slurm_launcher_implemented_by_task6b = false
+real_inference_executed_by_task6b = false
+gpu_execution_performed_by_task6b = false
+phase1b_500_image_execution_authorized = false
+phase1b_5000_image_exact_provenance_authorized = false
+full_5000_image_miou_evaluation_authorized = false
+lightweight_final_method_selected = false
+sharding_across_jobs_or_gpus_authorized = false
+
+# ---------------------------------------------------------------------
+# Dependency bindings: exact repository-relative path + SHA-256 for
+# every file this identity relationally re-verifies on every load.
+# Non-repository (scratch-hosted) artifacts are bound by content hash
+# only -- no private absolute path or username appears anywhere below.
+# ---------------------------------------------------------------------
+
+[dependency_bindings.e15_protocol]
+relative_path = "evaluation_identities/e15_dfp_phase1b_protocol.toml"
+sha256 = "98ba30d5268e3548892f80aeff6bdd7719ae9cc663243776746681091f5962fc"
+untouched_by_this_identity = true
+
+[dependency_bindings.e15_artifacts]
+relative_path = "evaluation_identities/e15_dfp_phase1b_artifacts.toml"
+sha256 = "ea271b5ca85fc58d8d5b82ba27b7dcb6a24c84adf9e03b5abb6735a66ce3a2a4"
+untouched_by_this_identity = true
+
+[dependency_bindings.e16_calibration_identity]
+relative_path = "evaluation_identities/e16_dfp_phase1b_conservation_calibration.toml"
+sha256 = "01add2460ad032055db2bd73dcc4e3f40b1b7e3dede07d25afbea4f268ecb679"
+untouched_by_this_identity = true
+
+[dependency_bindings.e17_chunk_benchmark_identity]
+relative_path = "evaluation_identities/e17_dfp_phase1b_chunk_benchmark.toml"
+sha256 = "cf022800d64b70f08f6f1421c82a278e50ce378c3fe3df0e59384e15814a1876"
+untouched_by_this_identity = true
+
+[dependency_bindings.e18_chunk_selection_identity]
+relative_path = "evaluation_identities/e18_dfp_phase1b_chunk_selection.toml"
+sha256 = "31b9d15f58593ece418b1c5522640e0ed84054d89218dc6be1ce509a55d34cb2"
+untouched_by_this_identity = true
+
+[dependency_bindings.e19_tolerance_identity]
+relative_path = "evaluation_identities/e19_dfp_phase1b_conservation_tolerance.toml"
+sha256 = "4e2d32cd683b4ee445e73eb3fc8e97a3f8fe641ee328d64ce1f6d06bf6ee88c8"
+untouched_by_this_identity = true
+
+[dependency_bindings.subset_manifest]
+relative_path = "evaluation_subsets/dfp_phase1a_coco_stuff_500.json"
+sha256 = "75373aca8ef6d434ae02a7e90b6dcc9ba13fd8a31d1e87d858a2f542c19ef482"
+untouched_by_this_identity = true
+
+[dependency_bindings.window_plan_module]
+relative_path = "src/open_vocabulary_segmentation/segmentation/evaluation/sliding_window_geometry.py"
+sha256 = "082a812907581444ed6ed87b232c82105a0071ca24cd802aceec81fa0ec3c25b"
+untouched_by_this_identity = true
+
+[dependency_bindings.graph_module]
+relative_path = "src/open_vocabulary_segmentation/models/dinotext/cover_dr/graph.py"
+sha256 = "b7d4eec053dc204db869590a5ff3763b630084a65f0abd3101190b1e77f33ac5"
+untouched_by_this_identity = true
+
+[dependency_bindings.finite_step_regime_module]
+relative_path = "src/open_vocabulary_segmentation/models/dinotext/cover_dr/finite_step_regime.py"
+sha256 = "79ce8ed0e5462131cf148a1615aa60048b4a05782de7d5279ddee45856de6108"
+untouched_by_this_identity = true
+
+[dependency_bindings.recurrence_capture_module]
+relative_path = "src/dfp_phase1a_recurrence_capture.py"
+sha256 = "9d762674cd92063e6c6620dae7664dbfd8cb06eb1bace437a3fdde701ed83bd0"
+untouched_by_this_identity = true
+
+[dependency_bindings.stitching_pullback_module]
+relative_path = "src/dfp_phase1a_stitching_pullback.py"
+sha256 = "6e15dd8b967eeaa317ab417ded2127d04f9064accf97fca6275e7cf962a1ac04"
+untouched_by_this_identity = true
+
+[dependency_bindings.final_rescale_pullback_module]
+relative_path = "src/dfp_phase1a_final_rescale_pullback.py"
+sha256 = "fe771097e0204dde1f48d236f6142ec32880743e0fb4638425938e489af14298"
+untouched_by_this_identity = true
+
+[dependency_bindings.horizon_stitching_module]
+relative_path = "src/dfp_phase1a_horizon_stitching.py"
+sha256 = "eed3d6f6619c05251403bb2ab88bc2724d443f858b8fe913cfae3a2c31c5bdb8"
+untouched_by_this_identity = true
+
+[dependency_bindings.global_unary_components_module]
+relative_path = "src/dfp_phase1a_global_unary_components.py"
+sha256 = "612403bcc5faa58be4dc54d1b941bc6989abd8e4f3214ff8c33e70926b03fb2f"
+untouched_by_this_identity = true
+
+[dependency_bindings.soft_membership_module]
+relative_path = "src/dfp_phase1a_soft_membership.py"
+sha256 = "7bef9b800aa2770166422f715456d994e67fa218347bba6bb9d5b66695d03ac9"
+untouched_by_this_identity = true
+
+[dependency_bindings.dataset_view_module]
+relative_path = "src/dfp_phase1a_dataset_view.py"
+sha256 = "2dedc0eadb34f4c8f2e5850617af3f0387ce9b97adca9ec2fef1cc16230f1b2f"
+untouched_by_this_identity = true
+
+[dependency_bindings.masked_forward_core]
+relative_path = "src/dfp_phase1b_masked_forward.py"
+sha256 = "72f9b7093379cdbde14691e0dcc97c54eb2563d8bc8690da027409d6c81b56b3"
+untouched_by_this_identity = true
+
+[dependency_bindings.phase1b_artifact_schema_module]
+relative_path = "src/dfp_phase1b_artifact_schema.py"
+sha256 = "c77b321e08e2cdb5bae5f5f48b403fc6ec837a85733ccb43ab4e3a48cc3def68"
+untouched_by_this_identity = true
+
+[dependency_bindings.calibration_artifact_validator_module]
+relative_path = "src/dfp_phase1b_calibration_artifact.py"
+sha256 = "76d63afb03500138dc4afb176634b7992aea293ea5899b11cabdceae518ec413"
+untouched_by_this_identity = true
+
+[dependency_bindings.tolerance_module]
+relative_path = "src/dfp_phase1b_conservation_tolerance.py"
+sha256 = "05cc1082bab642478d158d3509d6ced58339ada0bd10a8ec6f7f12105980654b"
+untouched_by_this_identity = true
+
+[dependency_bindings.chunk_selection_module]
+relative_path = "src/dfp_phase1b_chunk_selection.py"
+sha256 = "7132405500478ada0cfcd2a2b7dee4c8308b464cd1c2c79a4bc0debb4c09ed9e"
+untouched_by_this_identity = true
+
+[dependency_bindings.chunk_benchmark_identity_module]
+relative_path = "src/dfp_phase1b_chunk_benchmark_identity.py"
+sha256 = "50ac98a03efcdc74f85656df98efdc96656767bc71bd6e0a07cea5c7d617cfa7"
+untouched_by_this_identity = true
+
+[dependency_bindings.diagnostic_execution_module]
+relative_path = "src/dfp_phase1b_diagnostic_execution.py"
+sha256 = "d39d375957fc8323733c26344a939dd57a85e715094da3f70f2ec9158bf4f57b"
+untouched_by_this_identity = "N/A -- this IS this identity's own loader/validator; hashed here so a contract-consuming document can bind the exact executed code"
+self_reference_note = "This TOML records that module's hash; that module does not record this TOML's own hash anywhere -- no circularity."
+
+[dependency_bindings.diagnostic_execution_cli_module]
+relative_path = "diagnostics/run_dfp_phase1b_diagnostic_execution.py"
+sha256 = "e33e58e385362ad3bc721a12e5b2c4d9c18651ce134c20b1ad8ae5e59b1c8b05"
+untouched_by_this_identity = "N/A -- this identity's own CPU-only verification CLI entry point"
+
+[dependency_bindings.calibration_artifact]
+logical_identifier = "phase1b_conservation_calibration.json"
+relative_path_is_symbolic_not_repository_relative = true
+relative_path_note = "the completed calibration artifact lives under the scratch calibration output tree, never inside this repository -- bound here by content hash only, exactly as e19 already binds it"
+sha256 = "f065b143933cf7881e5a31dd663783719a684e6d430e9e7b2bb314ed7e792d22"
+untouched_by_this_identity = true
+
+[dependency_bindings.task4_selection_artifact]
+logical_identifier = "phase1b_chunk_selection.json"
+relative_path_is_symbolic_not_repository_relative = true
+relative_path_note = "the installed Task 4 selection artifact lives under the scratch chunk-benchmark output tree, never inside this repository -- bound here by content hash only"
+sha256 = "dacf48460f335c603e631c4e15e875ba439d4336a3fe9a57afca9809cf20e6b8"
+untouched_by_this_identity = true
+
+[dependency_bindings.task4_selection_report]
+logical_identifier = "phase1b_chunk_selection_report.md"
+relative_path_is_symbolic_not_repository_relative = true
+relative_path_note = "the installed Task 4 human-readable report lives under the scratch chunk-benchmark output tree, never inside this repository -- bound here by content hash only"
+sha256 = "69005bc94f41a6aee0ff4a57152d910e2cad8a570f6520a7e0b12cb6b44bc54e"
+untouched_by_this_identity = true
+
+# ---------------------------------------------------------------------
+# Population freeze: exactly which images/windows a future execution
+# must process, and how their canonical order is derived. Reconstructed
+# from already-verified authority -- never a fresh geometry computation
+# over raw images (which would require dataset access this task never
+# performs).
+# ---------------------------------------------------------------------
+
+[population]
+run_mode = "coco_stuff_500"
+image_count = 500
+window_count = 1090
+component_chunk_size = 16
+device_type = "cuda"
+gpu_count = 1
+gpu_model = "NVIDIA H100 80GB HBM3"
+maximum_job_wall_time_seconds = 28800
+sharding_across_jobs_or_gpus_forbidden = true
+single_logical_run_with_checkpoint_resume = true
+
+[population.image_universe_binding]
+source = "dependency_bindings.subset_manifest"
+image_count_field = "selected_count"
+image_count_value = 500
+canonical_image_order_source = "subset_manifest's own 'selected_ids' field, taken verbatim in its own already-frozen canonical (lexicographic fixed-width-ID) order -- identical to e16-dfp-phase1b-conservation-calibration's [candidate_scope].image_order_source -- never re-sorted, re-derived, or filtered here"
+selected_ids_digest = "38c61b8f830475944ae94e3dba88ea62905159a46f30cfd2a951bee67540e770"
+native_dataset_index_reconciliation_source = "dependency_bindings.dataset_view_module's build_native_image_index(...) / build_manifest_execution_view(...) / compute_mapping_digest(...) -- the same frozen adapter e18-dfp-phase1b-chunk-selection's own execution-context relies on for canonical_id <-> native filesystem index reconciliation; never a fresh ad hoc mapping"
+canonical_relative_paths_include_suffixes = true
+no_filesystem_order_dependence = true
+no_dict_order_dependence = true
+no_hash_seed_dependence = true
+
+[population.window_universe_binding]
+source = "dependency_bindings.calibration_artifact"
+window_count_field = "candidate_window_count"
+window_count_value = 1090
+candidate_universe_digest = "2163e2aeab0f7bf4e86cd3a33505388024d6cfb5ce7c1596c4d49691e364b390"
+reconstruction_note = "the verified calibration artifact's own [candidate_scope]-governed candidate-window construction (e16-dfp-phase1b-conservation-calibration.[candidate_scope]) already ran SlidingWindowPlan.build(...) once per image, over the SAME 500-image coco_stuff_500 subset bound above, using the frozen crop=[448,448]/stride=[224,224] geometry from e13-dfp-phase1a-protocol's [score_interpolation_stitching] -- a pure per-image-canvas-dimension geometric computation with gt_annotation_prediction_dispute_or_model_output_influence_forbidden=true (e16.[candidate_scope]). candidate_window_count=1090 is that already-computed, already-independently-verified, digest-protected total candidate population; the 200 calibration windows are a size-200 SAMPLE drawn from it. This identity binds that persisted fact by content hash rather than re-deriving it from raw images (which would require dataset access this task never performs)."
+candidate_windows_per_image_source = "identical provenance chain to e16-dfp-phase1b-conservation-calibration.[candidate_scope].candidate_windows_per_image_source -- dependency_bindings.window_plan_module's SlidingWindowPlan.build(...)"
+gt_annotation_prediction_dispute_or_model_output_influence_forbidden = true
+distinct_images_touched_by_200_calibration_windows = 175
+consistency_note = "175 distinct images (of 500) touched by 200 sampled calibration windows, and candidate_window_count=1090 spanning all 500 images, are mutually consistent (mean ~2.18 candidate windows per image); no contradiction with any other repository-recorded window count"
+independent_recomputation_from_raw_images_required = false
+independent_recomputation_from_raw_images_performed_by_this_identity = false
+
+# ---------------------------------------------------------------------
+# Scientific execution binding: reuses the exact masked-forward
+# provenance core UNMODIFIED. No scientific quantity, formula, sign
+# convention, dtype, or tolerance is redefined here -- every value below
+# is read verbatim from the already-frozen E13/E15/E16/E19 authority
+# chain and the verified calibration artifact's own recorded execution
+# environment.
+# ---------------------------------------------------------------------
+
+[scientific_execution_binding]
+graph_k = 12
+recurrence_steps = 320
+recurrence_alpha = 0.98
+recurrence_alpha_source = "e13-dfp-phase1a-protocol.[propagation].alpha, reused verbatim via e15-dfp-phase1b-protocol's authority_bindings.phase1a_protocol -- never redefined here"
+canonical_recurrence_dtype = "float64"
+masked_recurrence_dtype = "float64"
+graph_storage_dtype = "float32"
+residual_accumulation_dtype = "float64"
+precision_source = "verified calibration artifact's own recorded propagation_precision_record, produced under e16-dfp-phase1b-conservation-calibration's same_propagation_precision_required=true constraint -- never re-selected or re-guessed here"
+component_chunk_size = 16
+component_chunk_size_source = "dependency_bindings.e18_chunk_selection_identity's frozen selected_chunk_size, cross-checked against the installed task4_selection_artifact"
+signed_contribution_convention = "unchanged from e16-dfp-phase1b-conservation-calibration.[residual_definitions].rho_g.g_definition -- g^(w)_{x,r}: the selected window's own signed component contribution, computed from S0/S_final AFTER applying A_final,w"
+final_resolution_pullback_operator = "A_final,w = R o A_stitch,w (dependency_bindings.stitching_pullback_module's apply_window_stitching_forward composed with dependency_bindings.final_rescale_pullback_module's apply_final_rescale_forward), exactly as reused by compute_signed_contributions / stitch_and_rescale_component_scores in dependency_bindings.masked_forward_core"
+governed_residual_family = "rho_g"
+governed_residual_formula = "rho_g^(w)(x) = sum_r g^(w)_{x,r} - delta_m^(w)(x), unchanged from e16-dfp-phase1b-conservation-calibration.[residual_definitions].rho_g.formula"
+conservation_tolerance = 9.5367431640625e-07
+conservation_tolerance_binary_exponent = -20
+comparison_operator = "<="
+acceptance_relation = "absolute_residual <= conservation_tolerance"
+tolerance_source = "dependency_bindings.e19_tolerance_identity -- frozen, not re-derived or re-selected here"
+non_finite_value_failure_behavior = "reject: a non-finite scientific array member is a fatal E15/E16/masked-forward-core-defined invariant violation, never silently dropped, clamped, or imputed"
+tolerance_violation_failure_behavior = "reject: absolute_residual > conservation_tolerance raises the committed src/dfp_phase1b_artifact_schema.py::validate_stage_a_flat_arrays domain error, exactly as already enforced for e15-dfp-phase1b-artifacts's stage_a_schema; this identity adds no alternative acceptance path"
+stage_a_schema_binding = "e15-dfp-phase1b-artifacts.[stage_a_schema] (talk2dino-dfp-phase1b-stage-a-features-v1, schema_version 1) -- bound and reused verbatim, never redefined"
+stage_b_schema_binding = "e15-dfp-phase1b-artifacts.[stage_b_schema] (talk2dino-dfp-phase1b-stage-b-labels-v1, schema_version 1) -- bound and reused verbatim, never redefined; Stage B is out of scope for the 500-image mechanistic diagnostic itself (Stage B evaluation labels are a downstream Phase 1B step) and this identity authorizes no Stage B computation"
+deterministic_scientific_serialization = "identical array member ordering, dtype, and byte layout to e15-dfp-phase1b-artifacts.[stage_a_schema].flat_disputed_pixel_members; no new scientific member is introduced by this identity"
+scientific_collection_digest_definition = "sha256 over the canonical concatenation of every Stage-A flat array member's raw native-endian bytes, in the exact member order fixed by e15-dfp-phase1b-artifacts.[stage_a_schema].flat_disputed_pixel_members, preceded by image_count/dispute_offsets/window_count_per_image encoded the same way stage_a_schema.manifest_fields already requires; profiling fields are never included"
+
+[scientific_execution_binding.unmodified_list]
+list = [
+    "component_definition", "query_class_selection", "prediction_variants", "recurrence",
+    "contribution_sign", "resizing", "stitching", "conservation_formula", "tolerance", "chunk_size",
+]
+
+# ---------------------------------------------------------------------
+# Profiling stage contract. Every stage binds to an exact function/
+# module boundary where one already exists in this repository. The two
+# stages that depend on the not-yet-implemented model-forward call site
+# (unary/model forward; model construction and checkpoint loading) are
+# explicitly authority-bound rather than function-bound, disclosed
+# below -- Task 6B implements no execution driver, so no concrete
+# function exists yet for those two; the future driver's model-forward
+# and model-construction code must resolve within the bound e12/e3
+# authority chain.
+# ---------------------------------------------------------------------
+
+[profiling_stage_contract]
+stage_name_enumeration = [
+    "authority_preflight_verification",
+    "dataset_index_and_manifest_adapter_construction",
+    "model_construction_and_checkpoint_loading",
+    "final_result_validation_and_installation",
+    "per_image_checkpoint_serialization_and_atomic_installation",
+    "input_preparation",
+    "unary_model_forward",
+    "graph_construction",
+    "canonical_k12_recurrence",
+    "final_resolution_stitching_rescale_for_canonical_field",
+    "global_unary_component_construction",
+    "final_resolution_component_membership_pullback_construction",
+    "component_masked_seed_construction",
+    "masked_k12_recurrence",
+    "signed_component_contribution_computation",
+    "component_score_stitch_final_rescale",
+    "conservation_residual_computation_and_validation",
+    "scientific_row_array_assembly",
+]
+stage_count = 18
+non_overlapping_decomposition_note = "matches the 4 run-level + 14 per-image/per-window/per-component-chunk stages named in the Task 6B specification exactly, in the same order; no stage was renamed, merged, or split beyond that list"
+
+[profiling_stage_contract.scopes]
+authority_preflight_verification = "run"
+dataset_index_and_manifest_adapter_construction = "run"
+model_construction_and_checkpoint_loading = "run"
+final_result_validation_and_installation = "run"
+per_image_checkpoint_serialization_and_atomic_installation = "image"
+input_preparation = "window"
+unary_model_forward = "window"
+graph_construction = "window"
+canonical_k12_recurrence = "window"
+final_resolution_stitching_rescale_for_canonical_field = "window"
+global_unary_component_construction = "window"
+final_resolution_component_membership_pullback_construction = "window"
+component_masked_seed_construction = "component_chunk"
+masked_k12_recurrence = "component_chunk"
+signed_component_contribution_computation = "component_chunk"
+component_score_stitch_final_rescale = "component_chunk"
+conservation_residual_computation_and_validation = "window"
+scientific_row_array_assembly = "window"
+
+[profiling_stage_contract.function_bindings]
+authority_preflight_verification = "dependency_bindings.diagnostic_execution_module's own verify_protocol(...) / verify_calibration_binding-style relational checks (this identity's loader), mirroring diagnostics/run_dfp_phase1b_calibration.py's preflight Phase A+B pattern"
+dataset_index_and_manifest_adapter_construction = "dependency_bindings.dataset_view_module: build_native_image_index(...), build_manifest_execution_view(...), compute_mapping_digest(...)"
+model_construction_and_checkpoint_loading = "AUTHORITY-BOUND, not yet function-bound: dependency_bindings.e15_protocol's authority_bindings.k12_graph_recurrence (e12-matched-k11-k12-t320) and authority_bindings.text_prototype_projection (e3-paired-soft-routing); the concrete model-construction/checkpoint-loading function is defined by the future (not-yet-implemented) execution driver and must resolve within this authority chain -- Task 6B implements no driver, so no concrete function exists yet"
+final_result_validation_and_installation = "AUTHORITY/POLICY-BOUND, not yet function-bound: e15-dfp-phase1b-artifacts.[atomic_write_policy].result_install convention; the concrete installer is not implemented by Task 6B (Section 20)"
+per_image_checkpoint_serialization_and_atomic_installation = "POLICY-BOUND, not yet function-bound: e15-dfp-phase1b-artifacts.[checkpoint_resume_schema] + [atomic_write_policy].checkpoint_install; checkpoint_after_every_completed_image=true per e15-dfp-phase1b-protocol.[resource_ceiling]; the concrete writer is not implemented by Task 6B"
+input_preparation = "dependency_bindings.window_plan_module's SlidingWindowPlan.build(...) per-window crop extraction, composed with dependency_bindings.dataset_view_module's native image resolution"
+unary_model_forward = "AUTHORITY-BOUND, not yet function-bound: same e12/e3 authority chain as model_construction_and_checkpoint_loading; produces the s0 tensor consumed as an INPUT by dependency_bindings.recurrence_capture_module's capture_dfp_phase1a_trajectory(graph, s0, ...) -- the model forward itself precedes and is external to every frozen kernel module bound by this identity"
+graph_construction = "dependency_bindings.graph_module: build_directed_topk_graph(...)"
+canonical_k12_recurrence = "dependency_bindings.recurrence_capture_module: capture_dfp_phase1a_trajectory(...), which calls dependency_bindings.finite_step_regime_module's finite_step_propagate(...) unmodified"
+final_resolution_stitching_rescale_for_canonical_field = "dependency_bindings.stitching_pullback_module: apply_window_stitching_forward(...); dependency_bindings.final_rescale_pullback_module: apply_final_rescale_forward(...)"
+global_unary_component_construction = "dependency_bindings.global_unary_components_module: compute_global_unary_components(...)"
+final_resolution_component_membership_pullback_construction = "dependency_bindings.final_rescale_pullback_module: build_final_stitching_pullback_plan(...), compute_window_final_soft_memberships(...)"
+component_masked_seed_construction = "dependency_bindings.masked_forward_core: build_masked_seed_chunk(...)"
+masked_k12_recurrence = "dependency_bindings.masked_forward_core: propagate_masked_seed_chunk(...)"
+signed_component_contribution_computation = "dependency_bindings.masked_forward_core: compute_signed_contributions(...)"
+component_score_stitch_final_rescale = "dependency_bindings.masked_forward_core: stitch_and_rescale_component_scores(...)"
+conservation_residual_computation_and_validation = "dependency_bindings.masked_forward_core: build_conservation_measurements(...), compute_signed_margin_conservation_residual(...); dependency_bindings.phase1b_artifact_schema_module: validate_stage_a_flat_arrays(..., conservation_tolerance=...)"
+scientific_row_array_assembly = "SCHEMA-BOUND, not a single function: assembly into e15-dfp-phase1b-artifacts.[stage_a_schema].flat_disputed_pixel_members member layout, validated by dependency_bindings.phase1b_artifact_schema_module"
+
+[profiling_stage_contract.overhead_accounting]
+leaf_stage_scopes = ["window", "component_chunk", "image", "run"]
+leaf_stages_non_overlapping = true
+parent_aggregate_labeling = "inclusive; a parent/group aggregate (e.g. a window total, an image total, the run total) must never be summed together with its own child leaf-stage totals -- it already contains them"
+window_total_definition = "sum of the 9 window-scoped leaf stages (input_preparation .. scientific_row_array_assembly, excluding the 4 component_chunk-scoped stages) plus, for each component chunk of that window, the sum of the 4 component_chunk-scoped leaf stages for that chunk"
+unattributed_overhead_definition = "total wall time for the enclosing scope minus the sum of that scope's own non-overlapping leaf-stage elapsed times; negative overhead is invalid and must be rejected, never clamped to zero"
+double_counting_forbidden = true
+
+# ---------------------------------------------------------------------
+# Timing semantics.
+# ---------------------------------------------------------------------
+
+[timing_semantics]
+cpu_clock = "time.perf_counter_ns"
+cpu_unit = "integer_nanoseconds"
+cpu_start_definition = "immediately before the bound stage's entry"
+cpu_end_definition = "immediately after the bound stage's required completion (its defined exit point, not merely enqueue when the stage is itself CPU-only)"
+cuda_timing_mechanism = "cuda_events_on_the_active_execution_stream"
+cuda_event_start_definition = "recorded immediately before the bound CUDA stage begins"
+cuda_event_end_definition = "recorded immediately after enqueueing that stage's final CUDA operation"
+cuda_synchronization_policy = "synchronize only at the defined measurement boundary (elapsed-time query), never mid-stage; unsynchronized CPU wall time must never be substituted for CUDA event timing"
+cuda_elapsed_unit = "float64_milliseconds_as_returned_by_the_cuda_event_elapsed_time_api"
+cuda_to_persisted_unit_conversion = "persist the float64 milliseconds value directly, unrounded; if a nanosecond integer field is also required for cross-comparison with CPU timings, convert via nanoseconds = round_half_even(milliseconds * 1e6) and record both the original float64 milliseconds and the derived integer nanoseconds, never only the derived value"
+cuda_warmup_labeling = "initialization/warm-up CUDA work (first-call kernel compilation, cuDNN/cuBLAS algorithm selection, context creation) must be recorded under a separate warmup-labeled record, never merged into a scientific stage's steady-state timing"
+cuda_synchronization_overhead_disclosure = "any CPU time spent blocked in a synchronization call at a measurement boundary must be disclosed as a distinct field, never silently folded into the adjacent stage's elapsed time"
+cuda_timing_unavailable_for_cpu_only_stages = "a CPU-only stage (e.g. authority_preflight_verification, dataset_index_and_manifest_adapter_construction, scientific_row_array_assembly) records cuda_elapsed_ms = null (unavailable), never a fabricated 0.0"
+total_run_wall_time_definition = "measured independently of any stage-total reconstruction, via one time.perf_counter_ns() pair spanning the entire run process from authority_preflight_verification entry to final_result_validation_and_installation exit (or to the last checkpoint write on an incomplete run)"
+
+# ---------------------------------------------------------------------
+# Host-memory measurement semantics.
+# ---------------------------------------------------------------------
+
+[host_memory_semantics]
+fields = ["host_rss_bytes_before", "host_rss_bytes_after", "process_peak_rss_bytes_after_stage"]
+host_rss_source = "/proc/self/status VmRSS line"
+process_peak_rss_source = "/proc/self/status VmHWM line (cumulative high-water mark -- never labeled a per-stage-local peak)"
+final_process_peak_rss_source = "resource.getrusage(resource.RUSAGE_SELF).ru_maxrss, with an explicitly frozen platform conversion (Linux: kibibytes; the conversion factor used must itself be recorded alongside the raw value)"
+proc_status_parsing_rule = "match the line beginning 'VmRSS:' or 'VmHWM:' (exact prefix, case-sensitive), take the sole embedded integer token as kibibytes"
+proc_status_unit = "integer_kibibytes_as_reported_by_the_kernel"
+proc_status_to_bytes_conversion = "bytes = KiB * 1024, exact integer arithmetic, no floating point"
+unavailable_vs_zero = "a field that could not be read (missing /proc, parse failure, permission denied) is recorded as null (unavailable), never as 0"
+malformed_value_handling = "a negative, non-finite, or non-integer parsed value is rejected as malformed, not silently coerced"
+background_sampling_interval = "not authorized by this identity -- no background memory sampler is frozen; only before/after and cumulative-peak measurements at defined stage boundaries"
+cumulative_high_water_mark_naming_forbidden_as_stage_peak = true
+
+# ---------------------------------------------------------------------
+# GPU-memory measurement semantics (detailed profiling mode only).
+# ---------------------------------------------------------------------
+
+[gpu_memory_semantics]
+fields = [
+    "gpu_allocated_bytes_before", "gpu_reserved_bytes_before",
+    "gpu_allocated_bytes_after", "gpu_reserved_bytes_after",
+    "gpu_peak_allocated_bytes_during_stage", "gpu_peak_reserved_bytes_during_stage",
+    "gpu_device_index", "gpu_device_model",
+]
+stage_local_peak_mechanism = "torch.cuda.reset_peak_memory_stats(device) immediately before stage entry; torch.cuda.max_memory_allocated(device) and torch.cuda.max_memory_reserved(device) immediately after the stage's defined CUDA measurement boundary (after the same synchronization point used for cuda_synchronization_policy)"
+reset_placement = "at stage entry, after any before-stage snapshot is taken, before the stage's own CUDA work begins"
+synchronization_placement = "identical to timing_semantics.cuda_synchronization_policy -- query peak stats only at the defined measurement boundary"
+exact_device_requirement = "device index is fixed and recorded; a run touching more than one CUDA device is a contract violation (single_gpu_only, per population.gpu_count=1)"
+reset_does_not_free_or_move_memory = true
+values_are_operational_metadata_only = true
+unavailable_for_cpu_only_stages = "gpu_* fields = null for a stage with no CUDA work, never fabricated as 0"
+integer_bytes_required = true
+non_negative_validation_required = true
+nvidia_smi_process_wide_values_forbidden_as_silent_replacement = "if nvidia-smi (or any other process-wide/device-wide source) values are ever also recorded, they must be a distinct, separately-labeled field -- never silently substituted for the allocator-reported (torch.cuda.*) values above"
+
+# ---------------------------------------------------------------------
+# Profiling aggregation.
+# ---------------------------------------------------------------------
+
+[profiling_aggregation]
+statistics = ["count", "sum", "mean", "min", "max", "median", "p90", "p95", "p99"]
+percentile_convention = "nearest_rank"
+percentile_rule = "sort ascending; rank = max(1, ceil(p * n)); value = sorted_values[rank - 1] (0-indexed)"
+zero_records_behavior = "count=0; sum/mean/min/max/median/p90/p95/p99 = null (undefined), never 0.0 or NaN"
+one_record_behavior = "count=1; sum=mean=min=max=median=p90=p95=p99 = that single value"
+unavailable_cuda_field_behavior = "a record with cuda_elapsed_ms = null is excluded from CUDA-timing aggregates but still counted in count and in any CPU-side aggregate for that same stage; excluding a null-valued record from a numeric aggregate must never silently zero-fill it"
+mixed_scope_aggregation_forbidden = "image-scoped and window-scoped (and component_chunk-scoped) records for the same stage name are never averaged or combined into one aggregate; aggregation groups strictly by (stage_name, scope)"
+non_finite_value_rejection = "NaN or +-infinity in any profiling numeric field is rejected at record-validation time, never aggregated"
+integer_overflow_handling = "aggregate sums accumulate in Python's arbitrary-precision int/float; a persisted integer field exceeding int64 range is rejected rather than silently wrapped"
+duplicate_record_identity_rejection = "two records sharing the same canonical record identity (stage_name, scope, and the scope's covariate key: run_id / canonical_image_id / (canonical_image_id, window_ordinal) / (canonical_image_id, window_ordinal, component_chunk_index)) are rejected as a duplicate, never averaged or last-write-wins merged"
+aggregation_group_key = "(stage_name, scope)"
+
+[profiling_aggregation.workload_covariates]
+list = [
+    "canonical_image_index", "canonical_image_id", "window_index", "window_canonical_identity",
+    "windows_per_image", "component_count", "query_class_count", "component_chunk_count",
+    "node_count", "disputed_pixel_count", "component_chunk_size",
+]
+disputed_pixel_count_authorization_note = "disputed_pixel_count is already an E15/E16-authorized scientific-adjacent count (e15-dfp-phase1b-artifacts.[stage_a_schema].manifest_fields.dispute_count_per_image); recorded here only as a profiling covariate, never recomputed with a different definition"
+no_new_scientific_statistic_introduced_for_profiling = true
+
+# ---------------------------------------------------------------------
+# Checkpoint schema (closed, versioned). Binds e15's own
+# checkpoint_resume_schema/path_policy/atomic_write_policy rather than
+# inventing an alternative.
+# ---------------------------------------------------------------------
+
+[checkpoint_schema]
+schema_name = "talk2dino-dfp-phase1b-diagnostic-checkpoint-v1"
+schema_version = 1
+binds_e15_checkpoint_resume_schema = true
+binds_e15_path_policy = true
+binds_e15_atomic_write_policy = true
+top_keys = [
+    "schema_name", "schema_version", "identity_bindings", "progress",
+    "scientific_state", "profiling_state", "complete", "final",
+]
+
+[checkpoint_schema.identity_bindings]
+keys = [
+    "e20_identity_name", "e20_identity_schema_version", "e20_identity_sha256",
+    "e15_protocol_sha256", "e15_artifacts_sha256", "e18_chunk_selection_sha256", "e19_tolerance_sha256",
+    "subset_manifest_sha256", "window_universe_digest", "scientific_schema_name", "scientific_schema_version",
+    "run_mode", "device_type", "gpu_model", "gpu_count", "component_chunk_size", "conservation_tolerance",
+]
+e20_identity_sha256_circularity_note = "the checkpoint records THIS identity's own file hash for provenance, exactly as e19's own module binds itself by hash elsewhere in this repository's convention; the identity file itself never records a checkpoint's hash, so no cycle exists"
+
+[checkpoint_schema.progress]
+keys = [
+    "expected_image_count", "expected_window_count", "next_canonical_image_index",
+    "completed_image_ids", "completed_window_count", "total_processed_component_chunks",
+    "generation", "complete", "final_result_produced",
+]
+expected_image_count_value = 500
+expected_window_count_value = 1090
+completed_image_ids_order = "exact prefix, in the frozen canonical (lexicographic fixed-width-ID) manifest order -- never reordered"
+
+[checkpoint_schema.scientific_state]
+keys = ["stage_a_artifact_filename", "stage_a_schema_name", "stage_a_schema_version", "stage_a_row_count", "stage_a_byte_sha256", "scientific_collection_digest", "progress_to_rows_relation"]
+progress_to_rows_relation = "stage_a_row_count must equal the flat disputed-pixel row count implied by completed_image_ids' dispute_offsets prefix -- an exact relation, never approximate"
+binds_alternative_scientific_data = false
+invents_no_new_scientific_array = true
+
+[checkpoint_schema.profiling_state]
+keys = ["profiling_mode", "profiling_record_filename", "profiling_schema_name", "profiling_schema_version", "profiling_record_count", "profiling_digest", "incomplete_final_stage_handling"]
+incomplete_final_stage_handling = "an in-progress (unterminated) stage record at interruption time is persisted with an explicit incomplete=true marker and excluded from all aggregate reconstruction; it is never promoted to a completed timing sample"
+profiling_state_excluded_from_scientific_digest = true
+
+# ---------------------------------------------------------------------
+# Resume rules.
+# ---------------------------------------------------------------------
+
+[resume_rules]
+fresh_requires_no_existing_checkpoint_or_artifacts = true
+fresh_overwrite_requires_separate_explicit_authorization = true
+resume_requires_valid_incomplete_checkpoint = true
+bindings_must_match_exactly = true
+completed_ids_must_be_exact_prefix_of_frozen_manifest = true
+completed_windows_must_match_that_prefixs_canonical_windows = true
+skipped_duplicated_reordered_or_cross_fed_rows_forbidden = true
+partial_generations_rejected = true
+corrupted_hashes_rejected = true
+v1_or_unknown_schema_rejected = true
+complete_unfinalized_checkpoint_may_enter_finalize_only_path = true
+already_finalized_runs_rejected_for_resume = true
+resume_must_not_reprocess_completed_images = true
+scientific_state_restoration_exact = true
+profiling_record_disagreement_rejected_note = "a resumed run's profiling records for an already-completed image must not be regenerated or altered; only new records for not-yet-completed work may be appended"
+
+# ---------------------------------------------------------------------
+# Fresh/resume scientific equivalence contract.
+# ---------------------------------------------------------------------
+
+[fresh_resume_equivalence]
+scientific_arrays_bit_identical_where_schema_promises_it = true
+required_equal_fields = [
+    "row_order", "selected_ids", "window_order", "offsets", "flat_arrays",
+    "scientific_collection_digest", "final_scientific_result_document_excluding_operational_fields",
+]
+profiling_may_differ_in = ["wall_time", "host_memory_measurements", "gpu_memory_measurements"]
+profiling_must_preserve = [
+    "unique_record_identities", "no_duplicate_completed_stage_records_after_resume",
+    "correct_interrupted_attempt_labeling", "aggregate_reconstruction_from_accepted_records_only",
+]
+interrupted_partial_stage_record_disposition = "stored as an explicit incomplete record (never discarded silently, never treated as completed) -- matches checkpoint_schema.profiling_state.incomplete_final_stage_handling"
+
+# ---------------------------------------------------------------------
+# Profiling artifact schema (closed, versioned, operational-only).
+# ---------------------------------------------------------------------
+
+[profiling_artifact_schema]
+schema_name = "talk2dino-dfp-phase1b-diagnostic-profiling-v1"
+schema_version = 1
+operational_only = true
+included_in_scientific_digest = false
+top_keys = [
+    "schema_name", "schema_version", "e20_identity_sha256", "profiling_mode", "complete", "final",
+    "run_identity", "device_record", "software_record", "timing_method", "host_memory_method",
+    "gpu_memory_method", "stage_name_enumeration", "records", "aggregates", "workload_covariates",
+    "total_run_wall_time_ns", "total_scientific_processing_wall_time_ns", "checkpoint_io_wall_time_ns",
+    "unattributed_overhead_ns", "runtime_budget", "warnings", "source_scientific_collection_digest",
+]
+record_identity_uniqueness_key = "(stage_name, scope, scope_covariate_key)"
+runtime_budget_fields = ["maximum_job_wall_time_seconds", "elapsed_job_wall_time_seconds", "remaining_budget_seconds"]
+
+# ---------------------------------------------------------------------
+# Final-result bundle schema (closed, versioned).
+# ---------------------------------------------------------------------
+
+[final_result_schema]
+schema_name = "talk2dino-dfp-phase1b-diagnostic-result-v1"
+schema_version = 1
+top_keys = [
+    "schema_name", "schema_version", "e20_identity_sha256", "run_mode", "image_count", "window_count",
+    "component_chunk_size", "conservation_tolerance", "scientific_artifacts", "scientific_collection_digest",
+    "profiling_artifact_reference", "profiling_mode", "checkpoint_source", "finalization_state",
+    "device_record", "software_record", "total_job_wall_time_seconds", "within_8_hour_allocation",
+    "complete", "final", "offline_mechanistic_analysis", "deployed_inference_method", "full_5000_image_evaluation",
+]
+image_count_required_value = 500
+window_count_required_value = 1090
+complete_required = true
+final_required = true
+partial_generations_forbidden = true
+within_8_hour_allocation_definition = "total_job_wall_time_seconds <= 28800"
+within_8_hour_allocation_is_disclosure_not_acceptance_gate = true
+scientific_validity_independent_of_runtime_budget = true
+offline_mechanistic_analysis_required_value = true
+deployed_inference_method_required_value = false
+full_5000_image_evaluation_required_value = false
+
+[final_result_schema.scientific_artifacts]
+keys_per_artifact = ["filename", "schema_name", "schema_version", "row_count", "size_bytes", "sha256"]
+references_e15_stage_a_schema = true
+
+# ---------------------------------------------------------------------
+# Atomicity and path policy: binds e15's own [path_policy] and
+# [atomic_write_policy] verbatim; adds only the population-specific
+# filenames a future writer/installer must use.
+# ---------------------------------------------------------------------
+
+[atomicity_and_path_policy]
+binds_e15_path_policy = true
+binds_e15_atomic_write_policy = true
+run_specific_output_root = "one single output root directory per run; every artifact for that run is a safe basename under it -- never an absolute or private path recorded in any authority document"
+canonical_filenames = [
+    "phase1b_diagnostic_checkpoint.json",
+    "phase1b_diagnostic_stage_a.npz",
+    "phase1b_diagnostic_profiling.json",
+    "phase1b_diagnostic_result.json",
+]
+lexical_dotdot_rejected = true
+physical_containment_required = true
+symlink_escape_rejected = true
+exclusive_fresh_creation_by_default = true
+same_filesystem_staging_required = true
+fsync_requirements = "consistent with e15-dfp-phase1b-artifacts.[atomic_write_policy] (fsync staged files and the destination directory entry before the atomic rename that publishes them)"
+atomic_rename_required = true
+verified_rollback_for_multi_file_replacement_required = true
+no_orphaned_partial_final_bundle = true
+source_checkpoint_and_scientific_artifacts_immutable_during_finalization = true
+installers_not_implemented_by_this_task = true
+
+# ---------------------------------------------------------------------
+# Authorization boundary: the ground truth. A verifier checks these
+# booleans directly, never infers them from prose.
+# ---------------------------------------------------------------------
+
+[authorization_boundary]
+authority_only_task = true
+execution_driver_implemented_by_task6b = false
+profiler_implemented_by_task6b = false
+checkpoint_writer_implemented_by_task6b = false
+result_writer_implemented_by_task6b = false
+cli_execution_command_implemented_by_task6b = false
+slurm_launcher_implemented_by_task6b = false
+real_inference_executed_by_task6b = false
+gpu_execution_performed_by_task6b = false
+phase1b_500_image_execution_authorized = false
+phase1b_5000_image_exact_provenance_authorized = false
+full_5000_image_miou_evaluation_authorized = false
+lightweight_final_method_selected = false
+sharding_across_jobs_or_gpus_authorized = false
+
+# ---------------------------------------------------------------------
+# Disclosure.
+# ---------------------------------------------------------------------
+
+[disclosure]
+offline_mechanistic_provenance_analysis = true
+not_the_deployed_test_time_method = true
+not_a_claim_of_efficient_inference = true
+not_a_5000_image_paper_evaluation = true
+not_a_lightweight_final_method = true
+not_a_replacement_for_full_validation_set_miou_evaluation = true
+population_is_500_images_1090_windows = true
+conservation_tolerance_is_frozen_not_reselected = true
+chunk_size_is_frozen_not_reselected = true
+single_h100_single_gpu_contract = true
+eight_hour_allocation_is_operational_disclosure_not_scientific_gate = true
+profiling_on_off_scientific_equivalence_required = true
+task6b_performs_no_inference = true
+task6b_creates_no_execution_output = true
+future_500_image_execution_requires_separate_explicit_authorization = true
+future_5000_image_exact_provenance_requires_separate_explicit_authorization_and_is_not_implied_here = true
+
+# ---------------------------------------------------------------------
+# Prohibited.
+# ---------------------------------------------------------------------
+
+[prohibited]
+list = [
+    "modifying_e13_through_e19_identities",
+    "modifying_the_verified_calibration_artifact_or_installed_task4_selection_artifact",
+    "modifying_masked_forward_recurrence_graph_stitching_pullback_or_component_code",
+    "redefining_component_definition_query_class_selection_prediction_variants_recurrence_contribution_sign_resizing_stitching_conservation_formula_tolerance_or_chunk_size",
+    "implementing_an_execution_driver_profiler_checkpoint_writer_result_writer_or_cli_execution_command",
+    "implementing_a_slurm_launcher",
+    "running_real_inference_or_initializing_cuda",
+    "accessing_coco_stuff_images_or_annotations",
+    "sharding_the_500_image_run_across_multiple_jobs_or_gpus",
+    "authorizing_the_500_image_diagnostic_execution",
+    "authorizing_exact_masked_forward_provenance_on_the_5000_image_validation_set",
+    "authorizing_the_full_5000_image_miou_evaluation",
+    "selecting_a_lightweight_final_method",
+    "adding_a_new_scientific_statistic_only_to_aid_profiling",
+    "creating_a_circular_hash_dependency",
+]
+
+[future_step_bindings]
+description = "Fields explicitly deferred to a later task, never guessed or invented here."
+next_step_items = [
+    "independently re-verify this E20 identity and its loader/CLI module against the committed HEAD",
+    "implement the execution driver, profiler, checkpoint writer, and result writer bound by this contract -- a separate, later, separately-authorized task",
+    "explicitly authorize the 500-image diagnostic execution itself -- never this identity",
+    "the 5,000-image exact masked-forward provenance question and the full 5,000-image mIoU evaluation -- never this identity",
+]
