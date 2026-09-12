@@ -1,0 +1,456 @@
+format_version = "talk2dino-dfp-phase1b-lightweight-boundary-artifacts-identity-v1"
+
+# Storage-only artifact-schema authority for BALP (Boundary-Aware
+# Late-Flip Preservation): defines the closed, versioned schemas for
+# the development checkpoint, development result, selection artifact,
+# profiling artifact, and the FUTURE (not-yet-authorized) 5,000-image
+# result. Implements no method, no evaluator, no inference, and
+# defines no scientific quantity beyond storage/validation -- every
+# formula referenced here is frozen in
+# e22-dfp-phase1b-lightweight-boundary-preservation, never redefined.
+
+[identity]
+name = "e22-dfp-phase1b-lightweight-boundary-artifacts"
+schema_name = "talk2dino-dfp-phase1b-lightweight-boundary-artifacts-identity-v1"
+schema_version = 1
+description = "Closed, versioned artifact schemas for BALP: development checkpoint (fresh/resume), development result, selection artifact, profiling artifact, and the future 5,000-image result schema (schema only, no execution authorization). Storage-only; defines no scientific formula."
+storage_representation_only = true
+
+[protocol_binding]
+protocol_identity_relative_path = "evaluation_identities/e22_dfp_phase1b_lightweight_boundary_preservation.toml"
+protocol_identity_sha256 = "bcc6db2dce36c3d740cd66cc36125de36c3faf86dd9924cd02218ec60ee5d63d"
+
+# ---------------------------------------------------------------------
+# Shared closed vocabularies.
+# ---------------------------------------------------------------------
+
+[shared.candidate_ids]
+list = [
+    "balp_s000_r00", "balp_s000_r01", "balp_s000_r02", "balp_s000_r04",
+    "balp_s016_r00", "balp_s016_r01", "balp_s016_r02", "balp_s016_r04",
+    "balp_s032_r00", "balp_s032_r01", "balp_s032_r02", "balp_s032_r04",
+    "balp_s064_r00", "balp_s064_r01", "balp_s064_r02", "balp_s064_r04",
+]
+count = 16
+
+[shared.control_ids]
+list = ["T0", "T16", "T32", "T64", "T320"]
+count = 5
+
+[shared.confusion_sufficient_statistics_member]
+dtype = "int64"
+shape = "[class_count, class_count]"
+rank = 2
+non_negative = true
+description = "row=GT class, col=predicted class, evaluated pixels only (GT != ignore_index); dataset-level aggregation is the elementwise sum of every image's own confusion matrix -- never an arithmetic mean of per-image mIoUs"
+
+# ---------------------------------------------------------------------
+# 1. Development checkpoint schema.
+# ---------------------------------------------------------------------
+
+[checkpoint_schema]
+schema_name = "talk2dino-dfp-phase1b-balp-development-checkpoint-v1"
+schema_version = 1
+supports_fresh_resume_without_reordering = true
+resume_never_changes_image_order_or_candidate_outputs = true
+per_image_scientific_files_required = false
+prefer_append_only_aggregate_arrays = true
+
+[checkpoint_schema.top_keys]
+list = [
+    "schema_name", "schema_version", "identity_bindings", "progress", "aggregate_confusion",
+    "per_image_reconstruction_statistics", "complete", "final", "final_result_binding",
+]
+# Corrected during the second mechanical-completeness repair: this list
+# previously omitted "final_result_binding" even though
+# checkpoint_schema.flags/state_machine already required that key to be
+# present (as null/absent-equivalent for non-final checkpoints, and as
+# a valid binding object for finalized ones) -- the closed-key
+# enforcement added to validate_checkpoint_single() would otherwise
+# have rejected every valid checkpoint document. This is the single
+# authoritative top-level key set; validate_checkpoint_single() reads
+# it directly from this identity's own canonical leaves rather than
+# maintaining a second, divergence-prone hardcoded list.
+closed = true
+
+
+[checkpoint_schema.identity_bindings.keys]
+list = [
+    "e22_protocol_sha256", "e22_artifacts_sha256", "e13_protocol_sha256", "matched_evaluator_sha256",
+    "subset_manifest_sha256", "balp_split_sha256", "development_digest", "run_mode",
+]
+
+[checkpoint_schema.progress.keys]
+list = [
+    "expected_development_image_count", "completed_image_ids", "next_development_index", "generation",
+]
+expected_development_image_count_value = 350
+
+[checkpoint_schema.aggregate_confusion.keys]
+description = "one confusion_sufficient_statistics_member per control (5) and per candidate (16), keyed by shared.control_ids/shared.candidate_ids -- exactly 21 arrays, append-only: each completed image's own confusion matrix is added in place, never replacing a prior partial sum"
+required_control_keys = ["T0", "T16", "T32", "T64", "T320"]
+required_candidate_keys = [
+    "balp_s000_r00", "balp_s000_r01", "balp_s000_r02", "balp_s000_r04",
+    "balp_s016_r00", "balp_s016_r01", "balp_s016_r02", "balp_s016_r04",
+    "balp_s032_r00", "balp_s032_r01", "balp_s032_r02", "balp_s032_r04",
+    "balp_s064_r00", "balp_s064_r01", "balp_s064_r02", "balp_s064_r04",
+]
+
+[checkpoint_schema.per_image_reconstruction_statistics.keys]
+list = [
+    "candidate_versus_t320_changed_pixel_count", "preservation_mask_pixel_count",
+    "boundary_preservation_pixel_count", "non_boundary_preservation_pixel_count",
+    "evaluated_pixel_count", "ignored_pixel_count", "per_image_confusion_matrix",
+]
+required_for = "every control (T64/T320 relevant subset) and every one of the 16 candidates, per completed image, accumulated append-only exactly like aggregate_confusion"
+per_image_confusion_matrix_purpose = "the [class_count, class_count] confusion matrix for THIS ONE completed image alone (never a running sum) -- persisted specifically so checkpoint_schema.relational_validation's aggregate-equals-sum-of-per-image rule is independently checkable from persisted bytes alone, never re-derived by re-running inference"
+
+[checkpoint_schema.per_image_array_convention]
+container_shape = "dict keyed by canonical_image_id -- NOT a flat array with a separate offset array"
+offset_array_needed = false
+offset_array_not_needed_reason = "every per_image_reconstruction_statistics member is exactly ONE scalar (or one [class_count,class_count] matrix) per completed image per control/candidate -- there is no variable-length per-image segment the way E15's Stage-A disputed-pixel rows require dispute_offsets, so there is nothing for an offset array to index"
+exact_length_invariant = "for every control/candidate key, the per-image container holds EXACTLY next_development_index entries, one per completed image, and the entry for completed_image_ids[i] is populated if and only if i < next_development_index"
+completion_order_is_development_split_order = "completed_image_ids is always development_image_ids[:next_development_index] (development_split's own ranked order) -- position i in every per-image container corresponds to development_image_ids[i], never filesystem/dict/insertion order"
+
+[checkpoint_schema.flags]
+complete_definition = "next_development_index == 350 AND completed_image_ids == development_image_ids (the full frozen 350-image development order)"
+final_definition = "complete == true AND final_result_binding is present and valid"
+final_implies_complete = true
+incomplete_cannot_bind_final_result = "final_result_binding must be absent (or null) whenever complete == false; presence of a valid final_result_binding while complete == false is a fatal schema violation"
+
+[checkpoint_schema.final_result_binding.keys]
+list = ["development_result_relative_path", "development_result_sha256", "installed_at_generation"]
+
+[checkpoint_schema.state_machine]
+# Every checkpoint document must satisfy EXACTLY one of these four
+# named states; no other combination of (next_development_index,
+# completed_image_ids, complete, final) is representable.
+[checkpoint_schema.state_machine.zero_progress]
+next_development_index = 0
+completed_image_ids = "empty list"
+complete = false
+final = false
+
+[checkpoint_schema.state_machine.partial_progress]
+next_development_index = "0 < next_development_index < 350"
+complete = false
+final = false
+
+[checkpoint_schema.state_machine.complete_unfinalized]
+next_development_index = 350
+completed_image_ids = "exactly all 350 development_image_ids, in order"
+complete = true
+final = false
+final_result_binding = "absent"
+
+[checkpoint_schema.state_machine.finalized]
+next_development_index = 350
+complete = true
+final = true
+final_result_binding = "present and valid (sha256 of an existing, schema-valid development_result_schema document)"
+
+[checkpoint_schema.relational_validation]
+list = [
+    "progress.expected_development_image_count == 350",
+    "0 <= progress.next_development_index <= 350",
+    "len(progress.completed_image_ids) == progress.next_development_index",
+    "progress.completed_image_ids == balp_split.development_image_ids[:progress.next_development_index] (exact frozen-split prefix, never a re-sorted or re-selected subset)",
+    "no duplicate id in progress.completed_image_ids",
+    "sorted(aggregate_confusion.keys()) covers exactly shared.control_ids union shared.candidate_ids (5 + 16 = 21 keys, no more, no fewer)",
+    "candidate keys in aggregate_confusion/per_image_reconstruction_statistics appear in exactly candidate_family.ordered_candidate_ids order",
+    "control keys in aggregate_confusion/per_image_reconstruction_statistics appear in exactly shared.control_ids order",
+    "identity_bindings.e22_protocol_sha256/e22_artifacts_sha256/e13_protocol_sha256/matched_evaluator_sha256/subset_manifest_sha256/balp_split_sha256/development_digest all equal the identical fields E22 itself pins (never independently re-chosen per checkpoint)",
+    "for every control/candidate key k and every completed image i < next_development_index, per_image_reconstruction_statistics[k] has exactly next_development_index entries (checkpoint_schema.per_image_array_convention.exact_length_invariant)",
+    "aggregate_confusion[k] == elementwise sum over i in range(next_development_index) of per_image_reconstruction_statistics[k].per_image_confusion_matrix[i], for every control/candidate key k",
+    "evaluated_pixel_count and ignored_pixel_count for a given completed image are identical across every control and every candidate (same image, same GT, same ignore mask -- prediction differences never change which pixels are evaluated/ignored)",
+    "every candidate key present anywhere in the checkpoint is a member of candidate_family.ordered_candidate_ids -- no foreign candidate id",
+    "no id in progress.completed_image_ids appears in balp_split.confirmation_image_ids",
+    "no representable state has completed_image_ids that is not a prefix of balp_split.development_image_ids (state_machine is exhaustive and closed)",
+]
+
+[checkpoint_schema.cross_generation_invariants]
+description = "rules relating an earlier checkpoint C_old to a later checkpoint C_new for the SAME development run (same identity_bindings)"
+list = [
+    "C_new.progress.next_development_index >= C_old.progress.next_development_index",
+    "C_old.progress.completed_image_ids is an exact prefix of C_new.progress.completed_image_ids (never reordered, replaced, or reinterpreted)",
+    "for every completed image i < C_old.progress.next_development_index and every control/candidate key k, C_new.per_image_reconstruction_statistics[k][i] is byte-identical to C_old.per_image_reconstruction_statistics[k][i] (both the 6 scalar fields and per_image_confusion_matrix)",
+    "C_new's candidate_family/control ordering and identity_bindings are byte-identical to C_old's",
+    "for every control/candidate key k, C_new.aggregate_confusion[k] == C_old.aggregate_confusion[k] plus the elementwise sum of per_image_confusion_matrix[i] for the newly-appended i in range(C_old.next_development_index, C_new.next_development_index)",
+    "resume never removes, reorders, replaces, or reinterprets a row C_old already completed",
+    "profiling_schema fields never appear inside a checkpoint document and can never affect scientific_output_digest (development_result_schema) or any aggregate_confusion/per_image value",
+    "a fresh run and a checkpoint-then-resumed run of the SAME development population produce byte-identical final (next_development_index==350) aggregate_confusion and per_image_reconstruction_statistics",
+]
+
+# ---------------------------------------------------------------------
+# 2. Development result schema.
+# ---------------------------------------------------------------------
+
+[development_result_schema]
+schema_name = "talk2dino-dfp-phase1b-balp-development-result-v1"
+schema_version = 1
+
+[development_result_schema.top_keys]
+list = [
+    "schema_name", "schema_version", "run_mode", "development_image_count", "identity_bindings",
+    "control_results", "candidate_results", "scientific_output_digest", "complete", "final",
+]
+development_image_count_required_value = 350
+
+[development_result_schema.control_result_member.keys]
+list = [
+    "control_id", "dataset_level_miou", "per_class_iou", "mean_class_accuracy", "pixel_accuracy",
+    "evaluated_pixel_count", "ignored_pixel_count",
+]
+
+[development_result_schema.candidate_result_member.keys]
+list = [
+    "candidate_id", "stability_start", "radius", "dataset_level_miou", "per_class_iou",
+    "mean_class_accuracy", "pixel_accuracy", "evaluated_pixel_count", "ignored_pixel_count",
+    "candidate_versus_t320_changed_pixel_count", "preservation_mask_pixel_count", "preservation_mask_fraction",
+    "boundary_preservation_pixel_count", "non_boundary_preservation_pixel_count", "classwise_gain_loss_versus_t320",
+]
+candidate_id_closed_set = "shared.candidate_ids"
+stability_start_closed_set = [0, 16, 32, 64]
+radius_closed_set = [0, 1, 2, 4]
+
+# ---------------------------------------------------------------------
+# 3. Selection artifact schema.
+# ---------------------------------------------------------------------
+
+[selection_schema]
+schema_name = "talk2dino-dfp-phase1b-balp-selection-v1"
+schema_version = 1
+
+[selection_schema.top_keys]
+list = [
+    "schema_name", "schema_version", "development_source_hashes", "candidate_development_metrics",
+    "eligibility_outcomes", "tie_break_trace", "selected_candidate", "confirmation_result",
+    "acceptance_comparison", "operational_benchmark_status", "complete", "final", "evaluation_stage_label",
+]
+selected_candidate_closed_set = "shared.candidate_ids union {\"NO_BALP_CANDIDATE_PROCEEDS\"}"
+evaluation_stage_label_required_value = "post_gate1_pre_full_evaluation"
+
+[selection_schema.eligibility_outcomes.member_keys]
+list = [
+    "candidate_id", "scientific_output_complete_and_schema_valid", "no_gt_isolation_violation",
+    "finite_metrics", "development_miou_strictly_exceeds_t320", "no_recurrence_or_model_duplication",
+    "belongs_to_frozen_16_candidate_family", "eligible",
+]
+
+[selection_schema.tie_break_trace.member_keys]
+list = [
+    "candidate_id", "development_dataset_level_miou", "preservation_mask_fraction", "radius",
+    "stability_start", "rank_after_miou", "rank_after_preservation_fraction", "rank_after_radius",
+    "rank_after_stability", "rank_after_candidate_id", "final_rank",
+]
+
+[selection_schema.confirmation_result.keys]
+list = [
+    "candidate_id", "confirmation_dataset_level_miou", "confirmation_miou_gain_versus_t320_pp",
+    "confirmation_image_count", "no_gt_isolation_violation", "all_metrics_finite",
+]
+confirmation_image_count_required_value = 150
+confirmation_evaluated_at_most_once = true
+
+[selection_schema.acceptance_comparison.keys]
+list = ["threshold_pp", "observed_gain_pp", "comparison_operator", "passed"]
+threshold_pp_required_value = 0.10
+comparison_operator_required_value = ">="
+
+# ---------------------------------------------------------------------
+# 4. Profiling artifact schema.
+# ---------------------------------------------------------------------
+
+[profiling_schema]
+schema_name = "talk2dino-dfp-phase1b-balp-profiling-v1"
+schema_version = 1
+
+[profiling_schema.top_keys]
+list = [
+    "schema_name", "schema_version", "device_record", "software_record", "baseline_record",
+    "balp_record", "derived_ratios", "affects_scientific_digest",
+]
+affects_scientific_digest_required_value = false
+
+[profiling_schema.per_variant_record.keys]
+list = [
+    "variant_id", "total_wall_time_seconds", "per_image_latency_seconds", "throughput_images_per_second",
+    "host_peak_rss_bytes", "gpu_peak_allocated_bytes", "gpu_peak_reserved_bytes",
+    "snapshot_overhead_seconds", "stitching_overhead_seconds", "boundary_overhead_seconds",
+    "arbitration_overhead_seconds",
+]
+variant_id_closed_set = ["T320_baseline", "selected_balp_candidate"]
+overhead_fields_optional_if_unmeasurable = ["snapshot_overhead_seconds", "stitching_overhead_seconds", "boundary_overhead_seconds", "arbitration_overhead_seconds"]
+
+[profiling_schema.derived_ratios.keys]
+list = [
+    "total_wall_time_overhead_pct", "mean_latency_overhead_pct", "throughput_reduction_pct",
+    "peak_allocated_vram_increase_pct", "peak_reserved_vram_increase_pct", "host_rss_increase_pct",
+]
+raw_values_required_alongside_ratios = true
+fabricated_missing_telemetry_forbidden = true
+
+# ---------------------------------------------------------------------
+# 5. Future 5,000-image result schema (schema only; no authorization).
+# ---------------------------------------------------------------------
+
+[future_full_evaluation_schema]
+schema_name = "talk2dino-dfp-phase1b-balp-full-evaluation-result-v1"
+schema_version = 1
+schema_freezing_authorizes_execution = false
+
+[future_full_evaluation_schema.top_keys]
+list = [
+    "schema_name", "schema_version", "image_count", "t320_control_aggregate_confusion",
+    "selected_balp_aggregate_confusion", "miou_and_per_class_results", "latency_throughput_host_rss_peak_vram",
+    "overhead_versus_historical_baseline", "overhead_versus_same_job_t320_control",
+    "selected_candidate_identity", "upstream_hashes", "development_subset_disclosure", "complete", "final",
+]
+image_count_required_value = 5000
+
+[future_full_evaluation_schema.overhead_versus_same_job_t320_control]
+authoritative = true
+description = "the same-job, same-environment T320 control measured in the SAME full-evaluation run is the authoritative overhead comparison"
+
+[future_full_evaluation_schema.overhead_versus_historical_baseline]
+authoritative = false
+historical_baseline_wall_time_reference = "approximately 1h18m"
+description = "contextual only -- never authoritative for pass/fail"
+
+[future_full_evaluation_schema.development_subset_disclosure]
+required_field = "development_subset_disclosure_text"
+required_content = "must state that the frozen 500-image coco_stuff_500 subset (both the 350-image development and 150-image internal-confirmation partitions) is included within the 5,000-image evaluation universe, and was used for BALP candidate development/confirmation prior to this full run"
+
+# ---------------------------------------------------------------------
+# 6. Artifact write/installation/rollback policy. Freezes POLICY only
+# -- no filesystem writer is implemented by this identity. Reuses the
+# already-proven E15/E20 staged-write-then-atomic-install pattern
+# (stage as a sibling on the same filesystem, self-verify the complete
+# staged unit, then install with exactly ONE atomic operation), never
+# an unsafe sequential multi-file final-location replacement.
+# ---------------------------------------------------------------------
+
+[artifact_write_policy]
+applies_to = [
+    "development_checkpoint", "development_result", "selection_artifact",
+    "profiling_artifact", "future_full_evaluation_result",
+]
+reused_pattern_source = "the already-proven staged-directory-then-atomic-rename pattern established by e20-dfp-phase1b-diagnostic-execution's atomic_write_stage_a_npz/atomic_install_result (stage under an unpredictable temp name on the SAME filesystem, self-verify via the unmodified schema validator, then os.replace/os.rename exactly once) -- reused by convention, never by code dependency (E22 does not import E20)"
+
+[artifact_write_policy.general_path_policy]
+output_destination_must_be_explicit = true
+lexical_traversal_forbidden = true
+physical_containment_required = "resolved (symlink-chased) target must remain inside the resolved (symlink-chased) authorized output root"
+symlink_escape_forbidden = true
+filename_must_match_schema_name = true
+source_artifacts_are_read_only = true
+implicit_cwd_output_forbidden = true
+overwrite_by_default_forbidden = true
+overwrite_requires_separate_explicit_authority = true
+e22_grants_overwrite_authority = false
+
+[artifact_write_policy.staging]
+staging_location = "a sibling of the final destination on the SAME filesystem (never a different filesystem/device, so the final install step can be a single atomic rename)"
+staging_name_uniqueness = "an unpredictable, collision-resistant staging name (e.g. a random hex suffix), never a fixed/reused temp name"
+one_generation_per_staging_unit = "every member (JSON/NPZ/etc.) belonging to ONE logical generation is written into the SAME staging unit before any validation begins"
+flush_and_close_before_validation = true
+member_hashes_computed_from_staged_bytes = true
+sibling_manifest_hashes_source = "staged bytes only -- never a hash computed before the staged write completed, and never a hash of the eventual final-location bytes before they exist"
+self_verification_before_installation_required = true
+self_verification_scope = "closed-schema validation, relational validation (checkpoint_schema.relational_validation / cross_generation_invariants where applicable), and sibling digest-binding validation, ALL run against staged contents before the final install step begins"
+partial_final_bundle_forbidden = "the final destination must never contain a subset of a generation's members -- either all members are installed or none are"
+
+[artifact_write_policy.atomic_installation.multi_file_artifacts]
+applies_to = ["development_result", "selection_artifact", "profiling_artifact", "future_full_evaluation_result", "a finalized development_checkpoint's result bundle"]
+staging_unit = "one staging DIRECTORY containing every member file of the generation"
+install_operation = "exactly one atomic directory rename (os.rename/os.replace) from the staging directory into an ABSENT final destination path"
+unguarded_sequential_final_renames_forbidden = true
+destination_must_be_absent_before_install = true
+
+[artifact_write_policy.atomic_installation.single_file_artifacts]
+applies_to = ["a checkpoint pointer/manifest file that is legitimately replaceable across generations"]
+staging_unit = "one same-directory temporary file (same directory as the final destination, so the replace is on the same filesystem)"
+install_operation = "exactly one atomic os.replace of the validated temporary file onto the final path"
+validate_before_replace_required = true
+prior_valid_file_preserved_on_validation_failure = true
+
+# -----------------------------------------------------------------
+# Post-install reopen and reverification. This is a THIRD, distinct
+# requirement from staged pre-install self-verification (staging
+# section, above) and from the atomic installation step itself
+# (multi_file_artifacts/single_file_artifacts, above) -- both of those
+# remain mandatory and unchanged; this section adds a mandatory step
+# that happens strictly AFTER the atomic rename completes.
+#
+# Modeled exactly on e20-dfp-phase1b-diagnostic-execution's own
+# atomic_write_stage_a_npz, which -- after os.replace installs the
+# NPZ -- reopens the INSTALLED path (never the already-unlinked
+# staging/temp path) via np.load and re-runs the unmodified
+# validate_stage_a_flat_arrays against those freshly-read bytes,
+# raising straight through (no except/rollback) if that reload-verify
+# fails. Note this differs from E20's OWN atomic_install_result
+# (the multi-file/directory-rename case), which validates staged
+# members only BEFORE the rename and defines no post-rename
+# reverification at all -- this policy deliberately extends E20's
+# proven single-file reopen-verify pattern to also cover E22's
+# multi-file bundle installs, since that is exactly what this
+# repair requires; it is not a claim that atomic_install_result
+# already does this.
+# -----------------------------------------------------------------
+
+[artifact_write_policy.atomic_installation.post_install_verification]
+reopen_and_reverify_after_install_required = true
+applies_to = ["multi_file_artifacts", "single_file_artifacts"]
+reopen_source = "the installed destination path only -- never the staging/temporary path, which no longer exists (multi-file: renamed away; single-file: replaced/unlinked by os.replace)"
+reopen_timing = "strictly after the atomic rename/replace has completed -- never before, and never substituting for the pre-install staged self-verification"
+public_validator_required_against_installed_bytes = true
+member_hashes_recomputed_from_installed_bytes = true
+sibling_bindings_recomputed_from_installed_bytes = true
+success_reported_only_after_post_install_verification_passes = true
+post_install_failure_reported_as_installation_failure = true
+post_install_failure_never_silently_converted_to_success = true
+downstream_advance_forbidden_before_post_install_verification_passes = [
+    "current_generation_pointer", "checkpoint.final_result_binding", "checkpoint.final",
+    "selection_artifact.selected_candidate", "any_current_or_latest_artifact_reference",
+]
+cleanup_on_post_install_verification_failure = "reused_from_e20_atomic_write_stage_a_npz: NONE -- the newly-installed (already-renamed) artifact is left on disk exactly as installed, for forensic inspection; the exception propagates straight through with no automatic delete/quarantine/rollback of the just-installed bytes. This is a precise statement of E20's own actual behavior, not a stricter fabricated deletion policy."
+overwrite_authorized_by_this_requirement = false
+replaces_pre_install_staged_verification = false
+both_pre_install_and_post_install_verification_mandatory = true
+
+[artifact_write_policy.generation_protocol]
+design = "immutable generation directories plus an atomically-updated latest-generation pointer -- identical in spirit to e20-dfp-phase1b-diagnostic-execution's checkpoint-after-every-completed-image discipline, reused here because it is already proven safe under interruption in this repository and introduces no new safety mechanism"
+immutable_generation_directory = "each installed generation (e.g. each finalized checkpoint/result install) is written once, under its own generation identifier, and is NEVER modified or overwritten after a successful atomic install"
+latest_pointer_update = "the 'current generation' pointer (if used) is itself updated via the single-file atomic os.replace rule above -- never by editing a pointer file in place"
+why_this_protocol = "avoids ANY window where a reader can observe a partially-written generation, and avoids ANY window where a failed write leaves the 'current' pointer referencing a nonexistent or partial generation -- the same guarantee E20's own already-committed, already-exercised atomic_write_checkpoint/atomic_install_result provide"
+
+[artifact_write_policy.failure_behavior]
+failure_before_final_rename_leaves_prior_state_untouched = true
+staging_residue_removed_on_failure = true
+partial_generation_can_never_become_current = true
+schema_or_digest_failure_blocks_advancement = true
+interruption_between_computation_and_commit_reprocesses_at_most_one_image = "since checkpoints commit after every completed development image (never mid-image), an interruption can cause at most the single in-flight (uncommitted) image to be reprocessed on resume -- never a committed one"
+fatal_exceptions_propagate_after_cleanup = true
+rollback_failure_must_be_reported_explicitly = "a failure during staging-residue cleanup is itself surfaced (never silently swallowed) -- it must never be reported as if the original write had succeeded, and must never be reported as if no error occurred"
+existing_valid_artifacts_byte_identical_after_failed_install = true
+source_artifacts_never_mutated = true
+
+[artifact_write_policy.freshness_and_overwrite]
+development_result_install_requires_absent_destination = true
+selection_artifact_install_requires_absent_destination = true
+profiling_artifact_install_requires_absent_destination = true
+future_full_evaluation_result_install_requires_absent_destination = true
+e22_grants_destructive_overwrite = false
+rerun_requires_new_output_destination_unless_later_authority_permits_replacement = true
+immutable_checkpoint_generations_never_overwritten = true
+temporary_staging_or_backup_entries_not_accepted_as_final_artifacts = true
+
+[artifact_write_policy.sibling_digest_bindings]
+list = [
+    "checkpoint JSON metadata <-> checkpoint per-image/aggregate arrays: identity_bindings.development_digest and the checkpoint's own recorded array-derived hashes must agree",
+    "development_result <-> its source (finalized) checkpoint: development_result_schema.identity_bindings (or equivalent) must record the exact finalized checkpoint's own generation/hash it was produced from",
+    "selection_artifact <-> development_result and confirmation_result: selection_schema.development_source_hashes must match the actual installed development_result bytes; confirmation_result must reference the same selected candidate identity",
+    "profiling_artifact <-> the selected candidate: profiling_schema records must be keyed to the SAME candidate_id the selection_artifact names as selected -- never a different or unselected candidate",
+    "future_full_evaluation_result <-> the selected E22 successor identity: upstream_hashes must include e22_protocol_sha256/e22_artifacts_sha256 of the EXACT E22 version whose selection_artifact authorized proceeding",
+]
+digest_mismatch_behavior = "reject: a sibling digest-binding mismatch is a fatal schema/relational violation, identical in severity to a closed-schema key-set violation -- never a warning"
