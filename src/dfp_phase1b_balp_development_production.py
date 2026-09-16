@@ -289,8 +289,8 @@ def build_execution_providers(
     processor."""
     import src.dfp_phase1b_lightweight_boundary_execute as execmod
 
-    resources = dataset_resources_builder(repo_root, window_index.canonical_ids)
-    inference = inference_builder(resources, device, log_dir)
+    resources = dataset_resources_builder(repo_root, development_ids=window_index.canonical_ids)
+    inference = inference_builder(resources, device=device, log_dir=log_dir)
     contracts = narrow_balp_contracts(resources.contracts)
     return execmod.ExecutionProviders(
         dataset_resources=resources, image_preparer=None, inference=inference,

@@ -213,9 +213,9 @@ def _fake_inference_builder(resources, device, log_dir):
 def test_build_execution_providers_calls_builders_exactly_once(real_window_index):
     calls = {"dataset": 0, "inference": 0}
 
-    def counting_dataset_builder(repo_root, ids):
+    def counting_dataset_builder(repo_root, development_ids):
         calls["dataset"] += 1
-        return _fake_dataset_resources_builder(repo_root, ids)
+        return _fake_dataset_resources_builder(repo_root, development_ids)
 
     def counting_inference_builder(resources, device, log_dir):
         calls["inference"] += 1
@@ -373,3 +373,38 @@ def test_full_350_image_run_rejects_out_of_population_id_before_any_processing(r
         assert result["complete"] is True
     finally:
         shutil.rmtree(output_root, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------
+# Regression test for a real defect found by the actual production GPU
+# job (not by any fake-provider test): build_execution_providers called
+# its real/default builders POSITIONALLY, but build_real_dataset_
+# resources / build_real_inference declare their second-and-later
+# parameters keyword-only (a bare `*`). Every prior test injected a
+# fake builder whose own signature happened to accept positional args,
+# so the mismatch was invisible until the real function was actually
+# called. This test binds the REAL (default) builders' signatures
+# against the exact call pattern build_execution_providers/
+# run_development_execution use -- catching a TypeError here, cheaply
+# and without constructing a real dataset/model, the same way a real
+# job would hit it expensively.
+# ---------------------------------------------------------------------
+
+
+def test_real_default_builders_are_call_site_compatible():
+    import inspect
+
+    default_builders = prod.ProductionBuilders()
+
+    # Exactly the call build_execution_providers makes.
+    inspect.signature(default_builders.dataset_resources_builder).bind("repo_root_placeholder", development_ids=["a", "b"])
+    inspect.signature(default_builders.inference_builder).bind("resources_placeholder", device="cpu", log_dir="log_dir_placeholder")
+
+    # Exactly the call run_development_execution makes.
+    inspect.signature(default_builders.image_provider_fn_builder).bind("resources_placeholder", "window_index_placeholder", 255)
+
+    # And the real (non-default) builder functions themselves, bound the
+    # same way, independent of the ProductionBuilders defaults wiring.
+    inspect.signature(prod.build_real_dataset_resources).bind("repo_root_placeholder", development_ids=["a", "b"])
+    inspect.signature(prod.build_real_inference).bind("resources_placeholder", device="cpu", log_dir="log_dir_placeholder")
+    inspect.signature(prod.build_real_image_provider_fn).bind("resources_placeholder", window_index="wi_placeholder", expected_ignore_index=255)
