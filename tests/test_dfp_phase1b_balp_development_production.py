@@ -408,3 +408,52 @@ def test_real_default_builders_are_call_site_compatible():
     inspect.signature(prod.build_real_dataset_resources).bind("repo_root_placeholder", development_ids=["a", "b"])
     inspect.signature(prod.build_real_inference).bind("resources_placeholder", device="cpu", log_dir="log_dir_placeholder")
     inspect.signature(prod.build_real_image_provider_fn).bind("resources_placeholder", window_index="wi_placeholder", expected_ignore_index=255)
+
+
+# ---------------------------------------------------------------------
+# Regression test for a second real defect found by the actual
+# production GPU job (22070469, after the first fix): the real
+# PreparedDiagnosticImage (from _extract_prepared_image) has no
+# `.ori_shape` attribute at all -- only `.img_metas["ori_shape"]` --
+# but the committed, unmodifiable process_development_image reads
+# `prepared.ori_shape` directly. Every fake `prepared` object in this
+# test file was hand-constructed WITH an `.ori_shape` attribute (since
+# nothing enforced it matched the real class's shape), so this was
+# invisible until the real image-provider path ran against a real
+# dataset sample. This test independently confirms _BalpPreparedImage
+# exposes exactly the 4 attributes process_development_image actually
+# reads (grepped directly from its source, never assumed), and that
+# ori_shape extraction/validation matches the established
+# dfp_phase1a_execute.py convention.
+# ---------------------------------------------------------------------
+
+
+def test_balp_prepared_image_exposes_exactly_what_process_development_image_reads():
+    import inspect
+
+    import src.dfp_phase1b_lightweight_boundary_execute as execmod
+
+    source = inspect.getsource(execmod.process_development_image)
+    attrs_read = {"image_tensor", "inference_height", "inference_width", "ori_shape"}
+    for attr in attrs_read:
+        assert f"prepared.{attr}" in source, f"process_development_image no longer reads prepared.{attr} -- update the wrapper/test"
+
+    wrapped = prod._BalpPreparedImage(image_tensor="tensor-marker", inference_height=597, inference_width=448, ori_shape=(640, 480))
+    for attr in attrs_read:
+        assert hasattr(wrapped, attr), f"_BalpPreparedImage is missing {attr}"
+
+
+def test_ori_shape_from_img_metas_matches_established_convention():
+    class _FakeRawPrepared:
+        img_metas = {"ori_shape": (640, 480, 3)}  # real mmcv convention: (H, W, C)
+
+    ori_shape = prod._ori_shape_from_img_metas(_FakeRawPrepared(), canonical_id="test_id")
+    assert ori_shape == (640, 480)
+
+
+def test_ori_shape_from_img_metas_rejects_malformed_metadata():
+    class _FakeRawPreparedBad:
+        img_metas = {"ori_shape": (0, 480, 3)}
+
+    with pytest.raises(E, match="malformed ori_shape"):
+        prod._ori_shape_from_img_metas(_FakeRawPreparedBad(), canonical_id="test_id")

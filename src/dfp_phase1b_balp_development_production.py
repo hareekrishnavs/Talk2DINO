@@ -321,6 +321,37 @@ def _expected_window_span(inference_height: int, inference_width: int, *, crop: 
     return grid_rows * grid_cols
 
 
+@dataclass(frozen=True)
+class _BalpPreparedImage:
+    """The exact 4-attribute shape the committed, unmodifiable
+    ``process_development_image`` reads off ``prepared``
+    (``.image_tensor`` / ``.inference_height`` / ``.inference_width`` /
+    ``.ori_shape`` -- verified directly against that function's own
+    source). The real ``PreparedDiagnosticImage`` (from
+    ``_extract_prepared_image``) carries the first three but has no
+    ``ori_shape`` attribute at all -- this thin wrapper adds it,
+    computed the SAME way ``src/dfp_phase1a_execute.py``'s own real
+    production driver already does (``img_metas["ori_shape"]``,
+    2-element, validated), rather than inventing a second convention."""
+
+    image_tensor: Any
+    inference_height: int
+    inference_width: int
+    ori_shape: tuple[int, int]
+
+
+def _ori_shape_from_img_metas(prepared: Any, *, canonical_id: str) -> tuple[int, int]:
+    """Identical extraction/validation to `src/dfp_phase1a_execute.py`'s
+    own real production driver: `ori_shape` comes EXCLUSIVELY from
+    authoritative image/pipeline metadata (`img_metas["ori_shape"]`),
+    never re-derived, guessed, or read from a nonexistent attribute."""
+    raw = prepared.img_metas["ori_shape"]
+    ori_shape = tuple(int(v) for v in raw[:2])
+    if len(ori_shape) != 2 or ori_shape[0] <= 0 or ori_shape[1] <= 0:
+        raise DfpPhase1bBalpDevelopmentProductionError(f"image {canonical_id}: malformed ori_shape from image metadata: {ori_shape}")
+    return ori_shape
+
+
 def build_real_image_provider_fn(
     resources: Any, *, window_index: DevelopmentWindowIndex, expected_ignore_index: int,
 ) -> "Callable[[str], execmod.DevelopmentImageProvider]":
@@ -347,7 +378,12 @@ def build_real_image_provider_fn(
             dataset, manifest_position=position.manifest_position,
             canonical_id=position.canonical_id, native_index=position.native_index,
         )
-        prepared = _extract_prepared_image(dataset, position.native_index, canonical_image_id=position.relative_path)
+        raw_prepared = _extract_prepared_image(dataset, position.native_index, canonical_image_id=position.relative_path)
+        ori_shape = _ori_shape_from_img_metas(raw_prepared, canonical_id=canonical_id)
+        prepared = _BalpPreparedImage(
+            image_tensor=raw_prepared.image_tensor, inference_height=raw_prepared.inference_height,
+            inference_width=raw_prepared.inference_width, ori_shape=ori_shape,
+        )
 
         selected_windows = window_index.windows_per_image[canonical_id]
         expected_geometry_windows = _expected_window_span(prepared.inference_height, prepared.inference_width)
@@ -362,7 +398,6 @@ def build_real_image_provider_fn(
         # process_development_image, which receives only `prepared`.
         gt_raw = dataset.get_gt_seg_map_by_idx(position.native_index)
         ground_truth = np.asarray(gt_raw).astype(np.int64)
-        ori_shape = tuple(prepared.ori_shape)
         if ground_truth.shape != ori_shape:
             raise DfpPhase1bBalpDevelopmentProductionError(
                 f"image {canonical_id}: GT shape {ground_truth.shape} disagrees with the canonical final ori_shape {ori_shape} "
