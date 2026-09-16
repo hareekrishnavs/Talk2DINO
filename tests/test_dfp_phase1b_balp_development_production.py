@@ -457,3 +457,39 @@ def test_ori_shape_from_img_metas_rejects_malformed_metadata():
 
     with pytest.raises(E, match="malformed ori_shape"):
         prod._ori_shape_from_img_metas(_FakeRawPreparedBad(), canonical_id="test_id")
+
+
+# ---------------------------------------------------------------------
+# Regression test for a third real defect found by the actual
+# production GPU job (22071183, after the second fix): the committed,
+# unmodifiable process_development_image indexes image_tensor as
+# `image_tensor[:, :, crop_rows, crop_cols]` (a 4-index, batched
+# [1,C,H,W] pattern), but the real PreparedDiagnosticImage.image_tensor
+# is unbatched [C,H,W] -- identical to how src/dfp_phase1a_execute.py's
+# own real driver handles this (`prepared.image_tensor.unsqueeze(0)`
+# immediately before the same indexing pattern). No fake `prepared`
+# object in this test file was ever actually indexed the way the real
+# scientific processor indexes it, so this was invisible until a real
+# image reached process_development_image.
+# ---------------------------------------------------------------------
+
+
+def test_balp_prepared_image_tensor_is_batched_and_crop_indexable():
+    import torch
+
+    class _FakeRawPrepared:
+        image_tensor = torch.zeros(3, 100, 200)  # real PreparedDiagnosticImage shape: [C, H, W], unbatched
+        inference_height = 100
+        inference_width = 200
+        img_metas = {"ori_shape": (110, 210, 3)}
+
+    raw = _FakeRawPrepared()
+    ori_shape = prod._ori_shape_from_img_metas(raw, canonical_id="test_id")
+    wrapped = prod._BalpPreparedImage(
+        image_tensor=raw.image_tensor.unsqueeze(0), inference_height=raw.inference_height,
+        inference_width=raw.inference_width, ori_shape=ori_shape,
+    )
+    assert wrapped.image_tensor.ndim == 4, "image_tensor must be batched [1,C,H,W], matching process_development_image's own 4-index crop pattern"
+    # Exactly the real indexing pattern process_development_image uses.
+    crop = wrapped.image_tensor[:, :, slice(0, 50), slice(0, 60)]
+    assert tuple(crop.shape) == (1, 3, 50, 60)

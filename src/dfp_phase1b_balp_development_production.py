@@ -328,11 +328,22 @@ class _BalpPreparedImage:
     (``.image_tensor`` / ``.inference_height`` / ``.inference_width`` /
     ``.ori_shape`` -- verified directly against that function's own
     source). The real ``PreparedDiagnosticImage`` (from
-    ``_extract_prepared_image``) carries the first three but has no
-    ``ori_shape`` attribute at all -- this thin wrapper adds it,
-    computed the SAME way ``src/dfp_phase1a_execute.py``'s own real
-    production driver already does (``img_metas["ori_shape"]``,
-    2-element, validated), rather than inventing a second convention."""
+    ``_extract_prepared_image``) carries the last two but neither of
+    the other two in the exact shape needed:
+
+    * ``image_tensor`` must be BATCHED ``[1, C, H, W]`` (the real
+      ``PreparedDiagnosticImage.image_tensor`` is unbatched
+      ``[C, H, W]``) -- ``process_development_image`` indexes it as
+      ``image_tensor[:, :, crop_rows, crop_cols]``, a 4-index pattern,
+      identical to ``src/dfp_phase1a_execute.py``'s own real driver,
+      which adds the batch dimension the exact same way
+      (``prepared.image_tensor.unsqueeze(0)``) immediately before that
+      same indexing pattern.
+    * ``ori_shape`` does not exist on ``PreparedDiagnosticImage`` at
+      all -- only ``img_metas["ori_shape"]`` -- computed the SAME way
+      ``src/dfp_phase1a_execute.py``'s own real production driver
+      already does (2-element, validated), rather than inventing a
+      second convention."""
 
     image_tensor: Any
     inference_height: int
@@ -381,7 +392,7 @@ def build_real_image_provider_fn(
         raw_prepared = _extract_prepared_image(dataset, position.native_index, canonical_image_id=position.relative_path)
         ori_shape = _ori_shape_from_img_metas(raw_prepared, canonical_id=canonical_id)
         prepared = _BalpPreparedImage(
-            image_tensor=raw_prepared.image_tensor, inference_height=raw_prepared.inference_height,
+            image_tensor=raw_prepared.image_tensor.unsqueeze(0), inference_height=raw_prepared.inference_height,
             inference_width=raw_prepared.inference_width, ori_shape=ori_shape,
         )
 
