@@ -1,0 +1,367 @@
+format_version = "talk2dino-dfp-phase1b-balp-development-execution-identity-v1"
+
+# This identity authorizes REAL EXECUTION of the already-frozen BALP
+# method (e22-dfp-phase1b-lightweight-boundary-preservation) over the
+# already-frozen 350-image development split, via the already-committed
+# BALP runner. It defines no new scientific formula, no new metric, no
+# new artifact schema, and no new candidate/control -- every scientific
+# definition is bound by exact path + SHA-256 to E22 (preservation +
+# artifacts) and reused unmodified. This identity's own additions are:
+# (1) the real production dataset/geometry/model provider binding E22
+# deliberately left unbound (E22 "implements no method, runs no
+# inference... authorizes no GPU execution"); (2) the frozen 350-image
+# development window universe (image count, window count, canonical
+# digest) that a prior task found BLOCKED and this identity's own
+# predecessor task resolved by real, independently-verified
+# materialization; (3) the GPU/wall-time resource contract; (4) the
+# checkpoint/resume mode authorization; (5) an explicit prohibition
+# list strictly narrower than or equal to E22's own.
+#
+# This identity freezes authority only. It runs no inference, submits
+# no GPU job, constructs no model, and accesses no image pixel or GT
+# annotation.
+
+[identity]
+name = "e23-dfp-phase1b-balp-development-execution"
+schema_name = "talk2dino-dfp-phase1b-balp-development-execution-identity-v1"
+schema_version = 1
+description = "Authorizes real BALP evaluation (16 candidates + 5 controls, e22-dfp-phase1b-lightweight-boundary-preservation) on the frozen 350-image development split only, via the committed BALP runner and the committed real dataset/geometry/model provider, on exactly one H100 80GB GPU, wall time at most 05:00:00, in fresh/resume/finalize-only-via-resume modes. Prohibits confirmation-split access, the other 4,500 images, full 5,000-image evaluation, exact masked-forward provenance, candidate-specific recurrence, and overwrite of a completed development result. Freezes authority only -- implements no execute CLI, submits no GPU job, runs no inference."
+required_ancestor_commit = "f0bb0eadd8daf63b82f2b9c93f6c15afd78fb890"
+working_branch = "dfp-phase1a-diagnostics"
+successor_of = "e22-dfp-phase1b-lightweight-boundary-preservation"
+mutates_or_version_bumps_earlier_identity = false
+
+# ---------------------------------------------------------------------
+# Dependency bindings: every scientific/runner/provider module or
+# artifact E23's future real execution actually depends on, bound by
+# exact repository-relative path and SHA-256. E22's own scientific
+# dependency set (e13_protocol .. balp_split_artifact) is reproduced
+# here verbatim by identical path+hash -- E23 never re-derives or
+# re-chooses these, it only re-pins them so a single E23 load can
+# relationally verify the entire chain without trusting E22's own file
+# to still be byte-identical at execution time.
+# ---------------------------------------------------------------------
+
+[dependency_bindings.e22_preservation]
+relative_path = "evaluation_identities/e22_dfp_phase1b_lightweight_boundary_preservation.toml"
+sha256 = "bcc6db2dce36c3d740cd66cc36125de36c3faf86dd9924cd02218ec60ee5d63d"
+binds = "the entire BALP method identity: 16 candidates, 5 controls, boundary/stability/late-flip formulas, GT isolation, the 350/150 development/confirmation split definition, operational acceptance caps -- E23 redefines none of these"
+
+[dependency_bindings.e22_artifacts]
+relative_path = "evaluation_identities/e22_dfp_phase1b_lightweight_boundary_artifacts.toml"
+sha256 = "a7a659277e5128f9e7fbb9d25e22577f0b26e76885e21235cc84b5eb8a71ab0a"
+binds = "the closed checkpoint/development-result/selection/profiling artifact schemas and the staged-write/atomic-install/post-install-reverify policy a real execution must follow -- E23 defines no competing schema"
+
+[dependency_bindings.e13_protocol]
+relative_path = "evaluation_identities/e13_dfp_phase1a_protocol.toml"
+sha256 = "227549b03ec6b1262c465a18b7fc67529fa5a0b5deef419c33ec79a80feb2173"
+binds = "horizons=[0,16,32,64,320], graph/propagation contract (k12, alpha=0.98, steps=320), coco_stuff_dataset class_count/ignore_index/class_names, the argmax tie rule, and (via parent_identities) the exact E3 evaluator/model identity and window_enumeration authority (SlidingWindowPlan.build) -- never redefined here"
+
+[dependency_bindings.matched_evaluator]
+relative_path = "evaluation_identities/e12_matched_k11_k12_t320.toml"
+sha256 = "1f4eea731ae7b803a5e2d572d0a1f59b3275ec240d36061d03540706e3bbc259"
+binds = "crop=(448,448)/stride=(224,224)/align_corners=true geometry, patch_size, snapshot semantics, the [prohibited] pamr exclusion, and the frozen compute_dtype=float32/output_dtype=float32 precision this identity's own [precision] section re-pins by reference"
+
+[dependency_bindings.subset_manifest]
+relative_path = "evaluation_subsets/dfp_phase1a_coco_stuff_500.json"
+sha256 = "75373aca8ef6d434ae02a7e90b6dcc9ba13fd8a31d1e87d858a2f542c19ef482"
+binds = "the frozen 500 canonical coco_stuff_500 image IDs BALP's development/confirmation split re-partitions; no other image is ever accessible"
+
+[dependency_bindings.balp_split_artifact]
+relative_path = "evaluation_subsets/dfp_phase1b_lightweight_boundary_500_split.json"
+sha256 = "5c72634e2b27213162f547bcc9c15fe135056c84bcdc1174dc8e8b77a4451976"
+binds = "the persisted, independently-reconstructible 350/150 development/confirmation partition; the loader recomputes it and rejects any disagreement"
+
+[dependency_bindings.graph_module]
+relative_path = "src/open_vocabulary_segmentation/models/dinotext/cover_dr/graph.py"
+sha256 = "b7d4eec053dc204db869590a5ff3763b630084a65f0abd3101190b1e77f33ac5"
+binds = "build_directed_topk_graph -- the single canonical k12 graph a real execution's one recurrence pass reuses; never a second graph"
+
+[dependency_bindings.finite_step_regime_module]
+relative_path = "src/open_vocabulary_segmentation/models/dinotext/cover_dr/finite_step_regime.py"
+sha256 = "79ce8ed0e5462131cf148a1615aa60048b4a05782de7d5279ddee45856de6108"
+binds = "finite_step_propagate/snapshot_steps -- the single 320-step recurrence pass a real execution's five horizon snapshots are read from"
+
+[dependency_bindings.recurrence_capture_module]
+relative_path = "src/dfp_phase1a_recurrence_capture.py"
+sha256 = "9d762674cd92063e6c6620dae7664dbfd8cb06eb1bace437a3fdde701ed83bd0"
+binds = "capture_dfp_phase1a_trajectory -- extracts T0/T16/T32/T64/T320 from one recurrence pass; never re-run per horizon or per candidate"
+
+[dependency_bindings.horizon_stitching_module]
+relative_path = "src/dfp_phase1a_horizon_stitching.py"
+sha256 = "eed3d6f6619c05251403bb2ab88bc2724d443f858b8fe913cfae3a2c31c5bdb8"
+binds = "stitch_dfp_phase1a_horizons and dfp_stitching_contract_from_protocol -- the exact existing multi-window stitching and the frozen crop/stride/align_corners contract, identical across all five horizons"
+
+[dependency_bindings.stitching_pullback_module]
+relative_path = "src/dfp_phase1a_stitching_pullback.py"
+sha256 = "6e15dd8b967eeaa317ab417ded2127d04f9064accf97fca6275e7cf962a1ac04"
+binds = "the window-level A_stitch operator composed inside final rescale; a real execution calls no pullback/membership function from this module -- only the forward stitching path already used to produce S_h"
+
+[dependency_bindings.final_rescale_module]
+relative_path = "src/dfp_phase1a_final_rescale_pullback.py"
+sha256 = "fe771097e0204dde1f48d236f6142ec32880743e0fb4638425938e489af14298"
+binds = "apply_final_rescale_forward (R): the exact crop-then-bilinear-resize to ori_shape S_h fields are read at"
+
+[dependency_bindings.analysis_module]
+relative_path = "src/dfp_phase1a_analysis.py"
+sha256 = "65a859892ca04ebf47d6ce876d357a3490c7503b2a45cb4f7b488276a1d4e201"
+binds = "derive_horizon_labels/_lowest_index_argmax, ConfusionStatistics, aggregate_confusion_statistics, compute_semantic_metrics -- dataset-level mIoU/per-class-IoU/mAcc/aAcc; no new metric formula"
+
+[dependency_bindings.identity_module]
+relative_path = "src/dfp_phase1a_identity.py"
+sha256 = "113a2a373a959ac17d569a3180736104414e041f191e7c8107c67cc64fccc685"
+binds = "load_identity/validate_graph_block/validate_propagation_block -- the canonical E13 loader this identity's own loader re-delegates to"
+
+[dependency_bindings.balp_scientific_kernel]
+relative_path = "src/dfp_phase1b_lightweight_boundary.py"
+sha256 = "28d58754eeb504e2cbc4fd27b17b9009d355d606780dbd8467c78b54ecc39f62"
+binds = "the committed BALP scientific kernel: boundary/stability/late-flip/candidate-score-field computation over the five frozen horizon fields"
+
+[dependency_bindings.balp_artifact_validator]
+relative_path = "src/dfp_phase1b_lightweight_boundary_artifact.py"
+sha256 = "be987a29f9e998bcfce3b8ea2439fabec0e4b97ac6aef227d2cb1e93d1529197"
+binds = "the committed checkpoint/result closed-schema validators and the atomic staged-write/install/reopen-reverify implementation a real execution must use unmodified"
+
+[dependency_bindings.balp_execution_runner]
+relative_path = "src/dfp_phase1b_lightweight_boundary_execute.py"
+sha256 = "83d7dfc403d07c6b0b3a9b5c2d9203a4f6acd5d98c7309fd4777e089b2aa46ee"
+binds = "the committed crash-atomic checkpoint-generation execution orchestration (immutable generations, atomic current pointer, orphan-generation reconciliation, fresh/resume/finalize-only recovery) -- the only execution engine E23 authorizes"
+
+[dependency_bindings.balp_cli]
+relative_path = "diagnostics/run_dfp_phase1b_lightweight_boundary.py"
+sha256 = "551c37ffc7b4fc92aacbee785a01c7ed4b702063a79549685ddcf593757bd6f5"
+binds = "the committed CLI (verify-protocol/preflight/verify-checkpoint/verify-development-result); its `execute` subcommand currently always fails closed with EXECUTE IS NOT AUTHORIZED -- a future real `execute` implementation is a SEPARATE, later task this identity does not perform"
+
+[dependency_bindings.production_provider_module]
+relative_path = "src/dfp_phase1b_calibration_production.py"
+sha256 = "77188761f4eca5f47a5ae1f81f31f4c1ff0bfac4a247cea614e19b8a948df30e"
+binds = "build_production_dataset_resources / build_production_geometry_provider / build_production_inference / verify_backbone_weights_present -- the exact real dataset/geometry/model provider path a real execution must use; the sole permitted source of model construction and image decoding"
+
+[dependency_bindings.dataset_view_module]
+relative_path = "src/dfp_phase1a_dataset_view.py"
+sha256 = "2dedc0eadb34f4c8f2e5850617af3f0387ce9b97adca9ec2fef1cc16230f1b2f"
+binds = "build_manifest_execution_view / verify_position_identity / reconcile_canonical_image_id / compute_mapping_digest -- the canonical manifest-order-to-native-dataset-index adapter and relative-path reconciliation; the sole permitted source of frozen-ID-to-dataset-position resolution"
+
+[dependency_bindings.sliding_window_geometry_module]
+relative_path = "src/open_vocabulary_segmentation/segmentation/evaluation/sliding_window_geometry.py"
+sha256 = "082a812907581444ed6ed87b232c82105a0071ca24cd802aceec81fa0ec3c25b"
+binds = "SlidingWindowPlan.build -- the single canonical, pure window-construction primitive; the sole permitted source of per-image window enumeration"
+
+[dependency_bindings.window_universe_materializer_module]
+relative_path = "src/dfp_phase1b_development_window_universe.py"
+sha256 = "de40af69f82277b8171e590015451d1f3ee0dfe4adceb8e84c0ce38ee1dd793e"
+binds = "materialize_development_window_universe / verify_window_universe_document / independently_reconstruct_and_verify -- the committed, independently-verified materializer that produced dependency_bindings.development_window_universe"
+
+[dependency_bindings.development_window_universe]
+relative_path = "evaluation_subsets/dfp_phase1b_development_window_universe.json"
+sha256 = "53f98d52ecc562160446b7e0ee3fc656bcdf3d678291291007804d5dca8e3f3b"
+image_count = 350
+window_count = 769
+canonical_record_digest = "b4672854e38199deef26c154a30e45c1835c201a4dbcf046aa29e7fdf12df9e6"
+binds = "the exact, real, independently-reconstructed per-image inference-canvas geometry and sliding-window layout for all 350 development images (CPU-only, model-free, GT-free materialization via dependency_bindings.production_provider_module and dependency_bindings.sliding_window_geometry_module, fed the frozen crop/stride from dependency_bindings.horizon_stitching_module) -- resolves the development-window-universe authority gap a prior task found BLOCKED; no BALP execution may proceed without this binding verifying"
+
+# ---------------------------------------------------------------------
+# Historical exclusions: identical in spirit to E22's own -- these
+# authorities are not real dependencies of a real BALP execution
+# either, and E23 does not newly introduce a dependency on any of them.
+# ---------------------------------------------------------------------
+
+[historical_exclusions]
+list = [
+    "e19-dfp-phase1b-conservation-tolerance: rho_g residual tolerance for exact masked-forward provenance; BALP performs no masked-forward propagation",
+    "e20-dfp-phase1b-diagnostic-execution: the discontinued exact-provenance 500-image diagnostic runner; a real BALP execution neither executes, resumes, nor checkpoints through it",
+    "e21-dfp-phase1b-provenance-features: the eight component-evidence Stage-A fields; BALP constructs no component and consumes none of them",
+    "e15-dfp-phase1b-protocol / e15-dfp-phase1b-artifacts / e16-dfp-phase1b-conservation-calibration: the masked-forward Stage-A/Stage-B schemas and 200-window conservation calibration; a real BALP execution's method/split/artifact schemas are independent of all of these",
+]
+e19_e20_e21_required_by_balp_execution = false
+e15_e16_required_by_balp_execution = false
+note_on_shared_adapter_identity_loads = "dependency_bindings.production_provider_module's own _load_production_identities also loads the E15 phase1b_identity and E3 identity as part of shared production-adapter infrastructure it reuses from DFP Phase 1A's own driver; these loaded values are never read by BALP's scientific formulas (identical to E22's own historical_exclusions), and E23 does not bind E15 or a specific E3 TOML filename as a scientific dependency -- the exact E3 identity is determined transitively, at load time, by dependency_bindings.e13_protocol's own [parent_identities].e3_identity_path, never independently re-chosen here"
+
+# ---------------------------------------------------------------------
+# Precision: bound by reference only, never a new value.
+# ---------------------------------------------------------------------
+
+[precision]
+compute_dtype_source = "dependency_bindings.matched_evaluator [runtime].compute_dtype"
+compute_dtype = "float32"
+output_dtype_source = "dependency_bindings.matched_evaluator [runtime].output_dtype"
+output_dtype = "float32"
+precision_source_description = "full_precision_area_statistics_from_mmseg_pre_eval, identical to dependency_bindings.matched_evaluator's own frozen convention"
+new_precision_setting_introduced = false
+
+# ---------------------------------------------------------------------
+# Scientific execution contract (section 10 of the authorizing task):
+# exactly what a real execution must do per selected window, and what
+# it must fail closed on.
+# ---------------------------------------------------------------------
+
+[scientific_execution_contract]
+model_forwards_per_window = 1
+graph_constructions_per_window = 1
+recurrence_trajectories_per_window = 1
+horizon_snapshots_reused_from_single_trajectory = [0, 16, 32, 64, 320]
+candidates_evaluated_per_image_without_additional_recurrence = 16
+controls_evaluated_per_image_without_additional_recurrence = 5
+second_recurrence_trajectory_per_candidate_forbidden = true
+
+[scientific_execution_contract.fail_closed_on]
+list = [
+    "model_or_source_binding_mismatch",
+    "dataset_order_mismatch",
+    "confirmation_or_non_development_image_requested",
+    "filename_or_relative_path_identity_mismatch",
+    "second_recurrence_trajectory_triggered_by_any_candidate",
+    "development_window_universe_binding_mismatch",
+]
+
+# ---------------------------------------------------------------------
+# Frozen development population and access contract.
+# ---------------------------------------------------------------------
+
+[population]
+development_image_count = 350
+development_image_ids_source = "dependency_bindings.balp_split_artifact development_image_ids, identical order (ranks 0..349)"
+confirmation_image_count_accessible = 0
+other_validation_images_accessible = 0
+window_count = 769
+window_count_source = "dependency_bindings.development_window_universe.window_count"
+window_universe_digest = "b4672854e38199deef26c154a30e45c1835c201a4dbcf046aa29e7fdf12df9e6"
+window_universe_digest_source = "dependency_bindings.development_window_universe.canonical_record_digest"
+candidate_count = 16
+control_count = 5
+candidate_ids_source = "dependency_bindings.e22_preservation [candidate_family.ordered_candidate_ids]"
+control_ids_source = "dependency_bindings.e22_preservation [candidate_family.canonical_controls]"
+
+# ---------------------------------------------------------------------
+# Resource contract (operational values explicitly authorized by the
+# authorizing task prompt; CPU/memory reuse the established H100-class
+# launcher precedent, dfp_phase1b_chunk_benchmark_h100.sbatch).
+# ---------------------------------------------------------------------
+
+[resource_contract]
+device_type = "cuda"
+gpu_count = 1
+gpu_model = "h100_80gb"
+max_wall_time = "05:00:00"
+cpus_per_task = 8
+host_memory = "80G"
+account_convention = "rrg-yangw (GPU jobs, per the repository's own established account/partition convention -- see dfp_phase1b_chunk_benchmark_h100.sbatch; never invented)"
+timeout_leaves_valid_checkpoint_required = true
+timeout_must_not_silently_relax_limit = true
+runtime_claim_before_real_job_executed_forbidden = true
+
+# ---------------------------------------------------------------------
+# Checkpoint / resume contract.
+# ---------------------------------------------------------------------
+
+[checkpoint_resume_contract]
+accepted_modes = ["fresh", "resume", "finalize_only_via_resume"]
+checkpoint_state_machine_source = "dependency_bindings.e22_artifacts [checkpoint_schema.state_machine]"
+fresh_resume_scientific_equivalence_required = true
+zero_completed_image_reprocessing_required = true
+
+[checkpoint_resume_contract.forbidden]
+list = [
+    "debug_subset",
+    "max_images_override",
+    "alternate_id_order",
+    "force_overwrite_completed_result",
+    "manual_generation_skipping",
+    "silent_checkpoint_reset",
+]
+
+# ---------------------------------------------------------------------
+# Development result authority: reuses E22's artifact schema verbatim.
+# ---------------------------------------------------------------------
+
+[development_result_authority]
+result_schema_source = "dependency_bindings.e22_artifacts [development_result_schema]"
+competing_result_schema_forbidden = true
+required_hash_bindings_in_result = [
+    "e22_protocol_sha256", "e22_artifacts_sha256", "e23_sha256",
+    "e13_protocol_sha256", "matched_evaluator_sha256", "subset_manifest_sha256",
+    "balp_split_sha256", "development_window_universe_sha256", "balp_runner_commit",
+]
+selected_candidate_field_authorized = false
+selected_candidate_field_requires = "e22-defined selection_schema (dependency_bindings.e22_artifacts [selection_schema]), applied as a separate later analysis step -- never embedded in the development_result document itself"
+
+# ---------------------------------------------------------------------
+# Profiling contract: reuses E22's profiling schema verbatim.
+# ---------------------------------------------------------------------
+
+[profiling_contract]
+schema_source = "dependency_bindings.e22_artifacts [profiling_schema]"
+affects_scientific_digest = false
+profiling_on_off_scientific_output_equivalence_required = true
+
+# ---------------------------------------------------------------------
+# Output path and overwrite policy.
+# ---------------------------------------------------------------------
+
+[output_path_policy]
+root_convention = "an environment-driven launcher variable under an appropriate /scratch root, never a private absolute path embedded in source -- identical to dfp_phase1b_chunk_benchmark_h100.sbatch's DFP_BENCHMARK_OUTPUT_ROOT convention"
+lexical_traversal_forbidden = true
+symlink_containment_required = true
+fresh_output_for_first_execution_required = true
+overwrite_of_existing_completed_result_forbidden = true
+overwrite_requires_separate_explicit_later_authority = true
+e23_grants_overwrite_authority = false
+atomic_final_installation_required = true
+staged_validation_required = true
+post_install_reopen_and_reverification_required = true
+artifact_write_policy_source = "dependency_bindings.e22_artifacts [artifact_write_policy]"
+
+# ---------------------------------------------------------------------
+# Authorization boundary.
+# ---------------------------------------------------------------------
+
+[authorization_boundary]
+gpu_execution_authorized_by_this_identity = true
+device_type_authorized = "cuda"
+gpu_count_authorized = 1
+gpu_model_authorized = "h100_80gb"
+max_wall_time_authorized = "05:00:00"
+development_execution_authorized = true
+confirmation_split_access_authorized = false
+other_4500_image_access_authorized = false
+full_5000_image_evaluation_authorized = false
+exact_masked_forward_provenance_authorized = false
+component_construction_or_masked_propagation_authorized = false
+candidate_specific_recurrence_authorized = false
+confirmation_based_tuning_authorized = false
+final_paper_claims_authorized = false
+confirmation_execution_authorized = false
+full_operational_benchmarking_authorized = false
+overwrite_of_completed_development_result_authorized = false
+real_execute_cli_implementation_authorized_by_this_identity = false
+real_launcher_submission_authorized_by_this_identity = false
+candidate_selected_by_this_identity = false
+
+[prohibited]
+list = [
+    "confirmation_split_access",
+    "other_4500_image_access",
+    "full_5000_image_evaluation",
+    "exact_masked_forward_provenance",
+    "component_construction",
+    "component_masked_propagation",
+    "candidate_specific_recurrence",
+    "second_recurrence_pass",
+    "per_candidate_model_rerun",
+    "confirmation_based_tuning",
+    "final_paper_claims",
+    "confirmation_execution",
+    "full_operational_benchmarking",
+    "overwrite_of_completed_development_result",
+    "debug_subset",
+    "max_images_override",
+    "alternate_id_order",
+    "manual_generation_skipping",
+    "silent_checkpoint_reset",
+    "real_execute_cli_implementation_in_this_identity",
+    "gpu_job_submission_in_this_identity",
+    "new_precision_setting",
+    "new_metric_formula",
+    "new_artifact_schema",
+    "e19_e20_e21_dependency",
+]
