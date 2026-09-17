@@ -1,0 +1,126 @@
+format_version = "talk2dino-dfp-phase1b-balp-development-closure-identity-v1"
+
+# This identity freezes the DETERMINISTIC INTERPRETATION of one already-
+# completed, already-independently-verified real execution: SLURM job
+# 22071646 (E23-authorized 350-image BALP development run). It defines
+# no new scientific formula, no new metric, no new threshold, and no
+# relaxed eligibility rule -- E22's own frozen strict eligibility rule
+# (development_miou_strictly_exceeds_t320) is re-pinned by reference and
+# applied exactly as written, never loosened. This identity introduces
+# no execution authority of any kind: it runs no inference, submits no
+# GPU job, constructs no model, and re-derives no confusion matrix or
+# metric that the source checkpoint does not already contain -- it only
+# freezes the closure-analysis CLI's obligation to independently
+# RECOMPUTE (never merely re-read) those metrics from the persisted
+# confusion-matrix arrays and independently re-apply E22's eligibility
+# rule before ever writing a closure artifact.
+#
+# This identity also freezes the historical fact that job 22071646
+# produced no profiling artifact (`profiling_status = "NOT_RECORDED"`)
+# and explicitly prohibits any closure artifact from fabricating,
+# backfilling, or inferring profiling values for that job. A SEPARATE,
+# later repair (see `evaluation_identities/e23_dfp_phase1b_balp_development_execution.toml`
+# `[dependency_bindings]` successors, if any) wires profiling for FUTURE
+# executions only -- it never retroactively touches job 22071646's
+# already-completed, immutable output.
+
+[identity]
+name = "e24-dfp-phase1b-balp-development-closure"
+schema_name = "talk2dino-dfp-phase1b-balp-development-closure-identity-v1"
+schema_version = 1
+description = "Freezes the deterministic, E22-inherited interpretation of the completed E23 real 350-image BALP development execution (SLURM job 22071646): zero eligible BALP candidates under E22's frozen strict eligibility rule, development_outcome = NO_BALP_CANDIDATE_PROCEEDS, confirmation and full-5000-image execution both unauthorized, and historical profiling status NOT_RECORDED. Authorizes generation of a read-only, independently-verified closure artifact (JSON + Markdown) from the completed result -- never re-execution, re-selection, or profiling fabrication."
+required_ancestor_commit = "804a774588b97e43e0347343089a0209ae28a5c9"
+working_branch = "dfp-phase1a-diagnostics"
+successor_of = "e23-dfp-phase1b-balp-development-execution"
+mutates_or_version_bumps_earlier_identity = false
+
+# ---------------------------------------------------------------------
+# Dependency bindings: the authority chain this closure interprets.
+# E24 re-derives no scientific/runner/provider module binding E23
+# already re-pins (graph/recurrence/stitching/kernel/etc.) -- it binds
+# only the identities whose OWN frozen values (eligibility rule,
+# population, split, window universe) the closure analysis must
+# re-verify before trusting the source result at all.
+# ---------------------------------------------------------------------
+
+[dependency_bindings.e22_preservation]
+relative_path = "evaluation_identities/e22_dfp_phase1b_lightweight_boundary_preservation.toml"
+sha256 = "bcc6db2dce36c3d740cd66cc36125de36c3faf86dd9924cd02218ec60ee5d63d"
+binds = "the frozen strict eligibility rule (development_miou_strictly_exceeds_t320) and the 5-control/16-candidate identity this closure independently re-applies -- never redefined or relaxed here"
+
+[dependency_bindings.e22_artifacts]
+relative_path = "evaluation_identities/e22_dfp_phase1b_lightweight_boundary_artifacts.toml"
+sha256 = "a7a659277e5128f9e7fbb9d25e22577f0b26e76885e21235cc84b5eb8a71ab0a"
+binds = "the closed checkpoint/development-result schemas the source artifacts must already satisfy"
+
+[dependency_bindings.e23]
+relative_path = "evaluation_identities/e23_dfp_phase1b_balp_development_execution.toml"
+sha256 = "aa95d55dbe64ca33ebe8f7571a8dc44ef17f3c52800cc50e2a64d22db850df97"
+binds = "the real-execution authorization job 22071646 ran under; this closure interprets that job's completed output only, and authorizes no further execution of its own"
+
+[dependency_bindings.balp_split_artifact]
+relative_path = "evaluation_subsets/dfp_phase1b_lightweight_boundary_500_split.json"
+sha256 = "5c72634e2b27213162f547bcc9c15fe135056c84bcdc1174dc8e8b77a4451976"
+binds = "the frozen 350/150 development/confirmation partition the source result's identity_bindings.balp_split_sha256 must match"
+
+[dependency_bindings.development_window_universe]
+relative_path = "evaluation_subsets/dfp_phase1b_development_window_universe.json"
+sha256 = "53f98d52ecc562160446b7e0ee3fc656bcdf3d678291291007804d5dca8e3f3b"
+image_count = 350
+window_count = 769
+canonical_record_digest = "b4672854e38199deef26c154a30e45c1835c201a4dbcf046aa29e7fdf12df9e6"
+binds = "the frozen 350-image/769-window population the source result's development_image_count must match"
+
+# ---------------------------------------------------------------------
+# The completed, immutable source execution this closure interprets.
+# Every value here was independently reconstructed (not merely
+# re-read) during INDEPENDENT_VERIFY_BALP_DEVELOPMENT_RESULT before
+# this identity was authored -- the closure-analysis CLI re-verifies
+# every one of them again, from the persisted checkpoint/result bytes,
+# before ever writing a closure artifact.
+# ---------------------------------------------------------------------
+
+[source_execution]
+slurm_job_id = "22071646"
+slurm_job_state = "COMPLETED"
+slurm_exit_code = "0:0"
+slurm_elapsed = "03:22:29"
+development_result_sha256 = "cfc722402f2df12e711337284d7dbc4b24025ece1e8ab18164dac69ecda319e5"
+checkpoint_json_sha256 = "e060126df5ff3d94588b525c1ccc9aa2fc6f6d9969103df0f9ccda5f85b1a3c1"
+checkpoint_arrays_sha256 = "3d2062f3acb6e6baab0c89b2b5276efd7709e4870b124cbcc45626c53e52a6d7"
+scientific_output_digest = "6d75c370bcb03e10698429467053c3a19bc42f1c7405ceb9fccff83e97c8af80"
+
+[population]
+development_images = 350
+development_windows = 769
+evaluated_pixels = 91454742
+controls = 5
+candidates = 16
+
+# ---------------------------------------------------------------------
+# The frozen decision this closure records. Every value below is
+# deterministically implied by E22's own eligibility rule applied to
+# the source result's persisted confusion matrices -- none is a new
+# choice this identity makes.
+# ---------------------------------------------------------------------
+
+[frozen_decision]
+eligibility_rule = "development_miou_strictly_exceeds_t320"
+eligible_candidate_count = 0
+development_outcome = "NO_BALP_CANDIDATE_PROCEEDS"
+confirmation_execution_authorized = false
+full_5000_balp_execution_authorized = false
+profiling_status = "NOT_RECORDED"
+stage_bottleneck_claim_authorized = false
+
+[prohibited]
+list = [
+    "new_threshold",
+    "relaxed_greater_equal_rule",
+    "candidate_selection",
+    "replacement_candidate",
+    "confirmation_execution",
+    "full_evaluation_exception",
+    "fabricated_profiling",
+    "post_hoc_scientific_method_change",
+]
