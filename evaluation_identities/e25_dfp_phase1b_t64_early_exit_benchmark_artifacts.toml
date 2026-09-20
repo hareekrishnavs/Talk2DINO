@@ -1,0 +1,221 @@
+format_version = "talk2dino-dfp-phase1b-t64-early-exit-benchmark-artifacts-identity-v1"
+
+# Closed artifact schemas for the future T64-versus-T320 early-exit
+# benchmark: one per-trial schema, one merged-result schema, and one
+# decision schema. This identity is STORAGE-REPRESENTATION-ONLY (like
+# E22 artifacts before it): it governs the logical documents' closed
+# key sets, exact types, and relational rules -- never a physical file
+# layout, and never the benchmark runner itself.
+
+[identity]
+name = "e25-dfp-phase1b-t64-early-exit-benchmark-artifacts"
+schema_name = "talk2dino-dfp-phase1b-t64-early-exit-benchmark-artifacts-identity-v1"
+schema_version = 1
+description = "Freezes three closed artifact schemas for the future T64/T320 benchmark: talk2dino-dfp-phase1b-t64-early-exit-benchmark-trial-v1 (per-trial), talk2dino-dfp-phase1b-t64-early-exit-benchmark-result-v1 (merged, six frozen trial bindings), and talk2dino-dfp-phase1b-t64-early-exit-decision-v1 (the closed two-outcome decision). Storage-representation-only: governs closed key sets, exact types, and relational rules -- implements no runner, no CLI, no launcher."
+required_ancestor_commit = "453b2d2dec90dcf0623ac94eb177aa5be64db40e"
+working_branch = "dfp-phase1a-diagnostics"
+successor_of = "e25-dfp-phase1b-t64-early-exit-benchmark"
+storage_representation_only = true
+mutates_or_version_bumps_earlier_identity = false
+
+[protocol_binding]
+protocol_identity_relative_path = "evaluation_identities/e25_dfp_phase1b_t64_early_exit_benchmark.toml"
+protocol_identity_sha256 = "8857cf5495b3f15c4ffb0ee772bddac663497663348cf8bd798da7ade7c99b7f"
+
+# ---------------------------------------------------------------------
+# Per-trial artifact schema.
+# ---------------------------------------------------------------------
+
+[trial_schema]
+schema_name = "talk2dino-dfp-phase1b-t64-early-exit-benchmark-trial-v1"
+schema_version = 1
+
+[trial_schema.top_keys]
+list = [
+    "schema_name", "schema_version",
+    "identity_sha256", "artifacts_identity_sha256", "manifest_sha256",
+    "repository_commit", "required_ancestor_commit", "repository_worktree_clean",
+    "identity_loader_sha256", "runner_sha256", "cli_sha256", "launcher_sha256",
+    "variant_id", "trial_index", "repeat_index", "is_warmup",
+    "device_record", "software_record", "precision_record", "deterministic_settings_record",
+    "counts", "timing", "memory", "scientific_output",
+    "complete", "final",
+]
+no_gt_metric_field_permitted = true
+no_winner_or_recommendation_field_permitted = true
+
+[trial_schema.variant_id_closed_set]
+list = ["T64_early_exit", "T320_reference"]
+
+[trial_schema.device_record_keys]
+list = ["device_type", "gpu_model", "gpu_uuid", "cpu_count_visible", "one_visible_cuda_device"]
+
+[trial_schema.software_record_keys]
+list = ["python_version", "torch_version", "cuda_runtime_version", "driver_version"]
+
+[trial_schema.precision_record_keys]
+list = ["compute_dtype", "output_dtype"]
+
+[trial_schema.deterministic_settings_record_keys]
+list = ["torch_deterministic_algorithms", "cudnn_benchmark", "cudnn_deterministic", "pythonhashseed"]
+
+[trial_schema.counts_keys]
+list = ["window_count", "recurrence_steps_executed", "model_forward_count", "graph_construction_count"]
+window_count_required_value = 24
+t64_recurrence_steps_executed_required_value = 1536
+t320_recurrence_steps_executed_required_value = 7680
+model_forward_count_required_value = 24
+graph_construction_count_required_value = 24
+
+[trial_schema.timing_keys]
+list = [
+    "process_total_wall_ns", "preflight_wall_ns", "dataset_construction_wall_ns",
+    "model_construction_and_checkpoint_loading_wall_ns", "measured_window_loop_wall_ns",
+    "artifact_validation_and_write_wall_ns", "unattributed_overhead_ns",
+    "measured_window_loop_seconds", "window_throughput_per_second", "mean_seconds_per_window",
+    "stage_timings_ns",
+]
+integer_fields = [
+    "process_total_wall_ns", "preflight_wall_ns", "dataset_construction_wall_ns",
+    "model_construction_and_checkpoint_loading_wall_ns", "measured_window_loop_wall_ns",
+    "artifact_validation_and_write_wall_ns", "unattributed_overhead_ns",
+]
+integer_fields_strict_type_is_int_bool_rejected = true
+integer_fields_non_negative_required = true
+accounting_identity_required = true
+stage_timings_ns_keys = ["input_preparation", "unary_model_forward", "graph_construction", "canonical_recurrence", "stitching_and_rescale", "output_validation"]
+stage_timings_optional_if_unmeasurable = true
+stage_timings_never_the_primary_runtime_decision_field = true
+
+[trial_schema.memory_keys]
+list = ["host_peak_rss_bytes", "gpu_peak_memory_allocated_bytes", "gpu_peak_memory_reserved_bytes", "gpu_total_memory_bytes"]
+all_non_negative_integers_required = true
+allocated_le_reserved_required = true
+reserved_le_total_required = true
+missing_gpu_field_on_cuda_trial_forbidden = true
+
+[trial_schema.scientific_output_keys]
+list = ["scientific_output_collection_digest", "per_window_output_digests", "finite_value_count", "non_finite_value_count"]
+scientific_output_collection_digest_hex64_required = true
+per_window_output_digests_length_required = 24
+non_finite_value_count_must_be_zero = true
+finite_value_count_must_be_positive = true
+
+# ---------------------------------------------------------------------
+# Merged benchmark result schema.
+# ---------------------------------------------------------------------
+
+[result_schema]
+schema_name = "talk2dino-dfp-phase1b-t64-early-exit-benchmark-result-v1"
+schema_version = 1
+
+[result_schema.top_keys]
+list = [
+    "schema_name", "schema_version",
+    "identity_sha256", "artifacts_identity_sha256", "manifest_sha256", "repository_commit",
+    "measured_trials", "warmup_trials", "schedule_validation",
+    "per_variant_summary", "speedup", "memory_summary", "digest_equivalence",
+    "decision_rule_inputs", "outcome", "complete", "final",
+]
+
+[result_schema.measured_trials]
+required_count = 6
+requires_all_six_frozen_trials_present_exactly_once = true
+rejects_duplicate_or_missing_trials = true
+verifies_hashes_and_closed_schemas = true
+verifies_identical_hardware_software_precision_across_all_six_trials = true
+verifies_identical_code_provenance_across_all_six_trials = true
+verifies_within_variant_scientific_digest_equality = true
+cross_variant_digest_equality_not_required = true
+preserves_all_raw_measurements = true
+
+[result_schema.warmup_trials]
+required_count = 2
+schema_valid_required = true
+excluded_from_per_variant_summary = true
+
+[result_schema.schedule_validation]
+required_order_matches_e25_counterbalanced_order = true
+wrong_order_rejected = true
+
+[result_schema.per_variant_summary_keys]
+list = [
+    "median_measured_window_loop_seconds", "minimum_measured_window_loop_seconds", "maximum_measured_window_loop_seconds",
+    "median_window_throughput_per_second", "maximum_host_peak_rss_bytes",
+    "maximum_gpu_peak_memory_allocated_bytes", "maximum_gpu_peak_memory_reserved_bytes",
+]
+computed_over_measured_repeats_only = true
+median_of_exactly_three_values_required = true
+
+[result_schema.speedup_keys]
+list = ["t64_speedup_over_t320", "t64_recurrence_speedup_over_t320"]
+t64_recurrence_speedup_over_t320_nullable_if_recurrence_timing_unavailable = true
+recurrence_speedup_substitution_for_end_to_end_speedup_forbidden = true
+
+[result_schema.memory_summary_keys]
+list = ["T64_early_exit", "T320_reference"]
+
+[result_schema.digest_equivalence_keys]
+list = ["t64_within_variant_digest_equal", "t320_within_variant_digest_equal", "non_finite_value_count_total"]
+non_finite_value_count_total_must_be_zero = true
+
+[result_schema.decision_rule_inputs_keys]
+list = [
+    "all_trials_complete", "all_artifacts_verified", "within_variant_digests_identical",
+    "zero_non_finite_outputs", "exact_counts_verified", "no_oom", "memory_relations_pass",
+    "t64_median_lower_than_t320", "end_to_end_speedup", "development_accuracy_disclosure_pp",
+]
+development_accuracy_disclosure_pp_required_value = -0.074828045106592
+end_to_end_speedup_threshold = 1.25
+
+[result_schema.outcome]
+closed_set = ["PROCEED_TO_FREEZE_T64_CONFIRMATION_PROTOCOL", "STOP_T64_EARLY_EXIT_TRACK"]
+no_third_value_permitted = true
+
+[result_schema.no_extrapolation]
+five_thousand_image_projection_forbidden_in_this_schema = true
+projection_belongs_only_in_a_separately_labeled_unmeasured_field_outside_this_schema_if_present_at_all = true
+
+# ---------------------------------------------------------------------
+# Decision artifact schema (if generated separately from the merged
+# result -- never duplicates or weakens the merged-result verification;
+# the merged result remains the sole source of truth for every input
+# field this schema echoes).
+# ---------------------------------------------------------------------
+
+[decision_schema]
+schema_name = "talk2dino-dfp-phase1b-t64-early-exit-decision-v1"
+schema_version = 1
+
+[decision_schema.top_keys]
+list = [
+    "schema_name", "schema_version", "merged_result_sha256",
+    "decision_rule_inputs", "end_to_end_speedup_threshold", "outcome",
+    "proceed_does_not_authorize", "complete", "final",
+]
+merged_result_sha256_required_and_verified = true
+decision_rule_inputs_must_equal_merged_result_own_field = true
+outcome_must_equal_merged_result_own_field = true
+end_to_end_speedup_threshold_required_value = 1.25
+
+[decision_schema.proceed_does_not_authorize]
+list = [
+    "the_150_image_confirmation_evaluation", "candidate_selection_as_a_final_paper_method",
+    "the_full_5000_image_evaluation", "a_deployment_claim", "a_latency_claim_outside_the_measured_h100_contract",
+]
+required_present_verbatim = true
+
+# ---------------------------------------------------------------------
+# Cross-cutting artifact write/install policy (identical convention to
+# every prior E-series artifact: atomic write, no overwrite, no force
+# mode, reopen + public post-install reverification, unknown fields
+# always rejected).
+# ---------------------------------------------------------------------
+
+[artifact_write_policy]
+atomic_write_required = true
+atomic_write_mechanism = "stage in a uniquely-named sibling directory, self-verify staged bytes, install via exactly one atomic directory/file rename into an ABSENT destination"
+overwrite_authorized = false
+force_mode_authorized = false
+reopen_and_public_post_install_reverification_required = true
+unknown_top_level_or_nested_field_always_rejected = true
