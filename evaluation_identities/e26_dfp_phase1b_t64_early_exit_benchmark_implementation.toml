@@ -1,0 +1,370 @@
+format_version = "talk2dino-dfp-phase1b-t64-early-exit-benchmark-implementation-identity-v1"
+
+# This identity authorizes IMPLEMENTATION ONLY of the T64-versus-T320
+# early-exit benchmark runner, CLI, tests, documentation, and SLURM
+# launcher whose scientific/operational CONTRACT is already frozen by
+# E25. E25 itself explicitly authorizes no runner implementation and
+# no real GPU execution
+# (authorization_boundary.runner_implementation_authorized_by_e25 =
+# false, .real_gpu_benchmark_execution_authorized_by_e25 = false) --
+# this identity exists SOLELY to close that gap for the five
+# authorized future files below. It defines no new scientific value,
+# no new schedule, no new threshold, no new schema, and no relaxed
+# authorization -- every scientific/operational constant is re-pinned
+# by exact path + SHA-256 to E25 and reused unmodified.
+#
+# This identity authorizes implementation (writing code) -- it does
+# NOT itself execute anything. It authorizes no real dataset access,
+# no real model construction, no weight loading, no CUDA
+# initialization, no real GPU trial, no SLURM submission, no
+# confirmation evaluation, no full-5000-image evaluation, no GT
+# access, no scientific-kernel modification, no E25 modification, and
+# no exact masked-forward provenance. CPU-only synthetic testing is
+# explicitly authorized; real GPU execution is not.
+
+[identity]
+name = "e26-dfp-phase1b-t64-early-exit-benchmark-implementation"
+schema_name = "talk2dino-dfp-phase1b-t64-early-exit-benchmark-implementation-identity-v1"
+schema_version = 1
+description = "Authorizes implementation (never execution) of the T64_early_exit-versus-T320_reference benchmark runner (src/dfp_phase1b_t64_early_exit_benchmark.py), CLI (diagnostics/run_dfp_phase1b_t64_early_exit_benchmark.py), tests (tests/test_dfp_phase1b_t64_early_exit_benchmark.py), documentation (docs/dfp_phase1b_t64_early_exit_benchmark_run.md), and SLURM launcher (dfp_phase1b_t64_early_exit_benchmark_h100.sbatch) whose scientific/operational contract is already frozen, unmodified, by E25. Authorizes CPU-only synthetic testing. Does not authorize real dataset access, real model construction, weight loading, CUDA initialization, a real GPU trial, SLURM submission, confirmation evaluation, full-5000-image evaluation, GT access, scientific-kernel modification, E25 modification, or exact masked-forward provenance."
+required_ancestor_commit = "99da1be639932b0e34a96f2f32d23ea72e696f0a"
+working_branch = "dfp-phase1a-diagnostics"
+successor_of = "e25-dfp-phase1b-t64-early-exit-benchmark"
+mutates_or_version_bumps_earlier_identity = false
+
+# ---------------------------------------------------------------------
+# Dependency bindings: E26 re-binds E25 itself by exact hash (which
+# transitively already re-pins E13/E17/E22/E23/E24/graph/recurrence/
+# stitching/production-provider/artifact-schema hashes) PLUS the small
+# number of implementation-relevant modules the future runner will
+# call directly, bound here again for the future implementation's own
+# convenience -- never re-derived, never a competing copy. All
+# bindings are real, physically-contained repository files; none is
+# symbolic (E26 needs no external, non-repository artifact).
+# ---------------------------------------------------------------------
+
+[dependency_bindings.e25_identity]
+relative_path = "evaluation_identities/e25_dfp_phase1b_t64_early_exit_benchmark.toml"
+sha256 = "8857cf5495b3f15c4ffb0ee772bddac663497663348cf8bd798da7ade7c99b7f"
+binds = "the frozen scientific/operational contract this implementation must satisfy exactly -- variants, horizons, population, schedule, timing/memory/digest contracts, decision rule, authorization boundary. E26 defines none of these; it only authorizes writing code that implements them."
+
+[dependency_bindings.e25_artifacts]
+relative_path = "evaluation_identities/e25_dfp_phase1b_t64_early_exit_benchmark_artifacts.toml"
+sha256 = "f21d5bc0c007fad3572f976fcde4cb5fae00b6ed8eea34949f44c9839e02608f"
+binds = "the closed trial/merged-result/decision artifact schemas the future runner's own artifact writers must satisfy exactly -- E26 defines no competing schema"
+
+[dependency_bindings.e25_loader]
+relative_path = "src/dfp_phase1b_t64_early_exit_benchmark_identity.py"
+sha256 = "79c88ed3555cca1736061fca39b553f18cec6b9f4ffdf7dc67149c91df7c2f79"
+binds = "load_identity/load_artifacts_identity and the pure schema/identity validation helpers (verify_timing_accounting_identity, verify_count_relations, verify_memory_relations, verify_scientific_output_finiteness, verify_within_variant_digest_equality, exact_median_of_three, verify_declared_median, verify_declared_speedup, apply_decision_rule) the future runner/CLI must reuse unmodified rather than reimplement"
+
+[dependency_bindings.e25_docs]
+relative_path = "docs/dfp_phase1b_t64_early_exit_benchmark.md"
+sha256 = "558497f6055506e39a5097634f6df1ca8b23ff30364bbd94bfef9f842162e27f"
+binds = "the committed narrative description of E25's contract and the genuine-early-exit mechanism -- background context only, not itself a source of any additional constraint"
+
+[dependency_bindings.e17_manifest]
+relative_path = "evaluation_subsets/dfp_phase1b_chunk_benchmark_24.json"
+sha256 = "be2c77466a2c1d64f0f39f17f4d073ce1de92dc526a59e47ae8c3dabb8c644ab"
+binds = "the exact fixed 24-window population (+1 warm-up record) the future runner must load verbatim -- no alternate manifest, no re-selection"
+
+[dependency_bindings.e13_protocol]
+relative_path = "evaluation_identities/e13_dfp_phase1a_protocol.toml"
+sha256 = "227549b03ec6b1262c465a18b7fc67529fa5a0b5deef419c33ec79a80feb2173"
+binds = "graph.maximum_rank=12/affinity_power=3.0, propagation.alpha=0.98/steps=320, and the frozen model/checkpoint/precision identity the future runner's real dataset/model construction must resolve against"
+
+[dependency_bindings.matched_evaluator]
+relative_path = "evaluation_identities/e12_matched_k11_k12_t320.toml"
+sha256 = "1f4eea731ae7b803a5e2d572d0a1f59b3275ec240d36061d03540706e3bbc259"
+binds = "crop/stride/align_corners geometry and the frozen compute_dtype=float32/output_dtype=float32 precision both variants must use identically"
+
+[dependency_bindings.graph_module]
+relative_path = "src/open_vocabulary_segmentation/models/dinotext/cover_dr/graph.py"
+sha256 = "b7d4eec053dc204db869590a5ff3763b630084a65f0abd3101190b1e77f33ac5"
+binds = "build_directed_topk_graph -- the future runner calls this exactly once per selected window per trial; never modified"
+
+[dependency_bindings.finite_step_regime_module]
+relative_path = "src/open_vocabulary_segmentation/models/dinotext/cover_dr/finite_step_regime.py"
+sha256 = "79ce8ed0e5462131cf148a1615aa60048b4a05782de7d5279ddee45856de6108"
+binds = "finite_step_propagate -- the future runner calls this DIRECTLY with steps=64 for T64_early_exit and steps=320 for T320_reference (never via capture_dfp_phase1a_trajectory for T64, which cannot produce a genuine early exit); never modified"
+
+[dependency_bindings.horizon_stitching_module]
+relative_path = "src/dfp_phase1a_horizon_stitching.py"
+sha256 = "eed3d6f6619c05251403bb2ab88bc2724d443f858b8fe913cfae3a2c31c5bdb8"
+binds = "stitch_dfp_phase1a_horizons -- reused unmodified, identically for both variants"
+
+[dependency_bindings.stitching_pullback_module]
+relative_path = "src/dfp_phase1a_stitching_pullback.py"
+sha256 = "6e15dd8b967eeaa317ab417ded2127d04f9064accf97fca6275e7cf962a1ac04"
+binds = "the window-level pullback plan construction reused unmodified, identically for both variants"
+
+[dependency_bindings.final_rescale_module]
+relative_path = "src/dfp_phase1a_final_rescale_pullback.py"
+sha256 = "fe771097e0204dde1f48d236f6142ec32880743e0fb4638425938e489af14298"
+binds = "apply_final_rescale_forward -- the exact crop-then-bilinear-resize output-validation step, reused unmodified for both variants"
+
+[dependency_bindings.production_provider_module]
+relative_path = "src/dfp_phase1b_calibration_production.py"
+sha256 = "77188761f4eca5f47a5ae1f81f31f4c1ff0bfac4a247cea614e19b8a948df30e"
+binds = "build_production_dataset_resources / build_production_inference -- the real dataset/geometry/model provider the future runner must reuse unmodified to resolve the 24 fixed windows' real image/model inputs; never a competing provider"
+
+[dependency_bindings.artifact_schema_module]
+relative_path = "src/dfp_phase1a_artifact_schema.py"
+sha256 = "f1f6a036d0b18f7fb4f0dca3bdf36ebcc2e11ee3dae3242a2cecb22bddf66b41"
+binds = "write_json_atomically and the shared closed-schema/atomic-install primitives the future runner's trial/merged/decision artifact writers must reuse -- never a competing hand-rolled write path"
+
+# ---------------------------------------------------------------------
+# Authorized future files: the ONLY files this identity authorizes
+# creating. No other new production file is authorized by E26.
+# ---------------------------------------------------------------------
+
+[authorized_future_files]
+list = [
+    "src/dfp_phase1b_t64_early_exit_benchmark.py",
+    "diagnostics/run_dfp_phase1b_t64_early_exit_benchmark.py",
+    "tests/test_dfp_phase1b_t64_early_exit_benchmark.py",
+    "docs/dfp_phase1b_t64_early_exit_benchmark_run.md",
+    "dfp_phase1b_t64_early_exit_benchmark_h100.sbatch",
+]
+runner_relative_path = "src/dfp_phase1b_t64_early_exit_benchmark.py"
+cli_relative_path = "diagnostics/run_dfp_phase1b_t64_early_exit_benchmark.py"
+tests_relative_path = "tests/test_dfp_phase1b_t64_early_exit_benchmark.py"
+docs_relative_path = "docs/dfp_phase1b_t64_early_exit_benchmark_run.md"
+launcher_relative_path = "dfp_phase1b_t64_early_exit_benchmark_h100.sbatch"
+no_other_new_production_file_authorized = true
+implemented_in_this_task = false
+
+# ---------------------------------------------------------------------
+# Required CLI subcommand surface.
+# ---------------------------------------------------------------------
+
+[runner_subcommands]
+list = ["verify-protocol", "preflight", "run-trial", "verify-trial", "merge", "verify-result", "verify-decision"]
+verify_protocol_torch_free_required = true
+preflight_torch_free_required = true
+verify_protocol_cuda_free_required = true
+preflight_cuda_free_required = true
+run_trial_may_contain_real_execution_path = true
+run_trial_invoked_by_this_task = false
+
+# ---------------------------------------------------------------------
+# Population contract the future runner must enforce.
+# ---------------------------------------------------------------------
+
+[runner_population_contract]
+manifest_relative_path = "evaluation_subsets/dfp_phase1b_chunk_benchmark_24.json"
+manifest_sha256 = "be2c77466a2c1d64f0f39f17f4d073ce1de92dc526a59e47ae8c3dabb8c644ab"
+window_count = 24
+alternate_manifest_rejected = true
+reordered_windows_rejected = true
+missing_windows_rejected = true
+duplicated_windows_rejected = true
+extra_windows_rejected = true
+gt_bearing_input_rejected = true
+
+# ---------------------------------------------------------------------
+# Construction/execution contract the future runner must enforce.
+# ---------------------------------------------------------------------
+
+[runner_construction_contract]
+dataset_constructed_exactly_once_per_trial = true
+model_constructed_exactly_once_per_trial = true
+model_forward_count_per_window = 1
+graph_construction_count_per_window = 1
+t64_recurrence_steps = 64
+t320_recurrence_steps = 320
+t64_via_320_step_trajectory_then_slice_forbidden = true
+candidate_specific_recurrence_forbidden = true
+exact_masked_forward_component_provenance_call_forbidden = true
+trial_outputs_validated_against_e25_schemas = true
+
+# ---------------------------------------------------------------------
+# Process isolation and the frozen counterbalanced schedule (re-pinned
+# from E25 verbatim -- never redefined here).
+# ---------------------------------------------------------------------
+
+[process_isolation]
+fresh_process_per_trial_required = true
+warmup_artifacts_validated = true
+warmup_excluded_from_summaries = true
+launcher_fails_immediately_on_any_trial_or_verification_failure = true
+no_partial_merged_result_authorized = true
+
+[process_isolation.warmup]
+list = ["T64_early_exit", "T320_reference"]
+
+[process_isolation.measured_order]
+ordered_trial_list = [
+    { trial_index = 0, variant = "T320_reference", repeat = 0 },
+    { trial_index = 1, variant = "T64_early_exit", repeat = 0 },
+    { trial_index = 2, variant = "T64_early_exit", repeat = 1 },
+    { trial_index = 3, variant = "T320_reference", repeat = 1 },
+    { trial_index = 4, variant = "T320_reference", repeat = 2 },
+    { trial_index = 5, variant = "T64_early_exit", repeat = 2 },
+]
+
+# ---------------------------------------------------------------------
+# Future launcher resource contract.
+# ---------------------------------------------------------------------
+
+[launcher_resource_contract]
+gpu_count = 1
+gpu_model = "h100_80gb"
+cpus_per_task = 8
+host_memory = "80G"
+max_wall_time = "02:00:00"
+account = "rrg-yangw"
+self_submission_forbidden = true
+literal_sbatch_invocation_forbidden = true
+required_environment_variables = ["repository_root", "venv_activate_path", "dataset_root", "output_root"]
+preflight_before_any_model_or_cuda_operation_required = true
+fresh_output_destination_required = true
+overwrite_authorized = false
+force_mode_authorized = false
+verify_each_trial_immediately_after_creation_required = true
+merge_exactly_six_measured_trials_plus_warmup_evidence = true
+verify_final_result_and_decision_after_installation_required = true
+submitted_by_this_task = false
+
+# ---------------------------------------------------------------------
+# Timing implementation requirements (re-pinned from E25 verbatim).
+# ---------------------------------------------------------------------
+
+[timing_implementation_contract]
+fields = [
+    "process_total_wall_ns", "preflight_wall_ns", "dataset_construction_wall_ns",
+    "model_construction_and_checkpoint_loading_wall_ns", "measured_window_loop_wall_ns",
+    "artifact_validation_and_write_wall_ns", "unattributed_overhead_ns",
+]
+accounting_identity_required = true
+primary_timing_field = "measured_window_loop_wall_ns"
+clock_source = "time.perf_counter_ns"
+synchronize_cuda_before_measured_loop_required = true
+synchronize_cuda_after_measured_loop_required = true
+process_windows_in_canonical_order_required = true
+stage_timing_boundaries_identical_across_variants_required = true
+cuda_events_may_measure_gpu_stage_elapsed_time = true
+stage_totals_must_not_replace_primary_wall_time = true
+
+# ---------------------------------------------------------------------
+# Telemetry implementation requirements (re-pinned from E25 verbatim).
+# ---------------------------------------------------------------------
+
+[telemetry_implementation_contract]
+fields = ["host_peak_rss_bytes", "gpu_peak_memory_allocated_bytes", "gpu_peak_memory_reserved_bytes", "gpu_total_memory_bytes"]
+allocated_le_reserved_le_total_required = true
+cuda_peak_stats_reset_immediately_before_measured_loop_required = true
+missing_or_malformed_cuda_telemetry_fails_closed = true
+
+# ---------------------------------------------------------------------
+# Output/count verification requirements (re-pinned from E25 verbatim).
+# ---------------------------------------------------------------------
+
+[output_count_verification_contract]
+model_forward_count_required_value = 24
+graph_construction_count_required_value = 24
+t64_recurrence_steps_executed_required_value = 1536
+t320_recurrence_steps_executed_required_value = 7680
+per_window_digest_deterministic_within_variant_required = true
+collection_digest_deterministic_within_variant_required = true
+cross_variant_digest_equality_required = false
+all_outputs_finite_required = true
+profiling_must_not_affect_scientific_digest = true
+
+# ---------------------------------------------------------------------
+# Required implementation-test coverage (no real GPU execution).
+# ---------------------------------------------------------------------
+
+[implementation_test_requirements]
+list = [
+    "genuine_t64_early_exit",
+    "step_64_equivalence_to_controlled_320_step_reference_prefix",
+    "step_65_unreachable_in_t64",
+    "exact_counts",
+    "exact_schedule",
+    "fresh_process_orchestration",
+    "deterministic_outputs",
+    "within_variant_digest_equality",
+    "cross_variant_equality_not_required",
+    "timing_accounting_validation",
+    "memory_validation",
+    "strict_artifact_schemas",
+    "atomic_installation",
+    "no_overwrite",
+    "public_post_install_verification",
+    "clean_failure_on_malformed_inputs",
+    "fatal_exception_propagation",
+    "no_gt_path",
+    "no_confirmation_or_full_5000_path",
+    "no_exact_masked_forward_dependency",
+]
+synthetic_cpu_fixtures_authorized = true
+real_dataset_access_in_tests_forbidden = true
+real_model_access_in_tests_forbidden = true
+real_weights_access_in_tests_forbidden = true
+cuda_in_tests_forbidden = true
+
+# ---------------------------------------------------------------------
+# Authorization boundary.
+# ---------------------------------------------------------------------
+
+[authorization_boundary]
+runner_implementation_authorized = true
+cli_implementation_authorized = true
+launcher_implementation_authorized = true
+cpu_only_synthetic_testing_authorized = true
+real_dataset_access_authorized = false
+real_model_construction_authorized = false
+real_weight_loading_authorized = false
+cuda_initialization_authorized = false
+real_gpu_trial_authorized = false
+slurm_submission_authorized = false
+confirmation_execution_authorized = false
+full_5000_execution_authorized = false
+gt_access_authorized = false
+scientific_kernel_modification_authorized = false
+e25_modification_authorized = false
+exact_masked_forward_provenance_authorized = false
+
+[deferred_next_steps]
+list = [
+    "implement_src_dfp_phase1b_t64_early_exit_benchmark_py",
+    "implement_diagnostics_run_dfp_phase1b_t64_early_exit_benchmark_py",
+    "implement_tests_test_dfp_phase1b_t64_early_exit_benchmark_py",
+    "implement_docs_dfp_phase1b_t64_early_exit_benchmark_run_md",
+    "implement_dfp_phase1b_t64_early_exit_benchmark_h100_sbatch",
+    "independently_verify_e26",
+    "commit_e26",
+    "implement_the_five_authorized_files",
+    "independently_verify_the_implementation",
+    "perform_committed_head_production_readiness_verification",
+    "user_manually_submits_the_h100_job",
+    "independently_verify_benchmark_artifacts",
+    "only_if_outcome_is_proceed_to_freeze_t64_confirmation_protocol_create_a_separate_confirmation_authority",
+]
+
+[prohibited]
+list = [
+    "real_gpu_benchmark_execution_in_this_task",
+    "gpu_use_in_this_task",
+    "slurm_submission_in_this_task",
+    "dataset_access_in_this_task",
+    "weight_loading_in_this_task",
+    "cuda_initialization_in_this_task",
+    "implementing_the_runner_cli_launcher_or_runner_tests_in_this_task",
+    "confirmation_evaluation",
+    "full_5000_image_evaluation",
+    "candidate_selection_as_a_final_paper_method",
+    "modifying_e13_through_e25_identities",
+    "modifying_the_e17_manifest",
+    "modifying_the_balp_scientific_kernel_or_production_runner",
+    "modifying_graph_recurrence_stitching_or_pullback_mathematics",
+    "modifying_the_completed_development_result_checkpoint_or_log",
+    "modifying_the_e24_closure",
+    "treating_a_320_step_snapshot_as_a_genuine_t64_early_exit",
+    "candidate_specific_recurrence",
+    "exact_masked_forward_provenance",
+    "adaptive_or_relaxed_speedup_threshold",
+    "new_scientific_value_schedule_threshold_or_schema",
+    "authorizing_a_new_production_file_beyond_the_five_listed",
+]
