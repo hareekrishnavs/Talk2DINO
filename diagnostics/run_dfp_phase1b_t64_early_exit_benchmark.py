@@ -144,14 +144,14 @@ def _real_window_inputs_builder_factory(resources):
     return _build
 
 
-def _build_real_providers() -> TrialProviders:
+def _build_real_providers(*, log_dir: Path) -> TrialProviders:
     from src.dfp_phase1b_calibration_production import build_production_dataset_resources, build_production_inference
 
     def dataset_resources_builder(repo_root: Path, selected_ids):
         return build_production_dataset_resources(repo_root=repo_root, selected_ids=selected_ids)
 
     def inference_builder(resources):
-        return build_production_inference(resources, device="cuda", log_dir=Path("."))
+        return build_production_inference(resources, device="cuda", log_dir=log_dir)
 
     return TrialProviders(
         dataset_resources_builder=dataset_resources_builder,
@@ -198,7 +198,7 @@ def _cmd_run_trial(args: argparse.Namespace) -> int:
     warmup_record = manifest["warmup_record"]
     selected_ids = sorted({warmup_record["image_id"]} | {r["image_id"] for r in benchmark_records})
 
-    providers = _build_real_providers()
+    providers = _build_real_providers(log_dir=output_path.parent)
     document = run_trial(
         variant_id=args.variant, trial_index=args.trial_index if not args.warmup else 0, repeat_index=args.repeat,
         is_warmup=bool(args.warmup), manifest=manifest, readiness=readiness, selected_ids=selected_ids, providers=providers,

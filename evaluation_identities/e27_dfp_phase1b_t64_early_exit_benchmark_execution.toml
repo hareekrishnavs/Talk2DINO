@@ -74,8 +74,8 @@ binds = "the committed benchmark runner module -- direct byte binding, never tru
 
 [dependency_bindings.implementation_cli]
 relative_path = "diagnostics/run_dfp_phase1b_t64_early_exit_benchmark.py"
-sha256 = "1beda190a0ceebeef9409dfaa228c029b3d7ae92898913e8febd5bbbe1c4cf72"
-binds = "the committed CLI the operator will invoke (verify-protocol, preflight, run-trial, verify-trial, merge, verify-result, verify-decision)"
+sha256 = "730caa5b0ae283a5fc7b430e69b449158ffe86cf5db73719a0e484acc0daf9ab"
+binds = "the committed CLI the operator will invoke (verify-protocol, preflight, run-trial, verify-trial, merge, verify-result, verify-decision). REPAIR (log_dir defect, discovered during a real H100 warm-up trial on job 22338993): _build_real_providers previously hardcoded log_dir=Path('.') for the real inference builder, which -- combined with the launcher's own `cd \"$DFP_REPO_ROOT\"` -- caused the first trial's real inference construction to write a stray log.txt directly into the tracked repository working tree, making every SUBSEQUENT trial's own fresh-process clean-worktree check correctly (by design) refuse to run. Fixed to thread the trial's own already-validated output_path.parent (the scratch run-output directory, never the repo) through as log_dir -- a 4-line diff, no subcommand/schema/argument change, re-pinned here by direct byte hash exactly as this authority's own convention requires whenever the bound implementation changes."
 
 [dependency_bindings.implementation_launcher]
 relative_path = "dfp_phase1b_t64_early_exit_benchmark_h100.sbatch"
