@@ -1,0 +1,584 @@
+format_version = "talk2dino-dfp-phase1b-t64-early-exit-benchmark-execution-identity-v1"
+
+# E27: narrow EXECUTION authority for the already-implemented,
+# already-independently-verified, already-committed T64-versus-T320
+# early-exit wall-clock benchmark (E25 = scientific/operational
+# contract, E26 = implementation authority, this file's own bound
+# implementation commit = the actual committed runner/CLI/launcher).
+#
+# E27 defines NO new science, NO new artifact schema, and NO new
+# implementation requirement. It re-pins (never re-derives) every
+# scientific value, resource limit, schedule entry, and decision
+# formula E25 already froze, and binds by SHA-256 to the exact,
+# already-independently-verified implementation committed at
+# af92d4acc64254674d2156a13b55bf4f5d368d3d. Its only new content is:
+# (1) the exact resource/schedule/population execution scope for one
+# future H100 campaign, (2) an explicit activation-prerequisite chain,
+# and (3) a torch-free, code-level readiness verification that the
+# operator MUST run, and receive a PASS from, before manually invoking
+# the already-committed, unmodified launcher.
+#
+# CRITICAL, EXPLICIT ACKNOWLEDGEMENT: the committed CLI/launcher never
+# read this file, and never read E26's own `authorization_boundary`,
+# at runtime -- there is NO code-level gate inside the existing,
+# unmodified launcher or CLI that consults E27 or refuses execution
+# based on any authorization flag. E27's enforcement is therefore an
+# OPERATOR-PROCESS prerequisite (a mandatory, separate, read-only
+# verification command -- see `execution_readiness_contract` below),
+# never a runtime check embedded in the launcher itself. This file
+# must never be read as claiming otherwise.
+
+[identity]
+name = "e27-dfp-phase1b-t64-early-exit-benchmark-execution"
+schema_name = "talk2dino-dfp-phase1b-t64-early-exit-benchmark-execution-identity-v1"
+schema_version = 1
+description = "Narrow execution-only successor to E26: authorizes exactly one future H100 wall-clock benchmark campaign (2 warm-ups + 6 measured trials, the frozen E17 24-window population, E25's T64_early_exit/T320_reference variants) using the already-committed, already-independently-verified implementation at required_ancestor_commit. Redefines no science, no artifact schema, no implementation requirement. Narrowly supersedes E25/E26's own 'execution not authorized yet' restrictions for THIS benchmark only -- E25 and E26 themselves remain completely unmodified."
+required_ancestor_commit = "af92d4acc64254674d2156a13b55bf4f5d368d3d"
+working_branch = "dfp-phase1a-diagnostics"
+successor_of = "e26-dfp-phase1b-t64-early-exit-benchmark-implementation"
+supersedes_predecessor_execution_restriction = true
+supersedes_scope = "execution authorization ONLY, for this one benchmark campaign -- never a redefinition of E25 science, E25 artifact schemas, or E26 implementation requirements, all of which remain frozen and unmodified"
+mutates_or_version_bumps_earlier_identity = false
+execution_gate_is_operator_process_not_runtime_launcher_check = true
+
+# ---------------------------------------------------------------------
+# Dependency bindings. DIRECT bindings are independently SHA-256
+# re-verified by this file's own loader every call. Several of these
+# (e25_identity, e25_artifacts, e25_loader, e17_manifest, e13_protocol,
+# matched_evaluator, graph_module, finite_step_regime_module,
+# horizon_stitching_module, stitching_pullback_module,
+# final_rescale_module, production_provider_module,
+# artifact_schema_module) are ALSO already bound, identically, inside
+# E26's own dependency_bindings -- re-pinning them here directly means
+# E27's own verification never depends SOLELY on E26's loader having
+# been called first. E25's/E26's OWN further identity dependencies
+# (E22/E23/E24, the BALP development closure, etc.) are pinned by E25
+# ONLY as opaque TOML byte blobs (e22_preservation/e22_artifacts/...) --
+# E25's and E26's own load_identity() functions never execute E22's own
+# loader, so this is NOT "transitive re-verification" of anything E22's
+# own loader would additionally check (a corrected characterization,
+# REPAIR_E27_SPLIT_DEPENDENCY_BINDINGS). Where E27 itself directly
+# EXECUTES a further loader module's functions -- as
+# dataset_access_scope's own population-overlap verification does for
+# E22/BALP's split loader -- that module and the data files it reads
+# are DIRECTLY bound below (balp_split_loader / balp_split_artifact /
+# balp_subset_manifest), exactly like e25_loader/e26_loader, precisely
+# because E27 executes it itself and cannot rely on anyone else having
+# already verified it first.
+# ---------------------------------------------------------------------
+
+[dependency_bindings.implementation_runner]
+relative_path = "src/dfp_phase1b_t64_early_exit_benchmark.py"
+sha256 = "806b6ea9a20413c8aac714f88d4de18078974525e1d912b29d5b7f446663381f"
+binds = "the committed benchmark runner module -- direct byte binding, never trusted merely because required_ancestor_commit is an ancestor of the current checkout"
+
+[dependency_bindings.implementation_cli]
+relative_path = "diagnostics/run_dfp_phase1b_t64_early_exit_benchmark.py"
+sha256 = "1beda190a0ceebeef9409dfaa228c029b3d7ae92898913e8febd5bbbe1c4cf72"
+binds = "the committed CLI the operator will invoke (verify-protocol, preflight, run-trial, verify-trial, merge, verify-result, verify-decision)"
+
+[dependency_bindings.implementation_launcher]
+relative_path = "dfp_phase1b_t64_early_exit_benchmark_h100.sbatch"
+sha256 = "8a167963ec79968c7d07fc801d483b6878f5459b4542d8f906075d2e7606edaa"
+binds = "the committed, unmodified H100 sbatch launcher this authority describes but never imports or edits"
+
+[dependency_bindings.e25_identity]
+relative_path = "evaluation_identities/e25_dfp_phase1b_t64_early_exit_benchmark.toml"
+sha256 = "8857cf5495b3f15c4ffb0ee772bddac663497663348cf8bd798da7ade7c99b7f"
+binds = "the frozen scientific/operational contract this campaign must satisfy exactly -- variants, population, schedule, timing/memory/digest contracts, decision rule. E27 defines none of these; it only authorizes executing the already-implemented code that satisfies them."
+
+[dependency_bindings.e25_artifacts]
+relative_path = "evaluation_identities/e25_dfp_phase1b_t64_early_exit_benchmark_artifacts.toml"
+sha256 = "f21d5bc0c007fad3572f976fcde4cb5fae00b6ed8eea34949f44c9839e02608f"
+binds = "the closed trial/merged-result/decision artifact schemas the campaign's own artifacts must satisfy exactly -- E27 defines no competing schema"
+
+[dependency_bindings.e25_loader]
+relative_path = "src/dfp_phase1b_t64_early_exit_benchmark_identity.py"
+sha256 = "79c88ed3555cca1736061fca39b553f18cec6b9f4ffdf7dc67149c91df7c2f79"
+binds = "the E25 identity/artifacts loader, called unmodified by this file's own loader to transitively re-verify E25's full dependency chain"
+
+[dependency_bindings.e26_identity]
+relative_path = "evaluation_identities/e26_dfp_phase1b_t64_early_exit_benchmark_implementation.toml"
+sha256 = "5fbf8134da7ea944ba3304d318f4ea779376502c682ffcc9d91be437f067fa43"
+binds = "the frozen implementation authority this campaign's code was authorized under -- E27 defines no competing implementation requirement"
+
+[dependency_bindings.e26_loader]
+relative_path = "src/dfp_phase1b_t64_early_exit_benchmark_implementation_identity.py"
+sha256 = "ae7fd6cefa1255ee6b3e041f38d6a8e2916b5d0adeca640a8666e792238c3b68"
+binds = "the E26 identity loader, called unmodified by this file's own loader to transitively re-verify E26's full dependency chain"
+
+[dependency_bindings.e17_manifest]
+relative_path = "evaluation_subsets/dfp_phase1b_chunk_benchmark_24.json"
+sha256 = "be2c77466a2c1d64f0f39f17f4d073ce1de92dc526a59e47ae8c3dabb8c644ab"
+binds = "the exact, already-frozen 24-window measured population plus its single warm-up record -- re-pinned verbatim from E25's own population_binding, never re-selected or expanded"
+canonical_manifest_digest = "4b962001ccab863b4c7a156cdbde5f55b66b3ff26a9d429a8b6f148550551847"
+benchmark_record_digest = "8193ef03f5d1dee843098ded6ce896f0f5fe072d49f37d2657ad9b6507fec142"
+
+# ---------------------------------------------------------------------
+# REPAIR (REPAIR_E27_SPLIT_DEPENDENCY_BINDINGS): dataset_access_scope's
+# own independent population-overlap reconstruction (REPAIR_E27_WARMUP_
+# SCOPE_DISCLOSURE) calls src.dfp_phase1b_lightweight_boundary_identity.
+# load_and_verify_split -- a THIRD loader module, distinct from
+# e25_loader/e26_loader above. Neither E25's nor E26's own load_identity()
+# executes E22's own loader (they only hash-pin E22's TOML bytes as an
+# opaque blob, never run E22's Python validation code), so before this
+# repair nothing in E27's actually-executed call chain verified this
+# module's own bytes, or the two JSON files it reads, before importing
+# and calling it. The three bindings below close that gap, following
+# the exact same direct-binding convention already used for
+# e25_loader/e26_loader.
+#
+# balp_split_artifact / balp_subset_manifest are defense-in-depth: fresh
+# isolated-fixture testing (REPAIR_E27_SPLIT_DEPENDENCY_BINDINGS, Part 4)
+# confirmed load_and_verify_split's OWN internal reconstruction already
+# rejects a SINGLE one of these two files being altered in isolation
+# (the persisted split must exactly match a deterministic recomputation
+# from the subset manifest) -- but nothing anchors either file's bytes
+# against an externally frozen, independently verifiable value, so a
+# COORDINATED tamper of both files together (kept mutually
+# self-consistent) would not be caught by that reconstruction check
+# alone. Direct SHA-256 pinning here closes that residual gap.
+# ---------------------------------------------------------------------
+
+[dependency_bindings.balp_split_loader]
+relative_path = "src/dfp_phase1b_lightweight_boundary_identity.py"
+sha256 = "1f2f6d9555755dcf94590b92e23dcee2616e39bda8c8d90aa74bc6640bc59efd"
+binds = "the E22/BALP split loader module -- specifically load_and_verify_split, which dataset_access_scope's own population-overlap verification calls to independently reconstruct processed_ids/resolution_only_ids/provider_resolution_ids against the frozen 350/150 development/confirmation split. Directly SHA-256 pinned and verified BEFORE this module is imported or its functions are called -- never trusted merely because it is already present on disk or already imported in-process."
+
+[dependency_bindings.balp_split_artifact]
+relative_path = "evaluation_subsets/dfp_phase1b_lightweight_boundary_500_split.json"
+sha256 = "5c72634e2b27213162f547bcc9c15fe135056c84bcdc1174dc8e8b77a4451976"
+binds = "the persisted 350/150 BALP development/confirmation split artifact dependency_bindings.balp_split_loader's own load_and_verify_split reads and independently reconstructs from dependency_bindings.balp_subset_manifest -- pinned here as a direct byte anchor alongside (never instead of) that function's own internal reconstruction check"
+
+[dependency_bindings.balp_subset_manifest]
+relative_path = "evaluation_subsets/dfp_phase1a_coco_stuff_500.json"
+sha256 = "75373aca8ef6d434ae02a7e90b6dcc9ba13fd8a31d1e87d858a2f542c19ef482"
+binds = "the frozen 500-image COCO-Stuff subset manifest dependency_bindings.balp_split_artifact's own development/confirmation partition is deterministically derived from -- pinned here for the same direct-byte-anchor reason as balp_split_artifact above"
+
+[dependency_bindings.e13_protocol]
+relative_path = "evaluation_identities/e13_dfp_phase1a_protocol.toml"
+sha256 = "227549b03ec6b1262c465a18b7fc67529fa5a0b5deef419c33ec79a80feb2173"
+binds = "the frozen alpha/graph-variant/k constants the recurrence kernel itself is built from (reused, never redefined)"
+
+[dependency_bindings.matched_evaluator]
+relative_path = "evaluation_identities/e12_matched_k11_k12_t320.toml"
+sha256 = "1f4eea731ae7b803a5e2d572d0a1f59b3275ec240d36061d03540706e3bbc259"
+binds = "matched-geometry (patch_grid/patch_size/crop/stride) parent identity, re-pinned from E25/E26's own identical binding"
+
+[dependency_bindings.graph_module]
+relative_path = "src/open_vocabulary_segmentation/models/dinotext/cover_dr/graph.py"
+sha256 = "b7d4eec053dc204db869590a5ff3763b630084a65f0abd3101190b1e77f33ac5"
+binds = "the committed, unmodified directed top-k graph construction kernel"
+
+[dependency_bindings.finite_step_regime_module]
+relative_path = "src/open_vocabulary_segmentation/models/dinotext/cover_dr/finite_step_regime.py"
+sha256 = "79ce8ed0e5462131cf148a1615aa60048b4a05782de7d5279ddee45856de6108"
+binds = "the committed, unmodified finite-step recurrence kernel (finite_step_propagate) -- the sole source of the T64/T320 horizon difference"
+
+[dependency_bindings.horizon_stitching_module]
+relative_path = "src/dfp_phase1a_horizon_stitching.py"
+sha256 = "eed3d6f6619c05251403bb2ab88bc2724d443f858b8fe913cfae3a2c31c5bdb8"
+binds = "the committed, unmodified forward-only horizon stitching kernel"
+
+[dependency_bindings.stitching_pullback_module]
+relative_path = "src/dfp_phase1a_stitching_pullback.py"
+sha256 = "6e15dd8b967eeaa317ab417ded2127d04f9064accf97fca6275e7cf962a1ac04"
+binds = "bound for completeness of the recurrence/stitching chain; the runner never imports this module's own pullback/adjoint functions (masked-forward-only), only the forward-only horizon_stitching_module above"
+
+[dependency_bindings.final_rescale_module]
+relative_path = "src/dfp_phase1a_final_rescale_pullback.py"
+sha256 = "fe771097e0204dde1f48d236f6142ec32880743e0fb4638425938e489af14298"
+binds = "the committed, unmodified final-resolution rescale kernel (apply_final_rescale_forward)"
+
+[dependency_bindings.production_provider_module]
+relative_path = "src/dfp_phase1b_calibration_production.py"
+sha256 = "77188761f4eca5f47a5ae1f81f31f4c1ff0bfac4a247cea614e19b8a948df30e"
+binds = "the committed, unmodified real dataset/model provider path (build_production_dataset_resources / build_production_inference) the real run-trial path reuses"
+
+[dependency_bindings.artifact_schema_module]
+relative_path = "src/dfp_phase1a_artifact_schema.py"
+sha256 = "f1f6a036d0b18f7fb4f0dca3bdf36ebcc2e11ee3dae3242a2cecb22bddf66b41"
+binds = "write_json_atomically and the shared closed-schema/atomic-install primitives the campaign's own artifact writers reuse"
+
+# ---------------------------------------------------------------------
+# Execution scope: resources. Copied verbatim from the existing,
+# already-committed launcher's own #SBATCH header and the existing
+# GPU-model-matching convention already used by E17's own real-trial
+# CLI (`observed_gpu_name != "NVIDIA H100 80GB HBM3"`) -- no new
+# hardware-identification convention is introduced here.
+# ---------------------------------------------------------------------
+
+[execution_scope.resources]
+gpu_count = 1
+gpu_model = "h100_80gb"
+gpu_model_string_match = "NVIDIA H100 80GB HBM3"
+cpus_per_task = 8
+host_memory = "80G"
+max_wall_time = "02:00:00"
+account = "rrg-yangw"
+single_node_required = true
+
+[execution_scope.variants]
+list = ["T64_early_exit", "T320_reference"]
+
+[execution_scope.variants.t64_early_exit]
+recurrence_steps = 64
+
+[execution_scope.variants.t320_reference]
+recurrence_steps = 320
+
+# ---------------------------------------------------------------------
+# Population: re-pinned verbatim from E25's population_binding /
+# E17's manifest (see dependency_bindings.e17_manifest above). E27
+# selects no window, expands no population, and accepts no override.
+# ---------------------------------------------------------------------
+
+[execution_scope.population]
+measured_window_count = 24
+manifest_auxiliary_warmup_record_count = 1
+warmup_trial_window_count = 24
+measured_trial_window_count = 24
+warmup_trials_process_canonical_benchmark_records = true
+deterministic_order = "benchmark_slot ascending (0..23), identical for every trial and every variant"
+manifest_override_authorized = false
+alternate_population_authorized = false
+debug_subset_authorized = false
+max_images_flag_authorized = false
+
+# REPAIR (REPAIR_E27_WARMUP_SCOPE_DISCLOSURE): the prior single field
+# `warmup_record_count = 1` was misleading -- it correctly described the
+# frozen E17 manifest's own singular `warmup_record` entry, but sat
+# beside `measured_window_count = 24` in a way that implied each warm-up
+# TRIAL processes only 1 window. It does not. Traced directly against
+# the committed implementation
+# (`src.dfp_phase1b_t64_early_exit_benchmark.run_trial`): `records =
+# benchmark_records_in_canonical_order(manifest)` executes
+# unconditionally, and the per-window loop iterates all 24 `records`
+# regardless of `is_warmup` -- `is_warmup` only changes the trial's
+# `is_warmup` classification field and whether `merge_trials` includes
+# it in summary statistics, never which or how many windows are
+# processed. This matches the implementation's own already-correct,
+# already-independently-verified `docs/dfp_phase1b_t64_early_exit_
+# benchmark_run.md` ("Two warm-up trials (one per variant, full
+# 24-window runs, excluded only from summary statistics)"), which this
+# authority previously contradicted.
+#
+# `manifest_auxiliary_warmup_record_count` now names ONLY the frozen
+# manifest's own single `warmup_record` field -- its sole role is
+# supplying one extra image ID to the CLI's dataset-provider ID
+# resolution (see `dataset_access_scope` below); it is never processed
+# as a standalone one-window warm-up pass. `warmup_trial_window_count`
+# and `measured_trial_window_count` name the real per-trial window
+# count (both 24) explicitly and separately from that auxiliary count.
+
+# ---------------------------------------------------------------------
+# Schedule: re-pinned verbatim from E25's execution_schedule /
+# E26's process_isolation.measured_order. No automatic retry, no extra
+# repeat, no adaptive horizon, no threshold change.
+# ---------------------------------------------------------------------
+
+[execution_scope.schedule.warmup]
+ordered_list = ["T64_early_exit", "T320_reference"]
+runs_before_measured_matrix = true
+excluded_from_summary_statistics = true
+
+[execution_scope.schedule.measured]
+ordered_trial_list = [
+    { trial_index = 0, variant = "T320_reference", repeat = 0 },
+    { trial_index = 1, variant = "T64_early_exit", repeat = 0 },
+    { trial_index = 2, variant = "T64_early_exit", repeat = 1 },
+    { trial_index = 3, variant = "T320_reference", repeat = 1 },
+    { trial_index = 4, variant = "T320_reference", repeat = 2 },
+    { trial_index = 5, variant = "T64_early_exit", repeat = 2 },
+]
+
+[execution_scope.schedule.process_isolation]
+fresh_python_process_per_trial_required = true
+same_allocated_gpu_node_required = true
+identical_precision_and_settings_required = true
+immediate_trial_verification_required = true
+fail_fast_required = true
+automatic_retry_authorized = false
+extra_repeats_authorized = false
+adaptive_horizons_authorized = false
+threshold_change_authorized = false
+
+# ---------------------------------------------------------------------
+# Campaign workload counts (REPAIR_E27_WARMUP_SCOPE_DISCLOSURE): these
+# are SCHEDULED repeated-processing counts, never evidence that
+# execution has occurred, never unique-window or unique-image counts.
+# There are 4 trials per variant (1 warm-up + 3 measured), each
+# processing all 24 windows -- see execution_scope.population above.
+# ---------------------------------------------------------------------
+
+[execution_scope.campaign_workload]
+warmup_trial_count = 2
+measured_trial_count = 6
+warmup_window_executions = 48
+measured_window_executions = 144
+total_window_executions = 192
+trials_per_variant = 4
+t64_campaign_recurrence_steps = 6144
+t320_campaign_recurrence_steps = 30720
+total_campaign_recurrence_steps = 36864
+counts_are_scheduled_workload_not_evidence_of_execution = true
+
+# ---------------------------------------------------------------------
+# Dataset-access scope (REPAIR_E27_WARMUP_SCOPE_DISCLOSURE: corrected to
+# distinguish three DIFFERENT ID sets, traced directly against the
+# committed CLI's own set-construction rule
+# (`selected_ids = sorted({warmup_record["image_id"]} | {r["image_id"]
+# for r in benchmark_records})`, `diagnostics/run_dfp_phase1b_t64_
+# early_exit_benchmark.py`):
+#
+#   processed_ids            -- the 24 canonical benchmark_records'
+#                                image IDs. These are ACTUALLY DECODED
+#                                and run through real model inference,
+#                                once per measured or warm-up trial
+#                                (every trial iterates all 24).
+#   resolution_only_ids       -- the single auxiliary manifest
+#                                warmup_record's own image ID (disjoint
+#                                from processed_ids). Confirmed by
+#                                direct inspection of
+#                                `src.dfp_phase1a_dataset_view.
+#                                build_manifest_execution_view` (its own
+#                                docstring: "before any image is
+#                                authorized to be processed") that this
+#                                function performs ID -> native-index/
+#                                path METADATA resolution only -- no
+#                                image is opened, decoded, or run
+#                                through inference for an ID that never
+#                                appears in `processed_ids`. The
+#                                committed runner's own per-window loop
+#                                (`run_trial`) never iterates the raw
+#                                `warmup_record` -- only the 24
+#                                `benchmark_records` -- so this ID is
+#                                never independently processed as its
+#                                own one-window pass.
+#   provider_resolution_ids   -- processed_ids UNION resolution_only_ids
+#                                (exactly the CLI's own `selected_ids`)
+#                                -- the full set the production provider
+#                                resolves metadata for at dataset-
+#                                construction time.
+#
+# Previously this authority conflated provider_resolution_ids (25/19/6)
+# with the actually-processed population, mislabeling it as "24
+# measured + 1 warm-up" image decode/inference scope. The correct,
+# independently-recomputed processed-image figures are 24/18/6 (see
+# below) -- the prior 25/19/6 figures describe provider_resolution_ids,
+# never processed_ids.
+# ---------------------------------------------------------------------
+
+[dataset_access_scope]
+authorized_access = "image decode and geometry crop for exactly the 24 processed_ids (the canonical E17 benchmark_records' own image IDs) already present in the frozen E17 manifest -- no other image is decoded or run through inference. One additional auxiliary image ID (the manifest's own warmup_record) is metadata-resolved only (dataset-index/path lookup), never decoded or run through inference by the committed runner."
+gt_access_authorized = false
+gt_label_use_authorized = false
+confirmation_accuracy_evaluation_authorized = false
+decoding_or_inference_on_unrelated_images_authorized = false
+metadata_indexing_scope = "limited to what the already-bound production_provider_module requires to resolve provider_resolution_ids (processed_ids plus the single auxiliary warmup_record ID) to native dataset positions -- no broader indexing"
+
+[dataset_access_scope.population_overlap_disclosure]
+development_split_size = 350
+confirmation_split_size = 150
+disclosure_note = "processed_ids (24 images) are actually decoded and run through real model inference; resolution_only_ids (1 image, the manifest's own auxiliary warmup_record) is metadata-resolved only and never decoded/inferred; provider_resolution_ids is their union (25 images), the scope the production provider indexes at dataset-construction time. 6 of the 24 processed images (and 6 of the 25 provider_resolution_ids) are members of the 150-image confirmation split; their pixels/geometry are read for wall-clock timing only (or, for the 1 resolution-only ID, only its dataset index/path is resolved). This is GT-free benchmark input access, categorically distinct from confirmation accuracy evaluation, which remains unauthorized: no GT label, no accuracy metric, no candidate decision is computed or used anywhere in this campaign. These confirmation-split images are never described as 'untouched' -- they are within the frozen benchmark input scope, just never subject to GT/accuracy access."
+
+[dataset_access_scope.population_overlap_disclosure.processed_ids]
+count = 24
+development_overlap_count = 18
+confirmation_overlap_count = 6
+outside_frozen_population_count = 0
+
+[dataset_access_scope.population_overlap_disclosure.resolution_only_ids]
+count = 1
+development_overlap_count = 1
+confirmation_overlap_count = 0
+outside_frozen_population_count = 0
+disjoint_from_processed_ids = true
+
+[dataset_access_scope.population_overlap_disclosure.provider_resolution_ids]
+count = 25
+development_overlap_count = 19
+confirmation_overlap_count = 6
+outside_frozen_population_count = 0
+
+# ---------------------------------------------------------------------
+# Output lifecycle. Binds the ALREADY-EXISTING CLI/launcher output
+# layout and environment-variable names, read directly from the
+# committed launcher and CLI source -- introduces no new schema,
+# sidecar, or CLI flag.
+# ---------------------------------------------------------------------
+
+[output_lifecycle_contract]
+launcher_required_environment_variables = ["DFP_REPO_ROOT", "DFP_VENV_ACTIVATE_PATH", "COCO_STUFF_REAL_DATA_ROOT", "TALK2DINO_WEIGHT_DIR", "DFP_BENCHMARK_OUTPUT_ROOT"]
+launcher_optional_environment_variables = ["DFP_OPENCV_MODULE"]
+run_output_root_pattern = "$DFP_BENCHMARK_OUTPUT_ROOT/${SLURM_JOB_ID:-local}"
+trial_artifact_naming = "warmup_<variant>.json (2) and trial_<index>_<variant>_repeat<repeat>.json (6), inside the run output root"
+result_bundle_directory_name = "result"
+result_bundle_contents = ["merged_result.json", "decision.json"]
+explicit_absolute_output_root_selected_and_recorded_at_readiness_required = true
+fresh_absent_final_destination_required = true
+lexical_traversal_authorized = false
+protected_source_overlap_authorized = false
+overwrite_authorized = false
+force_mode_authorized = false
+unique_campaign_destination_required = true
+single_verified_campaign_per_destination_required = true
+staged_self_verification_required = true
+atomic_installation_required = true
+result_and_decision_published_together_required = true
+installed_pair_reopened_and_publicly_verified_required = true
+success_before_verification_authorized = false
+automatic_deletion_or_replacement_of_existing_output_authorized = false
+new_artifact_schema_or_sidecar_authorized = false
+unimplemented_cli_flag_authorized = false
+campaign_provenance_recording_limitation = "no dedicated provenance schema exists beyond the CLI's own readiness report (stdout) and the SLURM job log (%x-%j.out); operators must retain both alongside the installed result/decision bundle for full campaign provenance"
+
+# ---------------------------------------------------------------------
+# Measurement bindings: re-pinned field NAMES and count relations only
+# -- every formula stays exactly as E25/the implementation already
+# define it, never redefined here.
+# ---------------------------------------------------------------------
+
+[measurement_bindings]
+primary_timing_field = "measured_window_loop_wall_ns"
+timing_phase_fields = [
+    "process_total_wall_ns", "preflight_wall_ns", "dataset_construction_wall_ns",
+    "model_construction_and_checkpoint_loading_wall_ns", "measured_window_loop_wall_ns",
+    "artifact_validation_and_write_wall_ns", "unattributed_overhead_ns",
+]
+stage_timing_fields = ["input_preparation", "unary_model_forward", "graph_construction", "canonical_recurrence", "stitching_and_rescale", "output_validation"]
+derived_fields = ["measured_window_loop_seconds", "window_throughput_per_second", "mean_seconds_per_window"]
+memory_fields = ["host_peak_rss_bytes", "gpu_peak_memory_allocated_bytes", "gpu_peak_memory_reserved_bytes", "gpu_total_memory_bytes"]
+scientific_output_fields = ["scientific_output_collection_digest", "per_window_output_digests", "finite_value_count", "non_finite_value_count"]
+
+[measurement_bindings.expected_counts_per_measured_trial]
+window_count = 24
+model_forward_count = 24
+graph_construction_count = 24
+t64_recurrence_steps_executed = 1536
+t320_recurrence_steps_executed = 7680
+
+[measurement_bindings.window_throughput_disclosure]
+represents_image_throughput = false
+represents_full_5000_image_runtime = false
+disclosure_note = "window_throughput_per_second measures the fixed 24-window benchmark loop only -- it is NOT image throughput and does NOT by itself establish full 5,000-image evaluation runtime. Any later runtime projection is a separate, explicitly labeled, unmeasured estimate outside this campaign's own scientific_output_contract, exactly as E25 already requires."
+
+# ---------------------------------------------------------------------
+# Decision: re-pinned verbatim from E25 (evaluation_identities/
+# e25_dfp_phase1b_t64_early_exit_benchmark_artifacts.toml
+# decision_rule_inputs_keys / outcome). E27 changes no threshold, no
+# gate, no outcome name.
+# ---------------------------------------------------------------------
+
+[decision_binding]
+primary_speedup_formula = "median(T320_reference measured_window_loop_wall_ns) / median(T64_early_exit measured_window_loop_wall_ns)"
+end_to_end_speedup_threshold = 1.25
+threshold_comparison = ">="
+outcomes = ["PROCEED_TO_FREEZE_T64_CONFIRMATION_PROTOCOL", "STOP_T64_EARLY_EXIT_TRACK"]
+proceed_outcome_authorizes_confirmation_execution = false
+proceed_outcome_authorizes_full_5000_evaluation = false
+proceed_outcome_authorizes_only = "freezing a SEPARATE, later T64 confirmation protocol authority -- nothing else"
+
+# ---------------------------------------------------------------------
+# Authorization boundary. Conditional future authorization: the four
+# "true" flags below describe what E27, ONCE its own activation
+# prerequisites are satisfied, authorizes for THIS ONE campaign -- they
+# are never a claim that any of this is authorized RIGHT NOW, in this
+# authoring task, or that the code itself enforces them at runtime (see
+# `execution_gate_is_operator_process_not_runtime_launcher_check`
+# above and `execution_readiness_contract` below).
+# ---------------------------------------------------------------------
+
+[authorization_boundary]
+scoped_dataset_image_access_authorized = true
+bound_model_construction_and_checkpoint_loading_authorized = true
+cuda_initialization_authorized = true
+h100_benchmark_campaign_authorized = true
+artifact_verification_and_merge_authorized = true
+
+agent_job_submission_during_this_task_authorized = false
+gt_access_authorized = false
+training_authorized = false
+weight_modification_authorized = false
+scientific_kernel_modification_authorized = false
+alternate_population_authorized = false
+extra_trials_authorized = false
+confirmation_accuracy_evaluation_authorized = false
+full_5000_image_evaluation_authorized = false
+balp_candidate_evaluation_authorized = false
+exact_masked_forward_provenance_authorized = false
+overwrite_authorized = false
+force_mode_authorized = false
+e25_modification_authorized = false
+e26_modification_authorized = false
+new_authority_to_bypass_activation_prerequisites_authorized = false
+
+# ---------------------------------------------------------------------
+# Activation prerequisites -- ALL required before any of the
+# conditional "true" flags above may be exercised for real.
+# ---------------------------------------------------------------------
+
+[activation_prerequisites]
+list = [
+    "e27_independently_verified",
+    "e27_committed",
+    "clean_committed_head_production_readiness_pass",
+    "verified_implementation_and_dependency_hashes",
+    "fresh_operator_selected_destination",
+    "explicit_operator_submission",
+]
+all_required = true
+this_task_satisfies_none_of_these_by_itself = true
+
+# ---------------------------------------------------------------------
+# Execution readiness contract: the mandatory, separate, read-only
+# verification command an operator must run (and receive a PASS from)
+# BEFORE manually invoking the existing, unmodified launcher. This is
+# a code-level, torch-free CHECK this identity's own loader exposes --
+# it is never invoked automatically by the launcher itself (the
+# launcher was not, and in this task is not, modified to import it).
+# ---------------------------------------------------------------------
+
+[execution_readiness_contract]
+verification_entry_point = "python3 -m src.dfp_phase1b_t64_early_exit_benchmark_execution_identity  (or: import src.dfp_phase1b_t64_early_exit_benchmark_execution_identity as e27; e27.verify_execution_readiness(repo_root=...))"
+torch_free_required = true
+checks = [
+    "E27 itself loads with a closed schema and every direct dependency byte hash matches (including the implementation runner/CLI/launcher)",
+    "E25 and E26 each independently load cleanly via their own unmodified loaders (transitively re-verifying their full dependency chains)",
+    "required_ancestor_commit is an ancestor of (or equal to) the current repository HEAD",
+    "the current working tree is completely clean",
+]
+never_checks_gpu_dataset_model_or_cuda = true
+launcher_does_not_import_this_module = true
+operator_must_run_this_separately_before_submission = true
+
+# ---------------------------------------------------------------------
+# Deferred next steps -- the exact remaining sequence.
+# ---------------------------------------------------------------------
+
+[deferred_next_steps]
+sequence = [
+    "independent_e27_verification",
+    "commit_e27",
+    "committed_head_production_readiness",
+    "operator_manually_submits_the_verified_launcher",
+    "independent_benchmark_result_verification",
+]
+no_step_in_this_sequence_is_performed_by_this_task = true
+
+[prohibited]
+list = [
+    "agent_job_submission_during_this_task",
+    "gt_access",
+    "training",
+    "weight_modification",
+    "scientific_kernel_modification",
+    "alternate_populations",
+    "extra_trials",
+    "confirmation_accuracy_evaluation",
+    "full_5000_image_evaluation",
+    "balp_candidate_evaluation",
+    "exact_masked_forward_provenance",
+    "overwrite_or_force",
+    "creating_another_authority_merely_to_authorize_the_readiness_check",
+]
