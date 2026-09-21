@@ -1,0 +1,595 @@
+{
+  "schema": {
+    "name": "semantic_evidence_feasibility_96_subset",
+    "version": "1.0.0"
+  },
+  "namespace": "talk2dino-semantic-evidence-feasibility-v1",
+  "source_validation_population_count": 5000,
+  "selected_count": 96,
+  "discovery_count": 48,
+  "locked_holdout_count": 48,
+  "canonical_source_digest": "e1cc220cde76f9a1fc39aff5b5f8c0b128de8b071602e6d57f262697116e2906",
+  "selected_record_digest": "26d4716147ae28b64a091a184bcab1ce4ce04a3f13243708e57fe7301fa7a13d",
+  "discovery_digest": "b63139733c97508ee5b6272069cf466257e829c59f5d73694fd2599d56d2f1a6",
+  "locked_holdout_digest": "c3931d1e12b62af10839d693cac29bac25b166e448265c54b066cff5b8110592",
+  "complete": true,
+  "final": true,
+  "records": [
+    {
+      "canonical_image_id": "000000567197",
+      "selection_key": "0000e28e08f92aa6a1ea3e30271a3aa684a5b5308f3a1dc2f2532da4aaf21934",
+      "selection_rank": 0,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000367680",
+      "selection_key": "00128c92cf91bc56fba5c881ae2c347b779fed2b1018c896721e89c4b8025103",
+      "selection_rank": 1,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000361571",
+      "selection_key": "001849799736adc40855770e2b4b6c832d4374b13c39a992913a71584035088d",
+      "selection_rank": 2,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000150930",
+      "selection_key": "0035450c554e47c60c26d7063eddd83546b518ce1957bf7cea7fa06b2acbb033",
+      "selection_rank": 3,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000144333",
+      "selection_key": "004ea32d990fcfb2393371779dbe68e6d14b8bdd930b32472c0ddc163e85a4a5",
+      "selection_rank": 4,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000033221",
+      "selection_key": "00533257855aaf4b81436aa729bce9f2faa7a93f07df2b7b7bfa657311b387c1",
+      "selection_rank": 5,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000549220",
+      "selection_key": "005d77ef0648e91e23d91b01bd621f1167283807013b1bf081e7808d4294a68d",
+      "selection_rank": 6,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000151480",
+      "selection_key": "00671cdb9d1ddddc25c981e71ebcf66d83f1dd1013616aecaee91b20a191d873",
+      "selection_rank": 7,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000412894",
+      "selection_key": "00693efb51235bf493044b43f73b89e86893de5d41e4e984276a0eed32bd3a60",
+      "selection_rank": 8,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000257478",
+      "selection_key": "0074cf4940aaa6964a0df6bab7d19f259262dc79a6ef0b60150ca35eee9036bb",
+      "selection_rank": 9,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000442009",
+      "selection_key": "0076b43965e4191139e9d9f0a197c80dc0313bab90acc3150fed012bec033f89",
+      "selection_rank": 10,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000504415",
+      "selection_key": "008dc1f292b14daa6bc3831e3a1846ff767db372c7fff6d0bd63e09a40760c79",
+      "selection_rank": 11,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000125072",
+      "selection_key": "009b5ef2abac58a8d7d49facf2381f010f0e000b67ebaa017a1b6885c3f7f692",
+      "selection_rank": 12,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000250127",
+      "selection_key": "00a3c9d33cfb3585a497443e1e032a72f8673fac9328a2aaa37125ae01b1f8b8",
+      "selection_rank": 13,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000006471",
+      "selection_key": "00a580875742a53bec8144b62072393742476c775a9c7589054a42df7a9f082e",
+      "selection_rank": 14,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000493772",
+      "selection_key": "00ba288a97184a746b56e06c89058b76bf00455bd61ee681828048d330da677a",
+      "selection_rank": 15,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000471023",
+      "selection_key": "00bf8b40ab915127c65c11f8806cdf51c067a994b97c3db3483b62c3fe59a374",
+      "selection_rank": 16,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000060899",
+      "selection_key": "00e81c9a41723e98b7df253aacde9f756d12f3cd56834835310a48c4303d5aef",
+      "selection_rank": 17,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000078915",
+      "selection_key": "00ef27f187c86565d919e3e0d81de3f216648bfbbd93655d5ce2b9b1f08f8ae7",
+      "selection_rank": 18,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000151662",
+      "selection_key": "00f3c811b4990a6b0e0bb3a677b57566f9a333947d79799ae2f0c87ced8c9283",
+      "selection_rank": 19,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000106389",
+      "selection_key": "011c84a079e1b5df3b5801aef883c6f4bfc762c4c9181617826a26ecaa25c31c",
+      "selection_rank": 20,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000266409",
+      "selection_key": "011cefa66cf73bc1113734a9e500da3f5fc428883b5ace9af85d529820e3a085",
+      "selection_rank": 21,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000215723",
+      "selection_key": "012487f9c5a35aa3348ad5d4cab80a4d2e1af2fa07ce9237664c13b46a73c587",
+      "selection_rank": 22,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000409630",
+      "selection_key": "014c7979d199a8a920ec2e0122d461e107e64bcad685d33cf3b36326ba246a8f",
+      "selection_rank": 23,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000507797",
+      "selection_key": "01580e7551a62da29212f8379b178726bd968be0115a26f5967896461d154bef",
+      "selection_rank": 24,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000306700",
+      "selection_key": "015d132b6fc13caa05fc8335ed6dfc77804db8e198cf81d9a78e56081059195e",
+      "selection_rank": 25,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000000724",
+      "selection_key": "0165f9775ca7bb2192d12cdc2e2f8fa8dd56509bfd722afc458cc5618e082f37",
+      "selection_rank": 26,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000111086",
+      "selection_key": "01670d9592d32aecbe8a661405409e0239e0aefcfe30ead2ea85c16d0dfdf07a",
+      "selection_rank": 27,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000122745",
+      "selection_key": "0169bee63b316d68800088043a49b5472727a8db031835ee9a88b9ce3b0abde9",
+      "selection_rank": 28,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000257865",
+      "selection_key": "016b42007b4e697a2ef09019c5c3df061fa52592698926b93e83f0c472ce6f0f",
+      "selection_rank": 29,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000264968",
+      "selection_key": "018b4e3f5aeebaab495bf916b9bf1cce262768cd8d765d5f796b55194c444d77",
+      "selection_rank": 30,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000278463",
+      "selection_key": "0190c7d3a9fd37299b6e2427f15877e8c4e8f89b20e70fdc48d0ca1a0b6f43a5",
+      "selection_rank": 31,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000213035",
+      "selection_key": "019af84861c92b8d148282f7c9d4179d7215307f7893dd2de71e8d0416ccff72",
+      "selection_rank": 32,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000208423",
+      "selection_key": "019b2c08d9d3a6c943ff66d36c8cafe0c30c39887f54c4e7c63ebe789a6aa426",
+      "selection_rank": 33,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000572900",
+      "selection_key": "01a9453f47ce580a67a9696bdeeb828b4867e3eea46ae635a531b003399c1d00",
+      "selection_rank": 34,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000516708",
+      "selection_key": "01ac09186f4c3f4c3d097b3b236c6c036c615fe8f7bca2a7df78dd529593bc0e",
+      "selection_rank": 35,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000426268",
+      "selection_key": "01bb20c53cce09148eb5fcd3a82917d4e65d93f10d116f93bf516e2d7830f58b",
+      "selection_rank": 36,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000298697",
+      "selection_key": "01bd43021298cecd29eb4e6e3f2a97a44fbaad953f01680653447a47f7a53161",
+      "selection_rank": 37,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000530162",
+      "selection_key": "01d03d2ef05dc4a12fa1cb65ba73a881bbb0eebe46739382bf66278f6c1ebb1c",
+      "selection_rank": 38,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000393469",
+      "selection_key": "01d05ddb151a65bebcf5b51f58debef62a64510390b28aabd50572578bcd758d",
+      "selection_rank": 39,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000446574",
+      "selection_key": "01f3251a9cfb830e6a5c2f2de89737c026b6c8ae55baeea1442f37af184be329",
+      "selection_rank": 40,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000389933",
+      "selection_key": "01f3a5691ea282d1f81361215d3c9d8aebba79c411524370278171061e43367d",
+      "selection_rank": 41,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000519491",
+      "selection_key": "0205c1fbd30ba135bebddcbee1fc0918c1631db097df54ae7367fd7c7a6f1cc9",
+      "selection_rank": 42,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000364587",
+      "selection_key": "020fe47d73f46b0b6d89a1215d1328b26c51a5b22f16ee6469352449c77facc7",
+      "selection_rank": 43,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000057597",
+      "selection_key": "021972579a95375ef640a94209aaa81b1b8a669f236c23763dfe8ab85107aa98",
+      "selection_rank": 44,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000148508",
+      "selection_key": "02371e9fc716be431672be6ccaaa8fa94304bb3b565e805eb3dbbde3315bd6a3",
+      "selection_rank": 45,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000310862",
+      "selection_key": "023ee68bb6db7f5b8dc4fd73eb024c0d2f856dba87010b7031e340e6519fbfa5",
+      "selection_rank": 46,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000528977",
+      "selection_key": "025346230916d87dd1a64b094a322e4737b1039c3d5be318275b10ba51737a79",
+      "selection_rank": 47,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000457078",
+      "selection_key": "0258d2fff471e586383755aa66052c3d04d9ba17c6e7cdb234e4c94db72fb1cd",
+      "selection_rank": 48,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000514914",
+      "selection_key": "025cfa75f0013ba066b7c0bd5d23ca0be4b8824c0a1265e0889f70a59bae5800",
+      "selection_rank": 49,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000277197",
+      "selection_key": "025de824398d00fe3a8366a23ac01bc8a5197e222b743da5b9e6fb69a92fa494",
+      "selection_rank": 50,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000507975",
+      "selection_key": "02715819ba128928af303b0de52166d6757989ee09cdbcbad45e015c7f276cdf",
+      "selection_rank": 51,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000173091",
+      "selection_key": "027658f0354555ef45601b06aee380f46fe7aca306aad8e2108c8dcbc62d12b1",
+      "selection_rank": 52,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000458223",
+      "selection_key": "027e68d528b22270ebe0df57204e1a72f6ec61758a5fd94263c024dd559dd29f",
+      "selection_rank": 53,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000023359",
+      "selection_key": "027ff2bad6bd695b78da620a1c357da23cad715646229e675c6f030405efc944",
+      "selection_rank": 54,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000099054",
+      "selection_key": "028b6ea453e51a8880e9e1c12e4f19b1f92a69a01c2e0d2df425a136ca0da0db",
+      "selection_rank": 55,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000268996",
+      "selection_key": "028ddf1d99cf119bb1cd1bdd8c0e5a859e8eea89e3de62321c1c5b03c04940bb",
+      "selection_rank": 56,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000054654",
+      "selection_key": "02a73a5e511cb9c28a4bdd530994b410a6375a4ed22b722356243f57a5e1578f",
+      "selection_rank": 57,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000374982",
+      "selection_key": "02b41e4d1459b1fc76844b3173451547cff99cc69bc9097f8512cabc9525483c",
+      "selection_rank": 58,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000388846",
+      "selection_key": "02e207a11671a4a0c3045f9c146ece3f9f7492d1ddb08e814fee33fd6f90f402",
+      "selection_rank": 59,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000378284",
+      "selection_key": "02e4e8f388ccd376cc2ca421a79051c6ada8505dab2237acd5f44f5d8ae40680",
+      "selection_rank": 60,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000032861",
+      "selection_key": "02e50d452483028fb05c74c93e575e0958875e3378c2c1aaa6a7c9227528054e",
+      "selection_rank": 61,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000409424",
+      "selection_key": "02e57075be507611befd0b34bba214d6d0cf4215792195bf926901ecce214da3",
+      "selection_rank": 62,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000490125",
+      "selection_key": "02f1e912e0c87e1dd4652b3633896816af6ca96df6dadf7c2fb246da3fe00fcd",
+      "selection_rank": 63,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000573094",
+      "selection_key": "030b9106ab17a70c9df6a391f3eb76f7075e557dc94ddfad5b0ce8ab21ce3c0d",
+      "selection_rank": 64,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000429281",
+      "selection_key": "030d642f29d3c8110bde44ceaf1aed53912250b0f399a1b7c308002dec9f7cc9",
+      "selection_rank": 65,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000127624",
+      "selection_key": "0329b10c4830e19606ca6e58f8350994d1d0a2baae80c837a969c9790116d8b5",
+      "selection_rank": 66,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000516038",
+      "selection_key": "032da4865e595a5baae0d15ef3fa7b38e1d9bab2b716cac6604fa37bf7a3987b",
+      "selection_rank": 67,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000396518",
+      "selection_key": "034265838595a132da2bb5993af61acab959232d2ebc672ca417f9c9cac60935",
+      "selection_rank": 68,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000487583",
+      "selection_key": "034f7454ee1fe91016d024cfcfb6a2257c7ec439908f4bfe3c01f06f7eb21d9d",
+      "selection_rank": 69,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000079565",
+      "selection_key": "0352271088aa491c233953b9a69cb785bcd2c3f62055761ed190b9c9c7a59681",
+      "selection_rank": 70,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000338901",
+      "selection_key": "03573b92ffe94d76cbb38c36ded377b7ba41a0a8c745f535389b8619bf22257f",
+      "selection_rank": 71,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000333745",
+      "selection_key": "036929f1ae9ec01171b5d6c07a8fe40717b941d563a0e5329ed3575db8effee6",
+      "selection_rank": 72,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000050326",
+      "selection_key": "036ea1a7b07eb6d2adab9275c0d041224fa625ad632d21082757507814590ea0",
+      "selection_rank": 73,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000483531",
+      "selection_key": "0375232f3467be4625dc28430e41330a06d74e15db7fbbe2641c42446fff201e",
+      "selection_rank": 74,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000384350",
+      "selection_key": "037f92158c1b98d7ae43ddc4a8701647254e8128f6409a6efd52ffe2eea0627b",
+      "selection_rank": 75,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000383838",
+      "selection_key": "0389c0722a223911e9bed35dcaf360090205701e25554d57849dd552da90f559",
+      "selection_rank": 76,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000021879",
+      "selection_key": "038db1a1499518d0b491f0ea18e383840001e902f94454164d0d037b65d5a7b8",
+      "selection_rank": 77,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000419096",
+      "selection_key": "039758987a45ff011407478b35cdc583f25faad6d99606875e7acfc2588483c6",
+      "selection_rank": 78,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000530854",
+      "selection_key": "039ec037e8c196b7382e139ed8b461ae55d70ce54dc133955e6056ffcdf607a9",
+      "selection_rank": 79,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000012639",
+      "selection_key": "03a5c236c3cb245b7f712f7be819a1ad366f75e74ceedfce1961176cf9c6081c",
+      "selection_rank": 80,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000454750",
+      "selection_key": "03abb1f7c0374bb83f0df9bd5fe82265882c4645747e3ac78d2333bb8717e8ed",
+      "selection_rank": 81,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000117914",
+      "selection_key": "03b2b084317e5a72532729bbdafe45b12a798bd7ec79f036188d9d012979f040",
+      "selection_rank": 82,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000312489",
+      "selection_key": "03c2d8d967be627d413c26e28650c1428cd3489fd10c2c481a4c998d8ce52b54",
+      "selection_rank": 83,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000405970",
+      "selection_key": "03cf8411cc8d9461006228323b047a60dfc0d2b6fac7acf58c56c0e14d7e3c46",
+      "selection_rank": 84,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000177539",
+      "selection_key": "041466e222ec25ab88953ed0eb3332e82bd949c1663bc32143f9913b94bbffa5",
+      "selection_rank": 85,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000227491",
+      "selection_key": "0424c064eedc2ac7e246aa77d7b856051846680b3679f1d1989b75750159f401",
+      "selection_rank": 86,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000226984",
+      "selection_key": "0425afdb69f6ae9d03129638c2b7e5235b63b5935403da308ba75633dcfe4382",
+      "selection_rank": 87,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000472623",
+      "selection_key": "042f821e3b1303d4c721746536b51f314a0e97ab0385ecd84088685eeeddd938",
+      "selection_rank": 88,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000441586",
+      "selection_key": "043640c35e866b114675128e52760e1fd24063b3ae48d9ccb176b8713254f6ef",
+      "selection_rank": 89,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000441442",
+      "selection_key": "043affc838752bc1352486e935d5abd24f374d89376d955a24cd3ecf3958ef6a",
+      "selection_rank": 90,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000190637",
+      "selection_key": "044e06056718c39791e48cf9227395a06a3f774fe1fa5b5c8f0bf86ea8d9b538",
+      "selection_rank": 91,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000162092",
+      "selection_key": "0456545e248ab89742b1ac4b7b333617675ee848f706c716c4e5d176b5944f98",
+      "selection_rank": 92,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000550426",
+      "selection_key": "045b4ee3d6c0f69d42a04052effc3a4d5ec4b379c68e159a0818d9915b8557a8",
+      "selection_rank": 93,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000013004",
+      "selection_key": "04796e62e25b76ce98ee09a74bc466bdb74fb4f3eb03f234b11d41520b20160d",
+      "selection_rank": 94,
+      "partition": "locked_holdout"
+    },
+    {
+      "canonical_image_id": "000000348045",
+      "selection_key": "049a3d29dda39c707c04b3ed145f33e56ff7063af214f813e053d620a6fcd4a4",
+      "selection_rank": 95,
+      "partition": "locked_holdout"
+    }
+  ]
+}

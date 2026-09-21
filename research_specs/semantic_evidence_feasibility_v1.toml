@@ -1,0 +1,953 @@
+##############################################################################
+# FROZEN CONTRACT: talk2dino semantic-evidence feasibility study, v1
+#
+# This file is a closed specification. It defines a bounded feasibility
+# study; it is not an implementation and it authorizes no execution beyond
+# what [authorization] explicitly grants. See docs/semantic_evidence_feasibility_protocol.md
+# for prose explanation. src/semantic_evidence_feasibility_identity.py is the
+# Torch-free loader/validator for this file and for
+# evaluation_subsets/semantic_evidence_feasibility_96.json.
+#
+# Do not edit values in this file after independent verification without
+# re-running that verification. Changing any frozen value after results are
+# observed defeats the purpose of freezing it.
+#
+# REVISION NOTE (RESOLVE_SEMANTIC_EVIDENCE_CONTRACT_BLOCKERS): this revision
+# repairs five findings from an independent adversarial verification:
+#   1. T0/T320 propagation-target source authority was undefined -> added
+#      [propagation_target_authority]; T0 is now bound, T320 is explicitly
+#      DEFERRED and non-computable.
+#   2. The statistical unit of analysis was ambiguous between anchor-level
+#      and anchor-query-level rows -> [statistics] rewritten into two
+#      explicit tasks (query_correctness, propagation_outcome) and exactly
+#      four named model fits.
+#   3. The frozen score formulas could silently launder NaN into a finite,
+#      Gate-A-passing output under Python's constant-first min/max ordering
+#      -> added [scores.validity] with mandatory input/output fail-closed
+#      preconditions.
+#   4. Gaussian-blur padding/border behavior was unspecified -> added
+#      padding_mode = "reflect" to [gaussian_blur], independently verified
+#      against the installed torchvision==0.27.0+computecanada source.
+#   5. The external projection-checkpoint path field name risked being read
+#      as a git-tracked-repository claim -> renamed to
+#      external_untracked_checkout_relative_path with explicit git_tracked
+#      = false evidence.
+# The 96-image population, its order, its 48/48 split, and every frozen
+# digest are UNCHANGED by this revision.
+##############################################################################
+
+[schema]
+name = "semantic_evidence_feasibility_contract"
+version = "1.1.0"
+created_at_utc = "2026-09-21T02:00:00Z"
+revised_at_utc = "2026-09-21T04:00:00Z"
+task = "FREEZE_SEMANTIC_EVIDENCE_FEASIBILITY_CONTRACT"
+revision_task = "RESOLVE_SEMANTIC_EVIDENCE_CONTRACT_BLOCKERS"
+
+##############################################################################
+# 1. RESEARCH QUESTION AND CLAIM BOUNDARY
+##############################################################################
+
+[research_question]
+primary_question = """
+Can controlled region-preserving and region-removing image interventions
+identify whether a local visual region provides reliable evidence for a text
+concept, beyond information already available from confidence, DINO
+similarity, spatial location, predicted boundaries, and ordinary augmentation
+consistency?
+"""
+study_type = "feasibility_study"
+study_evaluates = "whether_a_signal_exists"
+required_terms = [
+    "controlled intervention",
+    "intervention-derived reliability",
+    "evidence reliability",
+]
+causal_claim_prohibited = true
+causal_claim_condition = "A future successor task may use causal language only if it supplies and independently verifies the causal assumptions this contract does not establish (e.g. no-unmeasured-confounding, consistency, positivity for the intervention-as-treatment framing). This contract makes no such claim and no such verification."
+
+disallowed_claims = [
+    "a final segmentation method",
+    "a causal effect",
+    "an accuracy improvement",
+    "a +1.5 mIoU result",
+    "a deployable adapter",
+    "a propagation replacement",
+    "a world-model method",
+    "training",
+    "a full evaluation",
+    "publication novelty",
+    "a runtime improvement",
+]
+
+##############################################################################
+# 2. AUTHORIZATION BOUNDARY
+##############################################################################
+
+[authorization]
+protocol_definition_authorized = true
+subset_materialization_authorized = true
+loader_validator_implementation_authorized = true
+identity_tests_authorized = true
+
+intervention_runner_implementation_authorized = false
+real_image_intervention_execution_authorized = false
+gpu_execution_authorized = false
+model_construction_authorized = false
+checkpoint_tensor_loading_authorized = false
+graph_propagation_execution_authorized = false
+training_authorized = false
+deployable_predictor_implementation_authorized = false
+hyperparameter_search_authorized = false
+original_baseline_full_evaluation_authorized = false
+e3_full_evaluation_authorized = false
+full_5000_evaluation_authorized = false
+world_model_access_authorized = false
+sam_access_authorized = false
+gt_based_selection_authorized = false
+overwrite_existing_artifacts_authorized = false
+
+note = "The Step 0 GPU smoke-test authorization (closure_20260921T004310Z) does not carry forward to this contract or to any task that loads it. Any future task must obtain its own authorization. Independent of every flag above, the 96-image feasibility study additionally remains blocked by [gates.outcome].feasibility_execution_authorized = false for as long as [propagation_target_authority].t320_status is DEFERRED_REQUIRES_SUCCESSOR_AUTHORITY."
+
+##############################################################################
+# 3. REPOSITORY AND COMMIT BINDING
+##############################################################################
+
+[repository_binding]
+required_branch = "research/semantic-evidence-interventions"
+e3_commit = "9f314dc973657719abb15cc33473dafc185444c4"
+e3_commit_subject = "paired soft routing"
+e3_commit_tree_id = "8f9d238898e052224289795f3a167f122c7be031"
+
+##############################################################################
+# 4. STEP 0 CLOSURE BINDING
+##############################################################################
+# The absolute paths below are operational cluster paths (this scratch
+# filesystem), recorded for traceability only. They are not the scientific
+# identity of the closure; the SHA-256 values are.
+
+[step0_closure]
+step0_dir = "/scratch/haree/semantic_evidence_interventions/step0_clean_e3_baseline_20260920T235625Z/"
+closure_dir = "/scratch/haree/semantic_evidence_interventions/step0_clean_e3_baseline_20260920T235625Z/closure_20260921T004310Z/"
+closure_manifest_path = "/scratch/haree/semantic_evidence_interventions/step0_clean_e3_baseline_20260920T235625Z/closure_20260921T004310Z/baseline_manifest.json"
+closure_manifest_sha256 = "551f1c0cb8a1115f563bf6d10d090259a42282be0e0c895856964885978095ad"
+closure_manifest_schema = "CLOSE_STEP0_E3_EXTERNAL_WEIGHT_BINDING_AND_SMOKE.closure_manifest.v1"
+
+[step0_closure.required_facts]
+e3_external_weight_binding = "PASS"
+two_image_gpu_smoke = "PASS"
+class_count = 171
+outputs_finite = true
+repeated_labels_identical = true
+graph_propagation_absent = true
+pamr_absent = true
+intervention_logic_absent = true
+repository_unchanged = true
+closure_complete = true
+closure_final = true
+
+[step0_closure.step0_input_files]
+# These three files are the required Step 0 inputs named by this task. Their
+# hashes are recomputed by the identity loader at verification time, not
+# trusted from this table alone.
+baseline_manifest_path = "/scratch/haree/semantic_evidence_interventions/step0_clean_e3_baseline_20260920T235625Z/baseline_manifest.json"
+baseline_manifest_sha256 = "b76cbcde1ccb94c9c3110b5f70dc317189dc9d97abc63fa39bc60ea678e8ea75"
+baseline_report_path = "/scratch/haree/semantic_evidence_interventions/step0_clean_e3_baseline_20260920T235625Z/baseline_report.md"
+baseline_report_sha256 = "b42024876c7f730f7765e81c0b2828bf60b076a0b5a0e143bd41e8e06d52eb70"
+audit_evidence_path = "/scratch/haree/semantic_evidence_interventions/step0_clean_e3_baseline_20260920T235625Z/audit_evidence.json"
+audit_evidence_sha256 = "e2d949318b3503cee56f3b9eb2e297808e73883d5e0e702f0bd9d6e3beb0afd2"
+
+##############################################################################
+# 5. EXTERNAL WEIGHT BINDING (SCIENTIFIC IDENTITY, NOT CLUSTER PATH)
+##############################################################################
+# The scientific identity of every checkpoint is its (filename, sha256) pair.
+# TALK2DINO_WEIGHT_DIR is the *operational* mechanism that resolves the DINO
+# backbone and CLIP filenames to bytes on a given cluster; it is not itself
+# part of the scientific identity. The E3 projection checkpoint is resolved
+# independently of this environment variable (hardcoded "weights/" join in
+# dinotext.py:109). It physically resides under this checkout's weights/
+# directory but weights/ is listed in .gitignore and the file is NOT
+# git-tracked (independently confirmed: `git ls-files
+# weights/vitb_mlp_infonce_paired_soft_routing_tau010.pth` returns empty).
+# Its filesystem path is an OPERATIONAL detail, never evidence that git
+# commits these bytes. The checkpoint itself was neither moved nor modified
+# by this revision.
+
+[external_weights]
+resolution_env_var = "TALK2DINO_WEIGHT_DIR"
+current_cluster_value = "/scratch/haree/weights"
+current_cluster_value_is_scientific_identity = false
+
+[external_weights.e3_projection_checkpoint]
+filename = "vitb_mlp_infonce_paired_soft_routing_tau010.pth"
+sha256 = "9632117c18613674eeddcb35f86193d37da203a9cbd837cf500c4121b5fa9942"
+resolved_via = "hardcoded 'weights/' join in dinotext.py:109, independent of TALK2DINO_WEIGHT_DIR"
+external_untracked_checkout_relative_path = "weights/vitb_mlp_infonce_paired_soft_routing_tau010.pth"
+git_tracked = false
+git_tracked_evidence = "`git ls-files weights/vitb_mlp_infonce_paired_soft_routing_tau010.pth` returns empty; `weights/` is listed in .gitignore"
+scientific_identity = "filename + sha256 only, identically to the DINOv2 backbone and CLIP checkpoints below; the path field is operational (where these bytes currently sit on THIS checkout), never evidence of git-committed status"
+historical_binding = "matches the Step 0 task-prompt-provided historical SHA-256 exactly"
+
+[external_weights.dino_backbone_checkpoint]
+filename = "dinov2_vitb14_reg4_pretrain.pth"
+sha256 = "73182a088cf94833c94b1666d1c99e02fe87e2007bff57b564fb6206e25dba71"
+resolved_via = "TALK2DINO_WEIGHT_DIR (src/local_weights.py:11 DEFAULT_WEIGHT_DIR, DINO_MODEL_INFO['dinov2_vitb14_reg'])"
+git_tracked = false
+historical_binding = "none prior to Step 0 closure; fresh local binding first established by closure job 22356963 / GPU job 22357843"
+
+[external_weights.clip_text_checkpoint]
+filename = "ViT-B-16.pt"
+sha256 = "5806e77cd80f8b59890b7e101eabd078d9fb84e6937f9e85e4ecb61988df416f"
+resolved_via = "TALK2DINO_WEIGHT_DIR (src/local_weights.py:11 DEFAULT_WEIGHT_DIR, CLIP_WEIGHT_PATHS['ViT-B/16'])"
+git_tracked = false
+historical_binding = "none prior to Step 0 closure; fresh local binding first established by closure job 22356963 / GPU job 22357843"
+
+##############################################################################
+# 6. REPOSITORY-RELATIVE DEPENDENCY BINDINGS
+##############################################################################
+# Every entry's sha256 is recomputed by the identity loader against the
+# CURRENT repository-relative file at verification time. A mismatch means
+# the E3 source this contract was frozen against has changed and the
+# contract must be treated as invalid for that commit.
+
+[[dependency]]
+name = "e3_primary_model_configuration"
+path = "src/open_vocabulary_segmentation/configs/stuff/dinotext_stuff_vitb_mlp_infonce_paired_soft_routing_tau010.yml"
+sha256 = "8c8025c148fdd6f49484c9a46ee61ac13dd378e1594cc236c6ea399649ed0130"
+role = "--eval_cfg; base of the _base_ chain -> stuff/default.yml -> stuff/eval.yml"
+
+[[dependency]]
+name = "e3_inherited_default_configuration"
+path = "src/open_vocabulary_segmentation/configs/stuff/default.yml"
+sha256 = "19b7ac74da3a86b4a55fc3f5ab330b49af1ec3d2c40fe5eb90fb74af426026f0"
+role = "_base_ of the primary model configuration"
+
+[[dependency]]
+name = "e3_coco_stuff_evaluation_configuration"
+path = "src/open_vocabulary_segmentation/configs/stuff/eval_stuff.yml"
+sha256 = "6ebcb825976e287f6c06dd01980f256319fc010580e4245cc22ce563db0804fb"
+role = "--eval_base_cfg; OmegaConf.merge places this last, so it has final override priority (main.py:474); pamr:false distinguishes it from eval_stuff_pamr.yml"
+
+[[dependency]]
+name = "e3_coco_stuff_dataset_subconfig"
+path = "src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/stuff.py"
+sha256 = "651710d2bff280a7eea1d06f43daa9e25bb0ae2525633568d06f57a528a42864"
+role = "dataset_type=COCOStuffDataset, data_root, test_pipeline, test_cfg (mode=slide, stride=(224,224), crop_size=(448,448))"
+
+[[dependency]]
+name = "local_weights_module"
+path = "src/local_weights.py"
+sha256 = "2f730b8ca9427c502b9595680e65466eec99b4e004054058869b758cc8ad62d7"
+role = "DEFAULT_WEIGHT_DIR/TALK2DINO_WEIGHT_DIR resolution; DINO_MODEL_INFO and CLIP_WEIGHT_PATHS filename mapping; fail-closed require_file"
+
+[[dependency]]
+name = "e3_dinotext_implementation"
+path = "src/open_vocabulary_segmentation/models/dinotext/dinotext.py"
+sha256 = "c14631b7daf0c249656c95c84ef5a171e179e9e0ded6b01ba11e145efc401df5"
+role = "DINOText construction, generate_masks() inference path, encode_text/encode_image, projection loading"
+
+[[dependency]]
+name = "e3_masker_implementation"
+path = "src/open_vocabulary_segmentation/models/dinotext/masker.py"
+sha256 = "a1b76abd67b4dfe37af38924fcd2631d67b6b86629399ef4277892cdc20fe814"
+role = "DINOTextMasker.forward_seg: cosine similarity + sigmoid nonlinearity, the actually-used masker"
+
+[[dependency]]
+name = "e3_segmentation_evaluator"
+path = "src/open_vocabulary_segmentation/segmentation/evaluation/dinotext_seg.py"
+sha256 = "51fce6fd739fa47f891e458eea0c7a3149b8c54baa58a7b6f8c8432e555d3b66"
+role = "DINOTextSegInference: slide_inference accumulation/count_mat, align_corners=False final rescale, softmax+argmax decision, background-channel gating"
+
+[[dependency]]
+name = "e3_segmentation_builder"
+path = "src/open_vocabulary_segmentation/segmentation/evaluation/dinotext_builder.py"
+sha256 = "99c76fa195325406a1cf987f0016e5a75f08ad1d6c2abfe287ec870a9f53a00c"
+role = "with_bg computation, DINOTextSegInference construction from config.evaluate"
+
+[[dependency]]
+name = "e3_projection_module"
+path = "src/model.py"
+sha256 = "0bc4673251d1dcfbcb51fac468ebd625b8b43c1501aa5a844ec8cfe9c25745d8"
+role = "ProjectionLayer architecture (Linear->Tanh->Linear, text-only projection); compute_similarity's paired_soft_routing branch confirmed training-only, unreachable from generate_masks"
+
+##############################################################################
+# 7. DATASET AND CLASS BINDING
+##############################################################################
+
+[dataset]
+source_validation_population_count = 5000
+filename_universe_source_path = "/scratch/haree/semantic_evidence_interventions/step0_clean_e3_baseline_20260920T235625Z/coco_stuff_val2017_image_filenames_sorted.txt"
+filename_universe_digest_sha256 = "09b3bbeda289610ec9fd4e4b5e6da32ec04f98a9a4111e99790de863be0f8f9e"
+filename_universe_digest_definition = "sha256sum of the file's raw bytes: 5000 lines, each '<12-digit-id>.jpg\\n', lexicographically sorted"
+class_count = 171
+class_count_evidence = "confirmed at runtime via output/e3-paired-soft-routing-tau010/log.txt: 'Building DINOTextSegInference with 171 classes ... with_bg=False'"
+ignore_label = 255
+ignore_label_confidence = "external_library_default (mmsegmentation COCOStuffDataset convention), corroborated but not independently re-derived from installed package source; see Step 0 baseline_manifest.json unavailable_fields"
+canonical_image_id_definition = "the 12-digit zero-padded numeric COCO image ID, ASCII-encoded, with no directory prefix and no file extension (derived by stripping the '.jpg' suffix from each filename in the frozen listing)"
+
+##############################################################################
+# 8. E3 CROP/WINDOW GEOMETRY (RESOLVED FROM SOURCE, NOT ASSUMED)
+##############################################################################
+
+[e3_geometry]
+resize_dim_pixels = 448
+resize_dim_source = "src/open_vocabulary_segmentation/configs/stuff/dinotext_stuff_vitb_mlp_infonce_paired_soft_routing_tau010.yml model.resize_dim=448; consumed by DINOText.image_transforms = T.Resize((resize_dim, resize_dim)) at dinotext.py:74"
+patch_size_pixels = 14
+patch_size_source = "src/local_weights.py DINO_MODEL_INFO['dinov2_vitb14_reg'] = ('vit_base_patch14_reg4_dinov2', ...); the timm architecture name literally encodes 'patch14'"
+patch_grid_side = 32
+patch_grid_derivation = "448 / 14 = 32 exactly; independently consistent with dinotext.py:335-337 (image_feat.reshape(b, np_h, np_w, c) where np_h=np_w=int(sqrt(num_patches)))"
+patch_grid_indexing = "row-major, 0-indexed: patch_index = row * 32 + col, for row,col in [0,31]"
+patch_grid_indexing_source = "dinotext.py:335-337 reshape from (b, num_patches, c) to (b, np_h, np_w, c) assumes the flattened patch sequence is row-major (standard ViT flattening convention)"
+window_mode = "slide"
+crop_size_pixels = [448, 448]
+stride_pixels = [224, 224]
+window_geometry_source = "src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/stuff.py:38 test_cfg = dict(mode='slide', stride=(224,224), crop_size=(448,448))"
+window_ordering = "row-major over the sliding-window grid: window_index = h_idx * w_grids + w_idx, both loop variables 0-indexed"
+window_ordering_source = "dinotext_seg.py:87-88 slide_inference: 'for h_idx in range(h_grids): for w_idx in range(w_grids):'"
+border_excluded_patch_rings = 1
+eligible_grid_range = [1, 30]
+eligible_grid_range_derivation = "32x32 grid, 0-indexed 0..31; excluding the one-patch outer border leaves row,col in [1,30] inclusive: 30x30 = 900 eligible patches per window"
+eligible_patches_always_have_8_grid_neighbors = true
+eligible_patches_always_have_8_grid_neighbors_derivation = "for any (row,col) with row,col in [1,30] on a [0,31] grid, all 8 neighbors (row+-1,col+-1) also lie within [0,31]; therefore 'valid 8-neighbor' for any eligible patch is unconditionally all 8 grid neighbors, with no edge truncation"
+tie_behavior = "lowest class index (PyTorch argmax/topk convention: first occurrence among exact ties)"
+tie_behavior_source = "dinotext_seg.py:143 simple_test: prediction = self.inference(...).argmax(dim=1); Step 0 baseline_report.md section 2"
+prompt_template_set = "sub_imagenet_template"
+prompt_template_count = 7
+prompt_template_source = "src/open_vocabulary_segmentation/datasets/templates.py:99-107"
+pamr_active = false
+pamr_source = "output/e3-paired-soft-routing-tau010/log.txt:135 'pamr=False'; resolved config evaluate.pamr=false"
+unary_score_definition = "the raw, pre-sigmoid cosine similarity value (the 171-dimensional 'simmap' tensor from DINOTextMasker.forward_seg, masker.py, BEFORE torch.sigmoid) at a single patch position, computed from a single 448x448 window in isolation -- NOT the sliding-window-accumulated, softmax-normalized, cross-window final prediction used for whole-image mIoU"
+unary_top1_top2_definition = "unary_top1 = argmax over the 171-dim unary score vector at the patch (lowest class index on ties); unary_top2 = the class with the second-highest unary score at the same patch (lowest class index on ties, excluding the top-1 class)"
+
+##############################################################################
+# 9. 96-IMAGE POPULATION SELECTION (IMAGE LEVEL) -- UNCHANGED BY THIS REVISION
+##############################################################################
+
+[population_selection]
+namespace = "talk2dino-semantic-evidence-feasibility-v1"
+selection_key_algorithm = "selection_key = SHA256( UTF8(namespace) || 0x00 || ASCII(canonical_image_id) ).hexdigest() ; lowercase hex string output"
+sort_key = ["selection_key", "canonical_image_id"]
+sort_order = "ascending, lexicographic on both fields"
+selected_count = 96
+discovery_rank_range = [0, 47]
+locked_holdout_rank_range = [48, 95]
+discovery_count = 48
+locked_holdout_count = 48
+selection_reads_prohibited = [
+    "GT masks", "annotations", "image pixels", "class occurrence",
+    "image dimensions", "prior model predictions", "prior accuracy results",
+]
+
+[population_selection.digest_serialization]
+definition = "For an ordered list of canonical_image_id strings (order is meaningful and part of the digest), the digest is SHA256 of the concatenation, in list order, of each id's ASCII bytes followed by a single 0x0A (newline) byte. hexdigest() output, lowercase."
+canonical_source_digest_input_order = "all 5000 canonical_image_id values, sorted lexicographically ascending (NOT selection order)"
+selected_record_digest_input_order = "the 96 selected canonical_image_id values, in selection_rank order (0..95)"
+discovery_digest_input_order = "the 48 discovery canonical_image_id values, in selection_rank order (0..47)"
+locked_holdout_digest_input_order = "the 48 locked_holdout canonical_image_id values, in selection_rank order (48..95)"
+
+[population_selection.frozen_digests]
+canonical_source_digest = "e1cc220cde76f9a1fc39aff5b5f8c0b128de8b071602e6d57f262697116e2906"
+selected_record_digest = "26d4716147ae28b64a091a184bcab1ce4ce04a3f13243708e57fe7301fa7a13d"
+discovery_digest = "b63139733c97508ee5b6272069cf466257e829c59f5d73694fd2599d56d2f1a6"
+locked_holdout_digest = "c3931d1e12b62af10839d693cac29bac25b166e448265c54b066cff5b8110592"
+
+##############################################################################
+# 10. ANCHOR SELECTION (PER-WINDOW, PATCH LEVEL) -- UNCHANGED BY THIS REVISION
+##############################################################################
+
+[anchor_selection]
+anchor_namespace = "talk2dino-semantic-evidence-anchor-selection-v1"
+anchor_key_algorithm = "SHA256( UTF8(anchor_namespace) || 0x00 || ASCII(canonical_image_id) || 0x00 || ASCII(canonical_window_index) || 0x00 || ASCII(canonical_patch_index) ).hexdigest()"
+anchor_key_ascii_encoding_note = "canonical_window_index and canonical_patch_index are encoded as their base-10 ASCII decimal string representation, no leading zeros, no separators beyond the single 0x00 bytes already specified"
+sort_key = ["anchor_key", "canonical_patch_index"]
+target_anchors_per_window = 8
+strata = ["boundary_low", "boundary_high", "interior_low", "interior_high"]
+anchors_per_stratum = 2
+boundary_definition = "an eligible patch is 'boundary' if ANY of its (unconditionally all 8, per e3_geometry.eligible_patches_always_have_8_grid_neighbors) 8-connected grid neighbors has a different unary_top1 class than the patch itself"
+interior_definition = "an eligible patch that is not 'boundary'"
+unary_margin_definition = "top1_score - top2_score, using the raw (pre-sigmoid) unary scores of the patch's own unary_top1 and unary_top2 classes"
+median_split_population = "computed separately within each window: the median of unary_margin is computed over the window's boundary-eligible patches and, separately, over the window's interior-eligible patches"
+median_tie_rule = "a patch whose unary_margin equals its group's median value is assigned to the LOW stratum of that group (boundary_low or interior_low)"
+stratum_selection_rule = "within each of the 4 strata, sort member patches ascending by (anchor_key, canonical_patch_index) and take the first 2"
+fill_rule = "if a stratum has fewer than 2 member patches, fill the missing anchor slot(s) for that window from the remaining eligible patches NOT already selected as an anchor in this window, in ascending global (anchor_key, canonical_patch_index) order across strata, until 8 total anchors are reached for the window; no duplicate patch may be selected twice within one window"
+gt_or_correctness_forbidden_in_selection = true
+queries_per_anchor = 2
+query_definition = "query_1 (q1) = the anchor patch's own unary_top1 class; query_2 (q2) = the anchor patch's own unary_top2 class. No GT class may be substituted or inserted. q1 is, by construction, identical to [propagation_target_authority].t0_definition's predicted class at that anchor."
+
+##############################################################################
+# 11. FIXED REGION AND INTERVENTION DEFINITIONS -- UNCHANGED BY THIS REVISION
+##############################################################################
+
+[region]
+unit = "patch-aligned 3x3-patch core region centered on the selected anchor patch"
+core_patch_count = 9
+core_patch_count_derivation = "eligible anchors always have row,col in [1,30] on a [0,31] grid, so the 3x3 block (row-1..row+1, col-1..col+1) always lies fully within the grid: exactly 9 complete patches, no truncation"
+core_pixel_size = [42, 42]
+core_pixel_size_derivation = "3 patches x 14 pixels/patch = 42 pixels per side, for the confirmed 14-pixel patch size; if a future source read contradicts patch_size_pixels=14, the implementer must stop and report the contradiction rather than silently recompute this value"
+operates_on = "the E3 crop, BEFORE E3 normalization (T.Normalize) and BEFORE the model's BGR-to-RGB channel swap (dinotext.py:316)"
+dtype_range_preservation_requirement = "the implementation must preserve the actual input dtype/range present at that pipeline stage; this contract does not itself fix a dtype/range value"
+
+[interventions]
+views = ["ORIGINAL", "CONTEXT_BLURRED", "REGION_BLURRED", "AREA_MATCHED_CONTROL"]
+
+[interventions.ORIGINAL]
+definition = "the unmodified E3 crop"
+
+[interventions.CONTEXT_BLURRED]
+definition = "core pixels unchanged bit-exactly; pixels outside the core replaced by the deterministic Gaussian-blurred version of the same crop (see [gaussian_blur])"
+unchanged_domain = "core (3x3 patches, 42x42 px, centered on anchor)"
+replaced_domain = "everything outside the core"
+
+[interventions.REGION_BLURRED]
+definition = "pixels outside the core unchanged bit-exactly; core pixels replaced by the deterministic Gaussian-blurred version of the same crop"
+unchanged_domain = "everything outside the core"
+replaced_domain = "core (3x3 patches, 42x42 px, centered on anchor)"
+
+[interventions.AREA_MATCHED_CONTROL]
+definition = "anchor core unchanged; a non-overlapping 3x3-patch control region elsewhere in the same window is replaced by the deterministic Gaussian-blurred version of the same crop"
+unchanged_domain = "anchor core, and everything outside both the anchor core and the chosen control region"
+replaced_domain = "the chosen non-overlapping 3x3-patch control region"
+control_center_selection_rule = "among eligible patches whose 3x3 core does not overlap the anchor's 3x3 core (no shared patch, including diagonally), select the control center by ascending (anchor_key, canonical_patch_index) using the SAME anchor_key algorithm and anchor_namespace as [anchor_selection] applied to the CONTROL candidate patch (not the original anchor)"
+no_valid_control_behavior = "if no eligible, non-overlapping 3x3-patch center exists for a given anchor, that anchor's AREA_MATCHED_CONTROL view -- and therefore that anchor -- fails closed and is excluded from all downstream scoring and statistics; it is not silently skipped, it is recorded as EXCLUDED_NO_VALID_CONTROL"
+
+##############################################################################
+# 12. GAUSSIAN BLUR -- PADDING MODE NOW EXPLICITLY FROZEN (FINDING 4 REPAIR)
+##############################################################################
+
+[gaussian_blur]
+source = "torchvision.transforms.functional.gaussian_blur"
+kernel_size = [31, 31]
+sigma = [8.0, 8.0]
+padding_mode = "reflect"
+padding_mode_prohibited_alternatives = ["constant", "zero", "replicate", "circular"]
+padding_mode_rationale = "The scientific contract defines reflection padding explicitly and independently of any library default, so a later implementation must reproduce reflect-padding semantics even if a future torchvision version changes its own default behavior."
+padding_mode_verification_method = "static source read (not imported/executed) of the installed torchvision package"
+padding_mode_verified_torchvision_version = "0.27.0+computecanada"
+padding_mode_verified_source_path = "/scratch/haree/venv/talk2dino-a100/lib/python3.11/site-packages/torchvision/transforms/_functional_tensor.py"
+padding_mode_verified_source_lines = "746-764"
+padding_mode_verified_evidence = "the installed tensor-path implementation computes padding=[kernel_size[0]//2]*2+[kernel_size[1]//2]*2 and calls img = torch_pad(img, padding, mode=\"reflect\") before conv2d; this matches the documented behavior in transforms/functional.py's gaussian_blur docstring ('The convolution will be using reflection padding corresponding to the kernel size, to maintain the input shape.'). This version (0.27.0) also matches the TorchVision version recorded in the Step 0 GPU smoke-test log (output/e3-paired-soft-routing-tau010/log.txt and closure job 22357843), confirming it is the actually-relevant environment, not an unrelated one."
+randomness = false
+color_jitter = false
+resize_applied = false
+crop_change_applied = false
+inpainting_applied = false
+generative_model_used = false
+feathering_applied = false
+gt_used = false
+deterministic = true
+intervention_domain = "the already-frozen tensor/value domain established by [region].operates_on (BEFORE E3 normalization, BEFORE the model's BGR-to-RGB channel swap)"
+unchanged_region_verification_requirement = "the later implementation must verify, for every generated view, that pixels in the required-unchanged domain (the frozen region mask from [interventions.*].unchanged_domain) are bit-exactly identical to ORIGINAL before that view's scores are used"
+
+##############################################################################
+# 13. SCORE DEFINITIONS (FROZEN FORMULAS) -- FORMULAS UNCHANGED; EXPLICIT
+# FAIL-CLOSED INPUT/OUTPUT PRECONDITIONS ADDED (FINDING 3 REPAIR)
+##############################################################################
+
+[scores]
+cosine_score_range = [-1.0, 1.0]
+score_location = "the center anchor patch position, native 32x32 patch-grid resolution, evaluated within the SAME single 448x448 window used for anchor/query selection"
+
+[scores.formulas]
+s_original_q = "pre-sigmoid cosine score at the center anchor patch in ORIGINAL, for query class q"
+s_context_q = "pre-sigmoid cosine score at the center anchor patch in CONTEXT_BLURRED, for query class q"
+s_region_q = "pre-sigmoid cosine score at the center anchor patch in REGION_BLURRED, for query class q"
+s_control_q = "pre-sigmoid cosine score at the center anchor patch in AREA_MATCHED_CONTROL, for query class q"
+context_change_q = "abs(s_context(q) - s_original(q))"
+region_drop_q = "max(0, s_original(q) - s_region(q))"
+control_change_q = "abs(s_control(q) - s_original(q))"
+context_stability_q = "1 - min(1, context_change(q) / 2)"
+specific_region_drop_q = "max(0, region_drop(q) - control_change(q))"
+region_necessity_q = "min(1, specific_region_drop(q) / 2)"
+intervention_reliability_q = "context_stability(q) * region_necessity(q)"
+intervention_reliability_range = [0.0, 1.0]
+
+[scores.validity]
+input_finiteness_required = true
+input_range_required = [-1.0, 1.0]
+input_fields_checked = ["s_original(q)", "s_context(q)", "s_region(q)", "s_control(q)"]
+input_check_order = "every one of the four input fields is checked for finiteness AND for membership in [-1.0, 1.0] BEFORE any min, max, subtraction, division, or multiplication in [scores.formulas] is evaluated for that (anchor, q) record"
+input_failure_behavior = "if ANY input fails either check, the derived formulas (context_change, region_drop, control_change, context_stability, specific_region_drop, region_necessity, intervention_reliability) are NOT evaluated for that record; the record is marked STRUCTURALLY_INVALID, an explicit non_finite_or_out_of_range_input counter is incremented, and this counts against [gates.A].max_non_finite_scores (which must be exactly 0) and against [gates.A].min_structural_validity_fraction"
+input_failure_prohibited_actions = ["clamp", "impute", "replace_with_default", "silently_launder_into_a_finite_output"]
+output_finiteness_required = true
+output_range_required = [0.0, 1.0]
+output_fields_checked = ["intervention_reliability(q)"]
+output_check_note = "output finiteness/range is a SEPARATE, second check performed AFTER formula evaluation, for records that already passed the input check; it exists to catch arithmetic-level failures distinct from bad inputs and is NOT a substitute for the input check"
+nan_laundering_hazard_acknowledged = true
+nan_laundering_hazard_note = "Python's builtin min(1, x) and max(0, x), with the constant listed FIRST (exactly the argument order used in [scores.formulas].context_stability_q, region_necessity_q, region_drop_q, specific_region_drop_q), do NOT propagate NaN: min(1, float('nan')) == 1 and max(0, float('nan')) == 0 (confirmed empirically against CPython 3.11). A NaN s_original(q) can therefore reach a finite, in-range, Gate-A-passing intervention_reliability of exactly 0.0 unless the mandatory input_finiteness_required/input_range_required check above runs BEFORE, not instead of, the formulas."
+loader_enforcement_requirement = "the identity loader and its tests must reject any contract mutation that removes, weakens, or reorders away either the input-finiteness/input-range requirement or the output-finiteness/output-range requirement"
+
+[scores.constraints]
+no_threshold_introduced = true
+no_temperature_introduced = true
+no_learned_coefficient_introduced = true
+no_normalization_statistic_introduced = true
+no_per_class_tuning_introduced = true
+primary_signal_name = "intervention_reliability"
+
+##############################################################################
+# 14. PROPAGATION TARGET AUTHORITY (NEW -- FINDING 1 REPAIR)
+##############################################################################
+# T0 is bound now, to the committed E3 unary inference path, because it is
+# available on this branch. T320 is explicitly DEFERRED: this contract does
+# not specify, implement, import, copy, or authorize any graph/recurrence
+# process that would produce a T320 prediction. Gitignored __pycache__
+# bytecode is never treated as authority, and no other branch's source is
+# silently assumed or reused.
+
+[propagation_target_authority]
+t0_status = "BOUND_TO_COMMITTED_E3_UNARY_INFERENCE"
+t320_status = "DEFERRED_REQUIRES_SUCCESSOR_AUTHORITY"
+t320_source_bound = false
+t320_execution_authorized = false
+graph_construction_authorized = false
+recurrence_execution_authorized = false
+cross_branch_source_use_authorized = false
+ignored_bytecode_is_authority = false
+feasibility_execution_blocked_until_t320_binding = true
+required_successor_action = "freeze exact graph construction, recurrence, stitching, prediction extraction, source commit, source paths, and SHA-256 bindings"
+
+[propagation_target_authority.t0_definition]
+concept = "the original, unmodified E3 unary prediction"
+computed_from = "the ORIGINAL view only (no intervention view, no propagation)"
+score_field = "the committed E3 pre-sigmoid cosine score field; see [scores].score_location and [e3_geometry].unary_score_definition"
+predicted_class_rule = "argmax over the frozen 171-class order (lowest class index on ties)"
+identity_with_query = "T0's predicted class at an anchor equals the anchor's own original-view unary_top1 class, i.e. query_1 (q1), by construction -- this is a definitional identity, not a coincidence needing separate proof"
+tie_breaking_source = "dinotext_seg.py:143 simple_test argmax convention (PyTorch argmax/topk: first occurrence among exact ties); see [e3_geometry].tie_behavior_source"
+mechanisms_excluded = ["graph construction", "recurrence", "propagation", "PAMR", "any intervention view"]
+
+[propagation_target_authority.t320_definition]
+concept = "the prediction after exactly 320 steps of a future, successor-bound, finite-step propagation process"
+specified_by_this_contract = false
+authorized_by_this_contract = false
+graph_construction_specified = false
+recurrence_specified = false
+normalization_specified = false
+stitching_specified = false
+target_extraction_specified = false
+note = "This contract defines only the INTENDED CONCEPT of T320 and the outcome-category arithmetic that would consume a T320 prediction if one existed (see [gt_targets.propagation_outcome]). It does not specify, implement, or authorize any process that PRODUCES a T320 prediction. Gate C, and every propagation_outcome row, are non-computable until a successor task freezes and independently verifies an exact graph/recurrence/stitching/extraction implementation bound by path, commit, and SHA-256."
+
+[propagation_target_authority.residue_disclosure]
+known_related_source_exists_on_other_branches = true
+other_branches = ["dfp-phase1a-diagnostics", "e11-cover-dr-1", "e12-connectivity-analysis"]
+other_branches_note = "read-only `git ls-tree`/`git grep` (no checkout) confirms a cover_dr graph/RWR/finite-step-regime module family (graph.py, rwr.py, finite_step_regime.py, stitching_control.py, matched_power_evaluator.py, coco_object_evaluator.py, inference.py, native_edge_support.py) exists as committed source on these branches at src/open_vocabulary_segmentation/models/dinotext/cover_dr/*.py"
+present_as_source_on_this_branch = false
+present_as_bytecode_residue_on_this_branch = true
+bytecode_residue_location = "src/open_vocabulary_segmentation/models/dinotext/cover_dr/__pycache__/*.pyc (gitignored, untracked, orphaned -- residue from a different branch once being checked out locally in this working directory; `git ls-files` under this path returns empty and no tracked .py source references `cover_dr` anywhere in this branch's HEAD)"
+bytecode_residue_treated_as_authority = false
+cross_branch_source_copied_or_imported_by_this_revision = false
+
+##############################################################################
+# 15. GT-ONLY EVALUATION TARGETS (GT LOADED LAST, NEVER AFFECTS SCORES ABOVE)
+##############################################################################
+
+[gt_isolation]
+gt_load_order_requirement = "GT may be loaded only AFTER, for the image in question: image/window/anchor selection; all four views; all unary scores; intervention_reliability; and every non-GT control feature have been finalized"
+gt_affects_intervention_reliability = false
+gt_affects_selection = false
+
+[gt_targets.primary_correctness]
+footprint_mapping = "map the anchor patch footprint through the canonical E3 window geometry ([e3_geometry]) to final image coordinates"
+ignore_gt_value = 255
+min_valid_footprint_fraction = 0.75
+min_majority_share = 0.80
+majority_rule = "find the majority valid (non-ignore) GT class among the footprint pixels"
+ambiguous_label = "AMBIGUOUS_GT"
+ambiguous_condition = "valid footprint fraction < 0.75, OR majority class share < 0.80"
+ambiguous_handling = "excluded from primary correctness metrics"
+query_correctness_definition = "1 iff query class q equals the majority GT class (only defined for non-AMBIGUOUS_GT anchors); 0 otherwise"
+
+[gt_targets.propagation_outcome]
+outcome_window = "T0 to T320"
+t0_source = "[propagation_target_authority.t0_definition] -- bound, committed E3 unary inference"
+t320_source = "[propagation_target_authority.t320_definition] -- DEFERRED, not source-bound, not executable under this contract"
+computable_under_this_contract = false
+computable_note = "This table freezes the CATEGORY ARITHMETIC for when a T320 prediction becomes available; it does not make the target computable now, because T320 itself is not source-bound (see [propagation_target_authority])."
+categories = ["beneficial", "harmful", "unchanged_correct", "changed_but_same_correctness", "unchanged_incorrect"]
+beneficial_definition = "T0 wrong AND T320 correct"
+harmful_definition = "T0 correct AND T320 wrong"
+unchanged_correct_definition = "T0 correct AND T320 correct (implies T0_predicted_class == T320_predicted_class == GT_majority_class)"
+changed_but_same_correctness_definition = "T0 wrong AND T320 wrong AND T0_predicted_class != T320_predicted_class (the predicted class changed, but correctness status did not)"
+unchanged_incorrect_definition = "T0 wrong AND T320 wrong AND T0_predicted_class == T320_predicted_class (the predicted class did not change, and it is wrong)"
+per_anchor_persisted_fields = ["beneficial_count", "harmful_count", "unchanged_correct_count", "changed_but_same_correctness_count", "unchanged_incorrect_count", "beneficial_fraction", "harmful_fraction", "unchanged_correct_fraction", "changed_but_same_correctness_fraction", "unchanged_incorrect_fraction"]
+changed_anchor_defined_condition = "beneficial_count + harmful_count > 0"
+changed_anchor_target_values = ["BENEFICIAL_DOMINANT", "HARMFUL_DOMINANT", "TIED"]
+beneficial_dominant_rule = "beneficial_count > harmful_count"
+harmful_dominant_rule = "harmful_count > beneficial_count"
+tied_rule = "beneficial_count == harmful_count"
+tied_excluded_from_auroc = true
+tied_count_still_reported = true
+changed_but_same_correctness_excluded_from_binary_fit = true
+changed_but_same_correctness_still_reported = true
+
+##############################################################################
+# 16. SIMPLE CONTROL FEATURES (NON-GT)
+##############################################################################
+# Controls 1 and 8 are now explicitly query-parameterized (Finding 2 repair):
+# control 1 was previously hardcoded to query_1 regardless of which row's
+# query it fed, and control 8 was previously a same-anchor average over both
+# queries. Both are now defined as functions of "the row's own query q",
+# with q bound per-task in [statistics.tasks.*.feature_order] (q1 or q2 for
+# query_correctness rows, always q1 for propagation_outcome rows).
+
+[[control]]
+id = 1
+name = "top1_unary_score"
+formula = "s_original(q) -- the raw pre-sigmoid cosine score of the anchor patch's query class q, in ORIGINAL. q is parameterized per the consuming task: for query_correctness rows q is the row's own query (q1 or q2); for propagation_outcome rows q is fixed at q1."
+finite_required = true
+
+[[control]]
+id = 2
+name = "top1_minus_top2_margin"
+formula = "unary_margin at the anchor patch (see [anchor_selection].unary_margin_definition), in ORIGINAL"
+finite_required = true
+
+[[control]]
+id = 3
+name = "unary_entropy"
+formula = "-sum(p_i * log(p_i)) over i in 1..171, where p = numerically_stable_softmax(raw 171-dim unary score vector at the anchor patch, ORIGINAL); numerically_stable_softmax subtracts the max logit before exponentiation"
+finite_required = true
+
+[[control]]
+id = 4
+name = "dino_neighbor_cosine_similarity"
+formula = "cosine_similarity(anchor_patch_dino_feature, mean(eight_neighbor_dino_features)), using the raw (unprojected) DINOv2 patch embeddings, ORIGINAL view only. Per e3_geometry.eligible_patches_always_have_8_grid_neighbors, this is always defined for eligible anchors with no edge case."
+finite_required = true
+
+[[control]]
+id = 5
+name = "normalized_distance_to_nearest_boundary"
+formula = "raw_distance = min over all boundary-flagged eligible patches p_b in the window of Euclidean distance, in patch-grid units, between the anchor patch coordinates and p_b's coordinates (0 if the anchor itself is boundary); normalized_distance = min(1, raw_distance / normalization_constant)"
+normalization_constant = 41.012193308819754
+normalization_constant_derivation = "sqrt((30-1)^2 + (30-1)^2) = sqrt(29^2 + 29^2), the maximum possible Euclidean distance in patch-grid units between two patches within the 30x30 eligible region ([1,30]x[1,30])"
+missing_value_condition = "the window contains zero boundary-flagged eligible patches (fully interior-uniform window)"
+missing_value_treatment = "recorded as null/NOT_AVAILABLE for that anchor's control 5; the anchor is not excluded from other controls on this account alone, but is excluded from any statistical model that requires control 5 to be non-missing (see [statistics].missing_value_policy)"
+finite_required = "when not missing"
+
+[[control]]
+id = 6
+name = "local_top1_agreement_fraction"
+formula = "(count of the patch's 8 grid neighbors whose unary_top1 class equals the anchor patch's own unary_top1 class) / 8"
+finite_required = true
+
+[[control]]
+id = 7
+name = "ordinary_augmentation_score_change"
+status = "NOT_AVAILABLE_IN_E3"
+justification = "src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/stuff.py test_pipeline includes a RandomFlip transform, but it is constructed with flip=False (both in the MultiScaleFlipAug wrapper and the transform itself), making it an unconditional no-op. No other deterministic ordinary augmentation is applied in the E3 evaluation preprocessing pipeline. Per task instruction, this control is recorded as unavailable rather than inventing a new augmentation to populate it."
+used_by_any_task = false
+
+[[control]]
+id = 8
+name = "area_matched_control_change"
+formula = "control_change(q) as defined in [scores.formulas], parameterized by the SAME q as control 1 for the current row (the row's own query for query_correctness rows; fixed q1 for propagation_outcome rows) -- NOT hardcoded to q1, NOT averaged over both queries"
+finite_required = true
+
+[statistics.missing_value_policy]
+rule = "a row is excluded from ALL statistical fitting and evaluation populations (both discovery and locked_holdout, for the row's own task) if it has any missing/non-finite required control value for the model being fit, a missing/non-finite intervention_reliability value (Model B only), or is EXCLUDED_NO_VALID_CONTROL or STRUCTURALLY_INVALID (see [scores.validity]). Excluded rows are counted and reported as EXCLUDED_MISSING_FEATURE; no imputation is performed."
+
+##############################################################################
+# 17. STATISTICAL TASKS, MODEL FITS, AND METRICS (FINDING 2 REPAIR)
+##############################################################################
+# Two distinct binary-prediction tasks are frozen, on two distinct row
+# populations, producing exactly four logistic-regression fits. No metric
+# draws from an unspecified generic "record" population.
+
+[statistics]
+task_identifiers = ["query_correctness", "propagation_outcome"]
+
+[statistics.tasks.query_correctness]
+unit_of_analysis = "anchor_query"
+row_definition = "one accepted (image_id, window_id, anchor_id, query_rank) record"
+query_ranks = ["q1", "q2"]
+rows_per_accepted_anchor = 2
+query_identity_source = "query classes are selected once from the ORIGINAL, unmodified view at anchor-selection time ([anchor_selection].query_definition) and are never reselected after an intervention view is constructed"
+target_name = "y_query_correct"
+target_definition = "1 if the row's query class equals the accepted GT-majority class ([gt_targets.primary_correctness]); 0 otherwise; undefined (row excluded) for AMBIGUOUS_GT anchors"
+computable_under_this_contract = true
+
+[[statistics.tasks.query_correctness.feature_order]]
+index = 1
+control_id = 1
+parameterization = "s_original(q) for the row's own query q (q1 or q2) -- NOT hardcoded to q1"
+
+[[statistics.tasks.query_correctness.feature_order]]
+index = 2
+control_id = 2
+parameterization = "anchor-level (query-independent)"
+
+[[statistics.tasks.query_correctness.feature_order]]
+index = 3
+control_id = 3
+parameterization = "anchor-level (query-independent)"
+
+[[statistics.tasks.query_correctness.feature_order]]
+index = 4
+control_id = 4
+parameterization = "anchor-level (query-independent)"
+
+[[statistics.tasks.query_correctness.feature_order]]
+index = 5
+control_id = 5
+parameterization = "anchor-level (query-independent)"
+
+[[statistics.tasks.query_correctness.feature_order]]
+index = 6
+control_id = 6
+parameterization = "anchor-level (query-independent)"
+
+[[statistics.tasks.query_correctness.feature_order]]
+index = 7
+control_id = 8
+parameterization = "control_change(q) for the row's own query q (q1 or q2) -- NOT hardcoded to q1, NOT averaged over both queries"
+
+[[statistics.tasks.query_correctness.feature_order]]
+index = 8
+control_id = "intervention_reliability"
+parameterization = "intervention_reliability(q) for the row's own query q -- MODEL B ONLY, absent from Model A"
+model_b_only = true
+
+[statistics.tasks.propagation_outcome]
+unit_of_analysis = "anchor"
+row_definition = "one accepted (image_id, window_id, anchor_id) record, using q1 only (q1 is the original T0-predicted class by construction, see [propagation_target_authority.t0_definition])"
+rows_per_eligible_anchor = 1
+query_used = "q1"
+target_name = "y_propagation_beneficial"
+target_definition = "1 for beneficial, 0 for harmful (see [gt_targets.propagation_outcome]); changed_but_same_correctness, unchanged_correct, and unchanged_incorrect anchors are excluded from this binary fit but counted and reported separately"
+computable_under_this_contract = false
+computable_note = "Blocked by [propagation_target_authority].t320_status = DEFERRED_REQUIRES_SUCCESSOR_AUTHORITY. This task's row population, features, and model fits are frozen now so a successor task cannot invent them later, but no row can actually be materialized until T320 is bound."
+
+[[statistics.tasks.propagation_outcome.feature_order]]
+index = 1
+control_id = 1
+parameterization = "s_original(q1), q fixed at q1"
+
+[[statistics.tasks.propagation_outcome.feature_order]]
+index = 2
+control_id = 2
+parameterization = "anchor-level"
+
+[[statistics.tasks.propagation_outcome.feature_order]]
+index = 3
+control_id = 3
+parameterization = "anchor-level"
+
+[[statistics.tasks.propagation_outcome.feature_order]]
+index = 4
+control_id = 4
+parameterization = "anchor-level"
+
+[[statistics.tasks.propagation_outcome.feature_order]]
+index = 5
+control_id = 5
+parameterization = "anchor-level"
+
+[[statistics.tasks.propagation_outcome.feature_order]]
+index = 6
+control_id = 6
+parameterization = "anchor-level"
+
+[[statistics.tasks.propagation_outcome.feature_order]]
+index = 7
+control_id = 8
+parameterization = "control_change(q1), q fixed at q1"
+
+[[statistics.tasks.propagation_outcome.feature_order]]
+index = 8
+control_id = "intervention_reliability"
+parameterization = "intervention_reliability(q1), q fixed at q1 -- MODEL B ONLY, absent from Model A"
+model_b_only = true
+
+[statistics.model_settings]
+estimator = "logistic_regression"
+standardization = "fit on discovery ROWS of the model's own task/row-population only; the same fitted mean/scale is applied to transform both that task's discovery and locked_holdout rows"
+C = 1.0
+penalty = "l2"
+class_weight = "balanced"
+solver = "liblinear"
+max_iter = 1000
+random_state = 0
+hyperparameter_search = false
+
+[statistics.fit_evaluate]
+fit_partition = "discovery"
+fit_partition_images = 48
+evaluate_partition = "locked_holdout"
+evaluate_partition_images = 48
+evaluate_once = true
+note = "fit_partition_images/evaluate_partition_images count IMAGES (the frozen 48/48 split, unchanged by this revision); the number of ROWS per task differs (query_correctness: up to 2 rows per accepted anchor; propagation_outcome: up to 1 row per eligible anchor) and is not fixed by this contract, since it depends on anchor/query acceptance decided at execution time."
+
+[[statistics.model_fits]]
+id = 1
+task = "query_correctness"
+variant = "control_only"
+model_name = "QUERY_CORRECTNESS_CONTROL_MODEL"
+feature_order = [1, 2, 3, 4, 5, 6, 7]
+feature_order_note = "control_id list, in order, excluding the model_b_only intervention_reliability feature; see [statistics.tasks.query_correctness.feature_order]"
+fit_partition = "discovery"
+evaluate_partition = "locked_holdout"
+computable_under_this_contract = true
+
+[[statistics.model_fits]]
+id = 2
+task = "query_correctness"
+variant = "control_plus_intervention"
+model_name = "QUERY_CORRECTNESS_CONTROL_PLUS_INTERVENTION_MODEL"
+feature_order = [1, 2, 3, 4, 5, 6, 7, "intervention_reliability"]
+fit_partition = "discovery"
+evaluate_partition = "locked_holdout"
+computable_under_this_contract = true
+
+[[statistics.model_fits]]
+id = 3
+task = "propagation_outcome"
+variant = "control_only"
+model_name = "PROPAGATION_OUTCOME_CONTROL_MODEL"
+feature_order = [1, 2, 3, 4, 5, 6, 7]
+fit_partition = "discovery"
+evaluate_partition = "locked_holdout"
+computable_under_this_contract = false
+computable_note = "blocked by [propagation_target_authority].t320_status"
+
+[[statistics.model_fits]]
+id = 4
+task = "propagation_outcome"
+variant = "control_plus_intervention"
+model_name = "PROPAGATION_OUTCOME_CONTROL_PLUS_INTERVENTION_MODEL"
+feature_order = [1, 2, 3, 4, 5, 6, 7, "intervention_reliability"]
+fit_partition = "discovery"
+evaluate_partition = "locked_holdout"
+computable_under_this_contract = false
+computable_note = "blocked by [propagation_target_authority].t320_status"
+
+[[statistics.primary_metrics]]
+id = 1
+name = "query_correctness_auroc"
+task = "query_correctness"
+row_population = "locked_holdout anchor_query rows for task query_correctness"
+target = "y_query_correct"
+producing_model_fit_ids = [1, 2]
+metric_kind = "auroc"
+computable_under_this_contract = true
+
+[[statistics.primary_metrics]]
+id = 2
+name = "query_correctness_average_precision"
+task = "query_correctness"
+row_population = "locked_holdout anchor_query rows for task query_correctness"
+target = "y_query_correct"
+producing_model_fit_ids = [1, 2]
+metric_kind = "average_precision"
+computable_under_this_contract = true
+
+[[statistics.primary_metrics]]
+id = 3
+name = "beneficial_dominant_vs_harmful_dominant_auroc"
+task = "propagation_outcome"
+row_population = "locked_holdout anchor rows for task propagation_outcome, restricted to beneficial-or-harmful anchors (changed_but_same_correctness/unchanged_* excluded)"
+target = "y_propagation_beneficial"
+producing_model_fit_ids = [3, 4]
+metric_kind = "auroc"
+computable_under_this_contract = false
+computable_note = "blocked by [propagation_target_authority].t320_status"
+
+[[statistics.primary_metrics]]
+id = 4
+name = "beneficial_dominant_vs_harmful_dominant_average_precision"
+task = "propagation_outcome"
+row_population = "locked_holdout anchor rows for task propagation_outcome, restricted to beneficial-or-harmful anchors"
+target = "y_propagation_beneficial"
+producing_model_fit_ids = [3, 4]
+metric_kind = "average_precision"
+computable_under_this_contract = false
+computable_note = "blocked by [propagation_target_authority].t320_status"
+
+[statistics.bootstrap]
+resample_unit = "locked_holdout image (not individual anchor, not individual anchor_query row); resampling an image carries every eligible row belonging to that image, for BOTH tasks, together"
+replicates = 10000
+seed = 0
+interval_type = "percentile"
+confidence_level = 0.95
+paired = true
+paired_definition = "for each bootstrap replicate, both models of a given task's variant pair (fit 1 vs 2 for query_correctness; fit 3 vs 4 for propagation_outcome) are evaluated on the SAME resampled image multiset, and their metric difference is recorded, before moving to the next replicate"
+refit_inside_replicates = false
+refit_inside_replicates_note = "all four models are fit exactly once, on the unresampled discovery partition, before any bootstrap replicate begins; bootstrap replicates only resample which already-fitted-model predictions on locked_holdout rows are aggregated into each replicate's metric computation"
+row_inclusion_rule = "for a sampled image (with replacement, so an image may be sampled more than once in one replicate), every eligible row belonging to that image is included once per sampled occurrence, preserving multiplicity (an image sampled twice contributes its rows twice)"
+degenerate_replicate_handling = "a replicate is DEGENERATE for a given metric if the resampled row set for that metric's row_population does not contain both classes of that metric's target (e.g. no beneficial and no harmful anchor among the resampled propagation_outcome rows); a degenerate replicate's value for that metric is recorded as NOT_A_NUMBER and excluded from that metric's percentile-CI computation"
+min_valid_replicate_fraction = 0.90
+min_valid_replicate_fraction_rule = "if fewer than 90% of the 10,000 replicates are non-degenerate for a given metric, that metric's bootstrap CI is INCONCLUSIVE rather than reported"
+
+[statistics.minimum_data_requirements]
+min_eligible_query_correctness_rows_discovery = 500
+min_eligible_query_correctness_rows_holdout = 500
+both_query_correctness_classes_required_both_partitions = true
+min_beneficial_dominant_holdout_propagation_outcome_rows = 100
+min_harmful_dominant_holdout_propagation_outcome_rows = 100
+below_minimum_result = "INCONCLUSIVE"
+population_enlargement_after_shortfall_authorized = false
+propagation_outcome_requirements_note = "these propagation_outcome minimums cannot be evaluated while [propagation_target_authority].t320_status is DEFERRED; they are frozen now so a successor task cannot lower them later"
+
+##############################################################################
+# 18. EARLY GO/STOP GATES
+##############################################################################
+
+[gates.A]
+name = "intervention_validity"
+min_structural_validity_fraction = 0.95
+max_gt_dependent_intervention_records = 0
+max_non_finite_scores = 0
+reliability_range = [0.0, 1.0]
+input_validity_reference = "[scores.validity] -- structural invalidity per that table's input_failure_behavior counts against min_structural_validity_fraction and max_non_finite_scores"
+
+[gates.B]
+name = "query_correctness_information"
+task = "query_correctness"
+min_auroc_improvement_holdout = 0.03
+auroc_improvement_definition = "model_fit_id=2.query_correctness_auroc - model_fit_id=1.query_correctness_auroc, evaluated on locked_holdout anchor_query rows"
+paired_bootstrap_95_lower_bound_required = "> 0"
+average_precision_difference_requirement = "not negative"
+computable_under_this_contract = true
+
+[gates.C]
+name = "propagation_outcome_information"
+task = "propagation_outcome"
+min_auroc_improvement_holdout = 0.03
+auroc_improvement_definition = "model_fit_id=4.beneficial_dominant_vs_harmful_dominant_auroc - model_fit_id=3.beneficial_dominant_vs_harmful_dominant_auroc, evaluated on locked_holdout anchor rows"
+paired_bootstrap_95_lower_bound_required = "> 0"
+average_precision_difference_requirement = "not negative"
+minimum_data_requirement_from_section_15 = true
+computable_under_this_contract = false
+computable_note = "Gate C cannot be computed, passed, or skipped while [propagation_target_authority].t320_status = DEFERRED_REQUIRES_SUCCESSOR_AUTHORITY. A missing T320 binding is a Gate C FAIL, never a Gate C PASS and never a Gate C SKIP."
+
+[gates.D]
+name = "subgroup_sanity"
+subgroups = ["predicted_boundary_vs_interior", "thing_vs_stuff_gt_category", "low_vs_high_unary_margin"]
+min_subgroup_size_for_check = 100
+max_negative_auroc_difference = -0.01
+rule = "no subgroup with at least 100 eligible records may show an AUROC difference (CONTROL_PLUS_INTERVENTION minus CONTROL, within a single task's own model pair) below -0.01"
+
+[gates.E]
+name = "compute_feasibility"
+max_h100_hours_96_image_feasibility_run = 2.0
+max_h100_hours_1000_image_projection = 8.0
+projection_formula_and_uncertainty_disclosure_required = true
+deployment_runtime_claim_authorized = false
+
+[gates.outcome]
+proceed_value = "PROCEED_TO_DEPLOYABLE_SIGNAL_SPECIFICATION"
+proceed_condition = "Gates A, B, C, D, and E all pass"
+stop_value = "STOP_SEMANTIC_EVIDENCE_INTERVENTION_TRACK"
+stop_condition = "any gate fails"
+inconclusive_handling = "INCONCLUSIVE counts as STOP for this bounded project, UNLESS the inconclusive result is caused by a mechanical implementation defect repairable without changing the population or any scientific definition in this contract"
+post_hoc_threshold_changes_authorized = false
+feasibility_execution_authorized = false
+feasibility_execution_blocked_reason = "Gate C is not computable while [propagation_target_authority].t320_status is DEFERRED_REQUIRES_SUCCESSOR_AUTHORITY; the overall proceed_condition (all five gates passing) therefore cannot currently be satisfied. The 96-image feasibility study remains unauthorized regardless of any other gate's outcome, independent of, and in addition to, every flag in [authorization]."
+
+##############################################################################
+# 19. END OF FROZEN CONTRACT
+##############################################################################
+
+[closure]
+complete = true
+final = true
+self_referential_hash_created = false
+note = "This TOML file and the JSON population file it governs are validated by src/semantic_evidence_feasibility_identity.py at load time. Neither file records a hash of itself; self-referential hashing was deliberately not implemented, per task instruction. This revision (schema version 1.1.0) repairs five independent-verification findings without changing the 96-image population, its order, its 48/48 split, or any frozen population digest."
