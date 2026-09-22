@@ -1,0 +1,193 @@
+{
+  "schema": {
+    "name": "semantic_evidence_t320_source_manifest",
+    "version": "1.0.0"
+  },
+  "created_at_utc": "2026-09-21T05:45:00Z",
+  "task": "FREEZE_T320_TARGET_SOURCE_AUTHORITY",
+  "source_branch_informational": "e12-connectivity-analysis",
+  "source_commit": "00392527937253f93b9f3fe36b76347b4a6f1eb0",
+  "source_tree_id": "28f66998d4ca48879c0c2c3fc758954c67a1d8aa",
+  "reviewed_e3_base_commit": "9f314dc973657719abb15cc33473dafc185444c4",
+  "file_records": [
+    {
+      "ordinal": 1,
+      "role": "graph_construction",
+      "path": "src/open_vocabulary_segmentation/models/dinotext/cover_dr/graph.py",
+      "source_commit": "00392527937253f93b9f3fe36b76347b4a6f1eb0",
+      "blob_id": "d0517cf150c946b92a0a97952d81d531d3b6e851",
+      "sha256": "b7d4eec053dc204db869590a5ff3763b630084a65f0abd3101190b1e77f33ac5",
+      "required_symbols": [
+        "DirectedTopKGraph",
+        "build_directed_topk_graph"
+      ],
+      "classification": "scientific_kernel",
+      "required": true,
+      "reason_required": "defines DirectedTopKGraph and build_directed_topk_graph, the directed top-k graph construction consumed by finite_step_propagate; without it the propagation operator A is undefined."
+    },
+    {
+      "ordinal": 2,
+      "role": "finite_step_recurrence",
+      "path": "src/open_vocabulary_segmentation/models/dinotext/cover_dr/finite_step_regime.py",
+      "source_commit": "00392527937253f93b9f3fe36b76347b4a6f1eb0",
+      "blob_id": "7467f88674b5b057fabf55a7d5026fc5984b15b2",
+      "sha256": "79ce8ed0e5462131cf148a1615aa60048b4a05782de7d5279ddee45856de6108",
+      "required_symbols": [
+        "FiniteStepRegimeError",
+        "MatchedGraphDiagnostics",
+        "build_matched_k11_from_k12",
+        "compute_matched_graph_diagnostics",
+        "finite_step_propagate"
+      ],
+      "classification": "scientific_kernel",
+      "required": true,
+      "reason_required": "defines finite_step_propagate, the exact P(t+1)=alpha*A@P(t)+(1-alpha)*S0 finite-step recurrence that produces T320 after 320 steps; imported directly by matched_power_evaluator.py and, via dfp_phase1a_recurrence_capture.py, by the historical 350-image execution."
+    },
+    {
+      "ordinal": 3,
+      "role": "matched_t320_driver_stitch_finalization",
+      "path": "src/open_vocabulary_segmentation/models/dinotext/cover_dr/matched_power_evaluator.py",
+      "source_commit": "00392527937253f93b9f3fe36b76347b4a6f1eb0",
+      "blob_id": "27363ea8861b408e4aca4589ae0126515b2eb2c3",
+      "sha256": "13371fd697ef5fae41f2a0b7e99f8c5a65d679a337de734e539a8fdf7e95acf4",
+      "required_symbols": [
+        "stitch_one_image",
+        "finalize_prediction"
+      ],
+      "classification": "scientific_adapter",
+      "required": true,
+      "reason_required": "defines stitch_one_image (uniform-averaging window stitching) and finalize_prediction (crop+bilinear rescale+argmax), the recommended e12 driver's final assembly of the T320 prediction from per-window recurrence outputs."
+    },
+    {
+      "ordinal": 4,
+      "role": "window_geometry",
+      "path": "src/open_vocabulary_segmentation/segmentation/evaluation/sliding_window_geometry.py",
+      "source_commit": "00392527937253f93b9f3fe36b76347b4a6f1eb0",
+      "blob_id": "801dc779ece4bf68d3c6b9795c402d4e18951379",
+      "sha256": "082a812907581444ed6ed87b232c82105a0071ca24cd802aceec81fa0ec3c25b",
+      "required_symbols": [
+        "SlidingWindowPlan",
+        "SpatialSize"
+      ],
+      "classification": "geometry_adapter",
+      "required": true,
+      "reason_required": "defines SlidingWindowPlan/SpatialSize, the pure-geometry sliding-window enumeration consumed by the recommended e12 driver to determine window placement/order; excludes window_cache.py's CGLS-oriented caching."
+    },
+    {
+      "ordinal": 5,
+      "role": "e3_model_unary_integration",
+      "path": "src/open_vocabulary_segmentation/models/dinotext/dinotext.py",
+      "source_commit": "00392527937253f93b9f3fe36b76347b4a6f1eb0",
+      "blob_id": "4e53c1d001532c00fa886643280f787c1c0d1214",
+      "sha256": "94d920e7f9153e97c8c4948013beffd7533902c7d307fe15607a6b03508873ed",
+      "required_symbols": [
+        "DINOText",
+        "masks_from_patch_scores"
+      ],
+      "classification": "e3_model_boundary",
+      "required": true,
+      "reason_required": "defines DINOText.masks_from_patch_scores, the internal per-window patch-grid-to-crop-pixel upsample (hardcoded align_corners=True) applied to propagated graph scores before stitching."
+    },
+    {
+      "ordinal": 6,
+      "role": "e3_unary_scoring",
+      "path": "src/open_vocabulary_segmentation/models/dinotext/masker.py",
+      "source_commit": "00392527937253f93b9f3fe36b76347b4a6f1eb0",
+      "blob_id": "2658e6f44a8bc4fe546d61f6a486f1f7bca2c2e7",
+      "sha256": "a9ac50a7620031451c29a98f1e9a17cd52fd55850d8d7050c43c0d868f92a94a",
+      "required_symbols": [
+        "DINOTextMasker",
+        "mask_from_similarity"
+      ],
+      "classification": "e3_model_boundary",
+      "required": true,
+      "reason_required": "defines DINOTextMasker.mask_from_similarity, the E3 sigmoid applied to the (post-propagation) similarity map before masks_from_patch_scores' interpolation; identical sigmoid used for T0."
+    },
+    {
+      "ordinal": 7,
+      "role": "inference_class_order_final_align_corners_boundary",
+      "path": "src/open_vocabulary_segmentation/segmentation/evaluation/dinotext_seg.py",
+      "source_commit": "00392527937253f93b9f3fe36b76347b4a6f1eb0",
+      "blob_id": "f37e1c651504743bb0dda3cebc3befbcf6c73aab",
+      "sha256": "e5a4dc40aefe866156c9ca397d77a31cd243fc05d79f5e6cd1905e8d983265f4",
+      "required_symbols": [
+        "DINOTextSegInference.align_corners"
+      ],
+      "classification": "prediction_extraction",
+      "required": true,
+      "reason_required": "the recommended driver reads inference.align_corners; the reachable inference object is an instance of DINOTextSegInference; the sole relevant assignment in the tree at this commit is self.align_corners = False, within DINOTextSegInference's own initialization path; that value determines the final-rescale align_corners argument consumed by matched_power_evaluator.finalize_prediction; this file's RWR-enabled encode_decode branch is not used by the recommended T320 path (matched_power_evaluator.process_one_window calls inference.model.masks_from_patch_scores directly) and is excluded from this locator."
+    }
+  ],
+  "canonical_source_closure_digest": "2a6268a0513c59346a9ceae394346b5096d05083369ef49c46a662fd3f4da6d2",
+  "canonical_encoding": "length_prefixed_utf8_v2",
+  "excluded_source": [
+    {
+      "path": "src/open_vocabulary_segmentation/segmentation/evaluation/window_cache.py",
+      "source_commit": "00392527937253f93b9f3fe36b76347b4a6f1eb0",
+      "blob_id": "aa59801f702707a9711ce37404c1702c62a7d206",
+      "reason": "CGLS/canonical-RWR-oriented window/feature caching; not imported by matched_power_evaluator.py or any other file in the source closure (confirmed via ast-parsed import extraction, zero references outside comments/docstrings); serves the excluded CGLS solver path, not the finite-step T320 kernel. Adding it changes the frozen closure and must be rejected."
+    },
+    {
+      "path": "src/open_vocabulary_segmentation/models/dinotext/cover_dr/rwr.py",
+      "source_commit": "00392527937253f93b9f3fe36b76347b4a6f1eb0",
+      "blob_id": "a802fb05b38a103c6c886430e35aa74ddd54dd13",
+      "reason": "the CGLS (conjugate-gradient least-squares) canonical-RWR solver; a different, convergence-based propagation mechanism, not the finite-step regime that defines T320."
+    },
+    {
+      "path": "src/open_vocabulary_segmentation/models/dinotext/cover_dr/stitching_control.py",
+      "source_commit": "00392527937253f93b9f3fe36b76347b4a6f1eb0",
+      "blob_id": "40305e302a0a64db31fac9f3466e2562384c1356",
+      "reason": "component-decomposition/stitching-control diagnostics module; not part of the recommended e12 driver's stitch_one_image/finalize_prediction call chain."
+    },
+    {
+      "path": "src/open_vocabulary_segmentation/models/dinotext/cover_dr/native_edge_support.py",
+      "source_commit": "00392527937253f93b9f3fe36b76347b4a6f1eb0",
+      "blob_id": "965a37bced87f1760eeef48d4f2461188b4b0cb4",
+      "reason": "component-decomposition/native-edge diagnostics module; not part of the recommended e12 driver's T320 call chain."
+    },
+    {
+      "path": "src/open_vocabulary_segmentation/models/dinotext/cover_dr/coco_object_evaluator.py",
+      "source_commit": "00392527937253f93b9f3fe36b76347b4a6f1eb0",
+      "blob_id": "068dd6005dbcf68acf25468db44511f9fec6f973",
+      "reason": "a separate COCO-object/VOC-variant finalize_prediction definition (different align_corners usage context); not the matched_power_evaluator.py path recommended by this authority."
+    },
+    {
+      "path": "src/open_vocabulary_segmentation/models/dinotext/cover_dr/inference.py",
+      "source_commit": "00392527937253f93b9f3fe36b76347b4a6f1eb0",
+      "blob_id": "50de43b7353daa14843149bd4b37c1f456b18186",
+      "reason": "a separate cover_dr inference orchestration module, not imported by matched_power_evaluator.py."
+    },
+    {
+      "path": "src/dfp_phase1b_masked_forward.py",
+      "source_commit": "804a774588b97e43e0347343089a0209ae28a5c9",
+      "blob_id": null,
+      "reason": "DFP Phase-1B masked-forward provenance module (dfp lineage only, absent from e12); part of the BALP-development analysis layer, not the T320 target-generation kernel. Excluded even though the recurrence kernel it eventually consumes is byte-identical."
+    },
+    {
+      "path": "src/dfp_phase1b_lightweight_boundary.py",
+      "source_commit": "804a774588b97e43e0347343089a0209ae28a5c9",
+      "blob_id": null,
+      "reason": "BALP (boundary-aware) candidate-computation module (dfp lineage only); downstream research analysis consuming T0/T320 outputs, not part of their generation."
+    },
+    {
+      "path": "src/dfp_phase1b_conservation_tolerance.py",
+      "source_commit": "804a774588b97e43e0347343089a0209ae28a5c9",
+      "blob_id": null,
+      "reason": "DFP Phase-1B conservation-calibration/tolerance module (dfp lineage only); statistical QA layer, not part of T320 generation."
+    },
+    {
+      "path": "src/dfp_phase1b_chunk_benchmark.py",
+      "source_commit": "804a774588b97e43e0347343089a0209ae28a5c9",
+      "blob_id": null,
+      "reason": "DFP Phase-1B profiling/benchmark runner (dfp lineage only); operational tooling, not part of T320 generation."
+    },
+    {
+      "path": "diagnostics/run_coco_object_protocol_confirmation.py",
+      "source_commit": "00392527937253f93b9f3fe36b76347b4a6f1eb0",
+      "blob_id": "f2b9c6d1d522c05b25997d46928591823242db6c",
+      "reason": "a confirmation/full-evaluation launcher script; an execution entry point, not part of the frozen source closure, and explicitly out of scope (no execution is authorized by this task)."
+    }
+  ],
+  "complete": true,
+  "final": true
+}

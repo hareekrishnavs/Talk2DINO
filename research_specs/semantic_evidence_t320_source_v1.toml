@@ -1,0 +1,391 @@
+##############################################################################
+# semantic_evidence_t320_source_v1.toml
+#
+# TASK: FREEZE_T320_TARGET_SOURCE_AUTHORITY
+#
+# Purpose (closed): bind the exact historical Git source, blob identity, and
+# scientific formulas that define the T320 finite-step propagation target
+# required by the already-committed semantic-evidence feasibility contract
+# (research_specs/semantic_evidence_feasibility_v1.toml). This authority
+# freezes PROVENANCE and SCIENTIFIC SEMANTICS only. It does not copy, port,
+# reimplement, or execute any T320 code; does not modify E3; does not touch
+# GT, images, checkpoints, or a model; and does not authorize the 96-image
+# feasibility study. A later, separate task may add new isolated source
+# files that reproduce this contract -- only after this authority is
+# independently verified and committed.
+##############################################################################
+
+[identity]
+schema_name = "semantic_evidence_t320_source_authority"
+schema_version = "1.0.0"
+created_at_utc = "2026-09-21T05:45:00Z"
+task = "FREEZE_T320_TARGET_SOURCE_AUTHORITY"
+purpose = "bind exact historical source, blob identity, and scientific semantics of T320; close provenance ambiguity; authorize nothing beyond a future isolated implementation after independent verification and commit"
+
+##############################################################################
+# 1. PREREQUISITE GATE (recorded, not re-verified at load time by this file
+#    alone -- src/semantic_evidence_t320_source_identity.py re-verifies the
+#    live repository state against these recorded values)
+##############################################################################
+
+[prerequisite]
+required_branch = "research/semantic-evidence-interventions"
+required_head = "7eb8d76db8abe31034460eda5efcc68f49852015"
+reviewed_e3_base_commit = "9f314dc973657719abb15cc33473dafc185444c4"
+feasibility_contract_commit = "7eb8d76db8abe31034460eda5efcc68f49852015"
+feasibility_contract_files_count = 5
+feasibility_contract_toml_sha256 = "39edcae9d0927ec50c640576eb6d558e413558d16651f0398594d898bd19826f"
+feasibility_contract_subset_sha256 = "e5a9ba7c9f8e4b9ea71ed5195f69e45f93eb0ee13e3f6aa893cb13d1d6e31062"
+feasibility_contract_identity_py_sha256 = "e95ef14d901b2b27911653fae4267bc74d668371c6e27adb1169ff117a3f2dd1"
+feasibility_contract_tests_sha256 = "3e1369523857c456e023b33e080695eef7174b5fc3f73cf38dc135cf345d4681"
+feasibility_contract_docs_sha256 = "462a393591d5be78b1157ae63c75502f3fbc85cb517116e29072c542b0c5b70a"
+feasibility_contract_states_t0 = "BOUND_TO_COMMITTED_E3_UNARY_INFERENCE"
+feasibility_contract_states_t320 = "DEFERRED_REQUIRES_SUCCESSOR_AUTHORITY"
+feasibility_contract_states_96_image_execution_authorized = false
+prior_audit_report_verdict = "NEEDS_FIXES"
+prior_audit_report_path = "/scratch/haree/semantic_evidence_interventions/t320_source_audit/20260921T042415Z/t320_source_audit.md"
+prior_completion_report_verdict = "PASS"
+prior_completion_report_path = "/scratch/haree/semantic_evidence_interventions/t320_source_audit_completion/20260921T050256Z/t320_provenance_completion.md"
+prior_independent_verification_verdict = "PASS"
+prior_independent_verification_report_path = "/scratch/haree/semantic_evidence_interventions/t320_source_audit_verification/20260921T051844Z/independent_verification_report.md"
+note = "The original audit (t320_source_audit) itself recorded NEEDS_FIXES; it was repaired by the completion task (PASS) and independently, adversarially re-verified without trusting the completion report (also PASS). This authority relies on the resolved, most-recent PASS lineage, not on the initial audit alone."
+
+##############################################################################
+# 2. AUTHORITY PURPOSE AND STATUS
+##############################################################################
+
+[status]
+source_authority_complete = true
+source_implementation_present_on_current_branch = false
+implementation_performed_in_this_task = false
+isolated_future_implementation_authorized_after_commit_and_independent_verification = true
+existing_e3_scientific_file_modification_authorized = false
+cli_implementation_authorized = false
+dataset_access_authorized = false
+model_construction_authorized = false
+checkpoint_tensor_loading_authorized = false
+t320_execution_authorized = false
+intervention_execution_authorized = false
+gt_access_authorized = false
+feasibility_96_execution_authorized = false
+training_authorized = false
+confirmation_execution_authorized = false
+full_5000_evaluation_authorized = false
+existence_of_this_authority_implies_execution_authorization = false
+
+##############################################################################
+# 3. HISTORICAL SOURCE COMMIT BINDING
+##############################################################################
+
+[historical_source]
+source_branch_informational = "e12-connectivity-analysis"
+source_commit = "00392527937253f93b9f3fe36b76347b4a6f1eb0"
+source_commit_object_type = "commit"
+source_tree_id = "28f66998d4ca48879c0c2c3fc758954c67a1d8aa"
+reviewed_e3_base_commit = "9f314dc973657719abb15cc33473dafc185444c4"
+e3_base_is_ancestor_of_source_commit = true
+full_40_hex_commit_required = true
+abbreviated_commit_rejected = true
+scientific_identity_is_commit_tree_blob_closure_not_branch_name = true
+branch_ref_currently_contains_commit = true
+checkout_of_source_branch_used = false
+read_mechanism = "git show/cat-file/ls-tree/rev-parse/merge-base only, via argument-vector subprocess calls; never shell=True; never a checkout"
+
+[historical_source.rejected_lineage]
+branch = "e11-cover-dr-1"
+reason = "5 of 9 cover_dr files (finite_step_regime.py, stitching_control.py, matched_power_evaluator.py, native_edge_support.py, coco_object_evaluator.py) are absent from the e11-cover-dr-1 git tree entirely at its tip -- confirmed via git ls-tree returning empty output and git show exiting 128, not via a 0-byte/empty-file reading. finite_step_propagate is not defined anywhere on this branch. e11 cannot supply the T320 recurrence and is rejected."
+
+[historical_source.superseded_lineage]
+branch = "dfp-phase1a-diagnostics"
+reason = "a direct descendant of e12-connectivity-analysis; zero commits touch any cover_dr/ file between e12's tip and dfp-phase1a-diagnostics's tip (git log --oneline <e12-tip>..dfp-phase1a-diagnostics -- .../cover_dr/ is empty). The scientific kernel is unchanged; this lineage additionally carries ~90 Phase-1B/BALP-development commits and a different, divergent final-rescale/stitching/prediction-extraction wrapper (see [historical_350_disclosure]) that is not part of this authority's recommended path."
+
+##############################################################################
+# 4. SOURCE MANIFEST BINDING
+##############################################################################
+
+[source_manifest_binding]
+manifest_path = "research_specs/semantic_evidence_t320_source_manifest_v1.json"
+manifest_schema_name = "semantic_evidence_t320_source_manifest"
+manifest_schema_version = "1.0.0"
+manifest_file_sha256 = "843f79528bab5f4f6f56a9d17640ab05918e8f22b98388cf01aad28d4c58c983"
+canonical_source_closure_digest = "2a6268a0513c59346a9ceae394346b5096d05083369ef49c46a662fd3f4da6d2"
+canonical_encoding = "length_prefixed_utf8_v2"
+canonical_encoding_exact_match_required = true
+canonical_encoding_note = "manifest.canonical_encoding must equal exactly 'length_prefixed_utf8_v2' (case-sensitive, no surrounding whitespace); the loader implements only this one version and never selects encoding behavior dynamically from an untrusted label -- 'length_prefixed_utf8_v1', 'length_prefixed_utf8_v3', any differently-cased or whitespace-padded variant, and any non-string value are all rejected."
+canonical_encoding_definition = "for each file record in manifest order: concatenate length_prefixed_utf8(str(ordinal)), length_prefixed_utf8(role), length_prefixed_utf8(path), length_prefixed_utf8(source_commit), length_prefixed_utf8(blob_id), length_prefixed_utf8(sha256), length_prefixed_utf8(classification), length_prefixed_utf8(str(len(required_symbols))), then length_prefixed_utf8(symbol) for each required symbol in order, then length_prefixed_utf8(\"true\" if required else \"false\"), then length_prefixed_utf8(reason_required); concatenate all records in manifest order; length_prefixed_utf8(s) = 8-byte-big-endian(len(utf8_bytes)) + utf8_bytes; digest = SHA256(concatenation), independent of JSON whitespace, key order, filesystem order, locale, and PYTHONHASHSEED. v2 (this version) extends v1 by bringing `required` and `reason_required` inside the digest's cryptographic scope; `required` has exactly one canonical representation per boolean value (the strings \"true\"/\"false\", the same scalar convention used elsewhere in this encoding); `reason_required` must be non-empty, non-whitespace-only, and free of NUL bytes, enforced by the encoder itself, not only by schema validation."
+required_symbol_locator_grammar = "closed, exactly two forms: (A) bare symbol 'SymbolName' -- resolves to exactly one ClassDef/FunctionDef/AsyncFunctionDef named SymbolName, found at module level or as a direct method of some class (module-level and method-level matches pooled, must total exactly one; a nested function, a name only in a comment/docstring, or an imported-but-not-locally-defined name never counts); (B) instance-attribute locator 'ClassName.attribute_name' -- ClassName resolves to exactly one top-level class; within it, exactly one self.attribute_name = <value> assignment must exist, and it must be a direct statement of that class's own __init__ method (never a nested helper inside __init__, another method, class-level scope, or a property setter); no other assignment to the same attribute may exist anywhere else in the class. No wildcard, call, indexing, or relative-import syntax is accepted; more than one dot is rejected. __init__ is the only enclosing method this grammar currently supports, because the sole instance-attribute locator in this manifest (DINOTextSegInference.align_corners) requires it -- the grammar is not extended beyond what the seven records' existing entries require."
+required_symbols_ast_verified_for_all_seven_records = true
+self_referential_hash_in_manifest = false
+source_file_count = 7
+excluded_source_count = 11
+
+##############################################################################
+# 5. T0 SCIENTIFIC CONTRACT (bound to the already-committed E3 feasibility
+#    contract; not redefined here)
+##############################################################################
+
+[t0_contract]
+bound_to_toml = "research_specs/semantic_evidence_feasibility_v1.toml"
+bound_to_toml_sha256 = "39edcae9d0927ec50c640576eb6d558e413558d16651f0398594d898bd19826f"
+bound_to_identity_py = "src/semantic_evidence_feasibility_identity.py"
+bound_to_identity_py_sha256 = "e95ef14d901b2b27911653fae4267bc74d668371c6e27adb1169ff117a3f2dd1"
+bound_section = "[propagation_target_authority.t0_definition]"
+view = "ORIGINAL view only"
+score_domain = "committed E3 pre-sigmoid cosine score field"
+class_ordering = "original frozen 171-class order"
+predicted_class_rule = "argmax over the frozen 171-class order (lowest class index on ties)"
+identity_with_query_1 = "T0's predicted class at an anchor equals query_1 (q1), by construction"
+mechanisms_excluded = ["graph construction", "recurrence", "propagation", "PAMR", "any intervention view"]
+redefinition_by_this_authority_authorized = false
+
+##############################################################################
+# 6. T320 GRAPH CONTRACT
+##############################################################################
+
+[graph_contract]
+source_manifest_ordinal = 1
+source_path = "src/open_vocabulary_segmentation/models/dinotext/cover_dr/graph.py"
+required_symbol = "build_directed_topk_graph"
+node_source = "L2-normalized DINO patch features, tensor shape [N, D] (N = patch-grid nodes, D = embedding dim)"
+node_ordering = "the caller's own patch-grid row-major flattening order; graph.py imposes no reordering"
+patch_grid_ordering = "external to graph.py; inherited from the [D-dim feature, N-node] tensor layout the caller supplies"
+k = 12
+similarity_formula = "cosine similarity, realized as the plain dot product of already-L2-normalized features: affinities = features_float @ features_float.T (features_float = dino_features cast to float32; input L2-normalization is validated, not performed, by this function -- non-unit-norm input raises ValueError)"
+negative_affinity_handling = "clamp_min_(0) applied before raising to affinity_power -- negative cosine similarities are floored to exactly 0.0"
+affinity_power = 3.0
+affinity_power_application = "affinities.pow_(affinity_power), applied after the clamp_min_(0) floor"
+self_loop_policy = "affinities.fill_diagonal_(-inf) excludes self-similarity from top-k neighbor selection; a node's own index is never among its k neighbors UNLESS it falls into the zero-degree fallback path below"
+directed_symmetric_behavior = "directed, row-stochastic; explicitly NOT symmetrized (graph.py docstring: 'COVER-DR uses a directed row-stochastic graph. Do not symmetrize')"
+deterministic_neighbor_tie_breaking = "torch.argsort(affinities, dim=1, descending=True, stable=True)[:, :k] -- a stable sort, so for exactly-tied affinity values the lower original column index is selected first"
+normalization_direction = "row-wise: each row of transition_weights sums to 1 over its k selected edges (right-stochastic / row-stochastic), computed as edge_affinities / row_sums per row"
+zero_degree_behavior = "if a row's k selected edge_affinities all sum to exactly 0 (self_loop_fallback), that row's neighbor_indices[:,0] is set to the row's own node index and transition_weights[:,0] is set to 1.0 -- a self-loop with weight 1, not an error and not a uniform-degree fallback"
+dtype = "float32 (dino_features is cast to torch.float32 via features_float = dino_features.detach().to(torch.float32) before any arithmetic)"
+device_preserving = "no .cpu()/.cuda() call; all constructed tensors are created on dino_features.device"
+matmul_orientation = "DirectedTopKGraph.matmul(rhs) computes A @ rhs as (transition_weights * rhs[neighbor_indices]).sum(dim=1) -- a gather-weight-reduce over each node's own k outgoing edges, i.e. row i of the output is the weighted sum of P at row i's k selected neighbors"
+matmul_dtype_behavior = "transition_weights are cast to rhs.dtype before multiplication (weights.to(dtype=rhs.dtype)); matmul output dtype follows the caller-supplied rhs dtype, not a value hardcoded inside graph.py"
+
+##############################################################################
+# 7. T320 RECURRENCE CONTRACT
+##############################################################################
+
+[recurrence_contract]
+source_manifest_ordinal = 2
+source_path = "src/open_vocabulary_segmentation/models/dinotext/cover_dr/finite_step_regime.py"
+required_symbol = "finite_step_propagate"
+formula = "P(0) = S0; P(t+1) = alpha * A @ P(t) + (1 - alpha) * S0, for t = 0 .. steps-1, evaluated for exactly steps=320 completed updates"
+alpha = 0.98
+restart_coefficient = 0.02
+restart_coefficient_derivation = "1 - alpha = 1 - 0.98 = 0.02, applied as exactly one (1-alpha) factor per step (docstring: 'Exactly one (1-alpha) factor is applied per step')"
+steps = 320
+initialization = "p = s0_owned.clone(); s0_owned = s0.detach().clone() taken once, before the loop"
+matrix_multiplication_orientation = "alpha_value * graph.matmul(p) -- graph.matmul realizes A @ p per [graph_contract].matmul_orientation; p is a [N, C] tensor (N nodes, C = class/score channels)"
+tensor_axes = "[N, C]: dim 0 = node (patch), dim 1 = channel (class score)"
+update_order = "p is REASSIGNED each iteration to a new tensor (p = alpha_value * graph.matmul(p) + one_minus_alpha * s0_owned); s0_owned is read every step and never itself updated"
+s0_mutation = "s0 is never mutated in place: a defensive .detach().clone() is taken immediately on entry, before the loop starts"
+no_convergence_test = true
+no_early_stopping = true
+no_tolerance = true
+no_adaptive_step_count = true
+no_cgls_gmres_dense_solve_or_fallback = true
+steps_type_requirement = "exact positive int, minimum=1; bool rejected (isinstance(steps, bool) is checked and rejected before the int check)"
+alpha_type_requirement = "finite float satisfying 0 <= alpha < 1"
+propagation_dtype_note = "finite_step_propagate itself is dtype-agnostic: FiniteStepTrace.dtype = p.dtype, inherited from whatever dtype s0 arrives as; it does not internally cast to float32. The concrete float32 usage bound below is a property of the caller's S0 preparation, independently cross-confirmed against 5 frozen identity TOMLs (including evaluation_identities/e12_matched_k11_k12_t320.toml: compute_dtype = \"float32\", output_dtype = \"float32\")"
+propagation_dtype = "float32"
+accumulation_dtype = "float32"
+accumulation_dtype_confirmed_by = "evaluation_identities/e12_matched_k11_k12_t320.toml lines 74-75 (compute_dtype/output_dtype = float32), cross-confirmed against 4 other independent identity TOMLs per the prior provenance audits"
+non_finite_failure_policy = "_require_finite_tensor(p, ...) raises FiniteStepRegimeError if the final result p, or any captured snapshot, contains a non-finite value; checked after the loop completes, for the final result and every requested snapshot"
+deterministic_behavior_requirement = "graph.matmul's gather-weight-reduce (not index_add_ with repeated destinations) is deterministic on both CPU and CUDA; graph.py's own docstring notes the incoming-edge order is precomputed specifically because CUDA index_add_ with repeated destinations is nondeterministic -- that nondeterministic path is not used by matmul (only by transpose_matmul, which finite_step_propagate does not call)"
+snapshot_at_step_320_required = true
+snapshot_step_320_is_final = "T320 is the snapshot at step=320 out of exactly 320 completed updates -- the LAST step, not an intermediate one"
+
+##############################################################################
+# 8. GEOMETRY CONTRACT
+##############################################################################
+
+[geometry_contract]
+source_manifest_ordinal = 4
+source_path = "src/open_vocabulary_segmentation/segmentation/evaluation/sliding_window_geometry.py"
+required_symbols = ["SlidingWindowPlan", "SpatialSize"]
+crop = [448, 448]
+stride = [224, 224]
+patch_size = [14, 14]
+patch_grid_dimensions = "derived by the caller from crop/patch_size (448/14 = 32x32 patches per crop); sliding_window_geometry.py stores PatchGridSpec generically and does not hardcode the 32x32 value itself"
+window_enumeration_source = "SlidingWindowPlan.build(...), consumed directly by the recommended e12 driver (diagnostics/run_matched_k11_k12_evaluation.py) in place of manual h_idx/w_idx arithmetic"
+window_ordering = "canonical_row_major_sliding_window_order, per evaluation_identities/e12_matched_k11_k12_t320.toml's crop_order field, cross-confirmed against this module's WindowGeometry/SlidingWindowPlan construction order"
+flush_right_behavior = "governed by SlidingWindowPlan.build's window-count/stride arithmetic; module docstring states it 'introduces geometry only: no caching, crop consensus, or COVER-DR behavior lives here'"
+flush_bottom_behavior = "symmetric to flush-right, governed by the same SlidingWindowPlan.build arithmetic along the vertical axis"
+crop_clipping_padding_behavior = "no Pad transform is used anywhere in the recommended e12 driver or the 350-image execution path (dfp_phase1a_final_rescale_pullback.py's own docstring: 'a no-op slice when stitched's own spatial extent already equals img_shape, exactly as in this pipeline, which has no Pad transform')"
+image_canvas_coordinate_mapping = "local_to_global/global_to_local functions defined in this module (lines 428-456 at source); WindowGeometry carries each window's placement in image/canvas coordinates"
+overlap_membership = "intersect_windows/overlap_area/contains_point (module-level pure functions) define overlap membership; used for stitching accumulation, not for graph/recurrence"
+module_is_stdlib_only = true
+module_torch_free = true
+align_corners_stencil_note = "this module also defines a pure-geometry BilinearStencil/_require_align_corners_true helper for align_corners=True-consistent index/weight computation; this is a SEPARATE geometry utility from the two runtime interpolation operations in [internal_upsample_contract] and [final_rescale_contract], and is not itself one of those two operations"
+
+##############################################################################
+# 9. TWO DISTINCT INTERPOLATION OPERATIONS
+##############################################################################
+
+[internal_upsample_contract]
+name = "operation_a_internal_per_window_patch_grid_upsample"
+source_manifest_ordinal = 5
+source_function = "DINOText.masks_from_patch_scores"
+source_path = "src/open_vocabulary_segmentation/models/dinotext/dinotext.py"
+input_domain = "patch-grid-resolution propagated score field (post-recurrence P(320), one window at a time)"
+output_domain = "crop-pixel resolution (448x448) mask/score tensor for that window"
+interpolation_mode = "bilinear"
+align_corners = true
+align_corners_is_hardcoded = true
+target_size_source = "output_hw parameter, the crop pixel size"
+operation_order = "applied to EACH window's propagated per-patch scores, BEFORE stitching across windows and BEFORE the final rescale"
+
+[final_rescale_contract]
+name = "operation_b_final_prediction_rescale"
+source_manifest_ordinal = 3
+source_function = "matched_power_evaluator.finalize_prediction"
+source_path = "src/open_vocabulary_segmentation/models/dinotext/cover_dr/matched_power_evaluator.py"
+interpolation_mode = "bilinear"
+align_corners_source = "inference.align_corners, read live off the production DINOTextSegInference object by the recommended driver (diagnostics/run_matched_k11_k12_evaluation.py:354: align_corners = inference.align_corners)"
+align_corners_frozen_runtime_value = false
+align_corners_source_of_false = "DINOTextSegInference.align_corners, hardcoded self.align_corners = False in src/open_vocabulary_segmentation/segmentation/evaluation/dinotext_seg.py (source_manifest_ordinal 7); confirmed via git grep as the SOLE '.align_corners =' assignment anywhere in the source_commit tree"
+target_size_source = "img_meta['ori_shape'][:2] (the original, pre-crop image resolution)"
+operation_order = "applied to the fully-stitched, cropped-to-img_shape canvas, AFTER stitching across all windows, immediately BEFORE the trailing per-pixel argmax"
+internal_upsample_and_final_rescale_are_distinct = true
+mutating_either_value_must_fail_validation = true
+align_corners_locator_class = "DINOTextSegInference"
+align_corners_locator_attribute = "align_corners"
+align_corners_locator_assignment_site = "class initialization path (__init__)"
+align_corners_locator_required_value = false
+align_corners_locator_verified_by_ast = true
+align_corners_locator_enclosing_method_enforced = true
+rwr_branch_present_in_historical_file = true
+rwr_branch_used_by_t320_path = false
+rwr_branch_reachable_from_align_corners_locator = false
+rwr_branch_note = "dinotext_seg.py contains an RWR-enabled encode_decode branch that imports RWRInferenceConfig/RWRRuntimeSummary/apply_rwr_to_e3_snapshot from models.dinotext.cover_dr (defined in cover_dr/inference.py). The recommended driver never constructs DINOTextSegInference with an rwr= override and matched_power_evaluator.process_one_window calls inference.model.masks_from_patch_scores directly, never DINOTextSegInference.encode_decode -- so this branch is present in the historical file but unreachable from the frozen T320 call path."
+apply_rwr_to_e3_snapshot_in_required_closure = false
+rwr_branch_providing_sources_excluded = [
+    "src/open_vocabulary_segmentation/models/dinotext/cover_dr/inference.py",
+    "src/open_vocabulary_segmentation/models/dinotext/cover_dr/rwr.py",
+]
+future_implementation_must_not_import_rwr_branch = true
+
+##############################################################################
+# 10. STITCHING AND PREDICTION EXTRACTION (recommended e12 behavior only --
+#     NOT the later DFP wrapper; see [historical_350_disclosure])
+##############################################################################
+
+[stitching_contract]
+source_manifest_ordinal = 3
+required_symbol = "stitch_one_image"
+accumulation_formula = "preds / count_mat -- an unweighted running sum of each window's per-window prediction tensor, divided elementwise by a per-pixel overlap count"
+overlap_weighting = "uniform averaging only; docstring: 'uniform averaging only, exactly mirroring canonical E3/RWR stitching'; no subtract/add delta re-stitching"
+denominator_count_handling = "count_mat is incremented once per contributing window at each covered pixel via _increment_count; final division is preds / count_mat"
+uncovered_pixel_behavior = "stitch_one_image raises MatchedPowerEvaluatorError('matched stitching left uncovered pixels') if any pixel has a zero count -- fail closed, not a silent zero-fill"
+final_canvas_shape = "[1, C, H, W] where H, W cover the full padded sliding-window extent (>= img_shape)"
+rescale_order = "stitching happens strictly before [final_rescale_contract]'s crop+interpolate+argmax"
+
+[prediction_contract]
+source_manifest_ordinal = 3
+required_symbol = "finalize_prediction"
+prediction_extraction_function = "matched_power_evaluator.finalize_prediction"
+class_axis = "dim=1 of the rescaled [1, C, H, W] tensor"
+argmax_call = "rescaled.argmax(dim=1)"
+argmax_implementation = "plain torch.Tensor.argmax; tie-break behavior for exact ties is PyTorch's own, which is not contractually documented/guaranteed by PyTorch itself"
+lowest_index_tie_behavior_guaranteed = false
+lowest_index_tie_behavior_note = "this differs from the 350-image DFP path's lowest_index_argmax, which explicitly guarantees the lowest class index on exact ties; see [historical_350_disclosure]. This authority freezes the recommended e12 path's plain torch.argmax behavior, not the DFP guarantee."
+output_shape = "[1, H, W] (squeezed class dimension), int64 class-index labels"
+output_dtype = "int64 (torch.argmax's default return dtype)"
+byte_identical_to_350_image_stitching_claimed = false
+byte_identical_to_350_image_prediction_extraction_claimed = false
+
+##############################################################################
+# 11. GT ISOLATION
+##############################################################################
+
+[gt_isolation]
+t320_depends_only_on = ["original image/model inputs", "unary score field (pre-sigmoid cosine, then E3 sigmoid via masker.mask_from_similarity)", "image/window geometry", "graph (top-k directed affinity graph)", "recurrence (320-step finite propagation)", "stitching/final rescale", "class ordering"]
+t320_must_not_depend_on = ["annotations", "GT labels", "ignore masks", "beneficial/harmful categories", "correctness targets", "discovery/holdout outcomes", "intervention scores", "future evaluation metrics"]
+gt_may_be_loaded_only_by = "a later feasibility-analysis layer, strictly AFTER T0 and T320 predictions are finalized and immutable"
+verified_gt_isolation_in_source_closure = "confirmed by the prior provenance audits: none of the 7 closure files reference ground truth/annotations, apart from a false-positive substring hit on 'from __future__ import annotations'"
+
+##############################################################################
+# 12. HISTORICAL 350-IMAGE DISCLOSURE (contextual evidence only; NOT matched
+#     evidence for this authority's frozen align_corners=false setting)
+##############################################################################
+
+[historical_350_disclosure]
+artifact_path_symbolic = "/scratch/haree/dfp_phase1b_balp_development/coco_stuff_350/development_result/result.json"
+execution_commit = "804a774588b97e43e0347343089a0209ae28a5c9"
+scientific_digest = "6d75c370bcb03e10698429467053c3a19bc42f1c7405ceb9fccff83e97c8af80"
+t0_miou = 28.993948261452340
+t320_miou = 30.934420103426838
+gain_percentage_points = 1.940471841974498
+same_job_computation = true
+contextual_evidence_only = true
+matched_evidence_for_this_authority = false
+
+[historical_350_disclosure.divergence]
+unary_kernel_relation = "byte-identical"
+graph_relation = "byte-identical"
+recurrence_relation = "byte-identical kernel"
+geometry_relation = "byte-identical"
+stitching = "different function (dfp_phase1a_horizon_stitching.stitch_dfp_phase1a_horizons vs. matched_power_evaluator.stitch_one_image)"
+final_rescale = "different function and align_corners=true (dfp_phase1a_final_rescale_pullback.apply_final_rescale_forward vs. matched_power_evaluator.finalize_prediction)"
+prediction_extraction = "different function (lowest_index_argmax, guaranteed lowest-index tie-break, vs. plain torch.argmax)"
+complete_end_to_end_identity = false
+
+[historical_350_disclosure.statement]
+this_authority_uses_final_align_corners = false
+the_350_image_run_used_align_corners = true
+gain_must_not_be_cited_as_matched_empirical_performance = true
+expected_t320_miou_frozen_by_this_authority = false
+future_96_image_study_must_measure_its_own_t0_t320_behavior = true
+mutation_marking_350_evidence_as_matched_must_be_rejected_by_loader = true
+
+##############################################################################
+# 13. FUTURE IMPLEMENTATION BOUNDARY
+##############################################################################
+
+[future_implementation_boundary]
+authorized_after = "this authority is independently verified and committed"
+must_add_new_isolated_source_files = true
+must_leave_existing_e3_scientific_files_unchanged = true
+must_reproduce_exact_historical_source_contract = true
+must_reuse_e3_unary_inference_read_only = true
+must_generate_t0_t320_targets_without_gt = true
+must_expose_pure_testable_functions_for = ["graph", "recurrence", "geometry", "finalization"]
+must_include_differential_tests_against_independently_reconstructed_source_behavior = true
+must_fail_closed_on_non_finite_values_and_shape_mismatch = true
+must_not_yet_include = ["real-dataset CLI", "GPU launcher", "intervention generation", "logistic models", "GT loading", "96-image execution", "training", "confirmation", "full evaluation"]
+future_filenames_chosen_by_this_task = false
+
+##############################################################################
+# 14. AUTHORIZATION BOUNDARY (restates [status] for a single unambiguous
+#     authoritative location, per closed-schema requirement)
+##############################################################################
+
+[authorization_boundary]
+t320_execution_authorized = false
+graph_construction_authorized = false
+recurrence_execution_authorized = false
+cross_branch_source_use_authorized = false
+ignored_bytecode_is_authority = false
+gt_access_authorized = false
+model_construction_authorized = false
+checkpoint_tensor_loading_authorized = false
+dataset_access_authorized = false
+feasibility_96_execution_authorized = false
+training_authorized = false
+confirmation_execution_authorized = false
+full_5000_evaluation_authorized = false
+existing_e3_scientific_file_modification_authorized = false
+isolated_future_implementation_authorized_after_commit_and_independent_verification = true
+
+##############################################################################
+# 15. END OF FROZEN AUTHORITY
+##############################################################################
+
+[closure]
+complete = true
+final = true
+self_referential_hash_created = false
+note = "This TOML and the manifest JSON it binds are validated by src/semantic_evidence_t320_source_identity.py at load time. Neither file records a hash of itself. This authority freezes provenance and scientific semantics only; it performs no computation and authorizes no execution beyond a future, separately-verified isolated implementation task."
