@@ -1,0 +1,584 @@
+##############################################################################
+# semantic_evidence_t320_real_smoke_v1.toml
+#
+# FREEZE_ISOLATED_T320_REAL_SMOKE_CONTRACT
+#
+# Purpose: freeze a narrow successor authority authorizing exactly one
+# bounded, GT-free, two-discovery-image, real-model integration smoke test
+# of the committed isolated E3 adapter (semantic_evidence_e3_adapter.py) and
+# T320 target generator (semantic_evidence_t320.py). This authority binds
+# the contract only. It does not implement the smoke runner, does not
+# execute real inference, and does not authorize any broader execution.
+#
+# This authority may override the committed feasibility contract's
+# no-real-T320-execution boundary ONLY for: exactly two frozen discovery
+# images, GT-free integration checking, one bounded H100 smoke job, no
+# scientific accuracy claim. Every other prohibition of the feasibility
+# contract and the T320 source authority remains in full force.
+##############################################################################
+
+[identity]
+schema_name = "semantic_evidence_t320_real_smoke_authority"
+schema_version = "1.0.0"
+created_by_task = "FREEZE_ISOLATED_T320_REAL_SMOKE_CONTRACT"
+successor_to = [
+    "research_specs/semantic_evidence_feasibility_v1.toml",
+    "research_specs/semantic_evidence_t320_source_v1.toml",
+]
+
+[status]
+contract_only = true
+smoke_runner_implemented = false
+smoke_runner_committed = false
+smoke_execution_authorized_by_this_task = false
+smoke_execution_authorized_after = [
+    "this contract passes independent verification (INDEPENDENT_VERIFY_T320_REAL_SMOKE_CONTRACT)",
+    "this contract is committed",
+    "the smoke runner and launcher are implemented",
+    "the runner passes independent verification",
+    "committed-HEAD readiness passes",
+]
+operator_submission_only = true
+self_submission_prohibited = true
+
+##############################################################################
+# 1. COMMITTED ISOLATED-IMPLEMENTATION BINDING
+##############################################################################
+# The five files committed by COMMIT_ISOLATED_T320_IMPLEMENTATION. The
+# identity loader recomputes every hash against the CURRENT repository-
+# relative file at verification time and additionally requires that the
+# CURRENT HEAD commit descend from (be equal to, or a descendant of) the
+# commit that introduced these bytes.
+
+[implementation_binding]
+introducing_commit = "3a20c9ae8208a0df9ac9fa699ce0ff67a2221c8f"
+introducing_commit_parent = "c62a3c411b36e4e8df1c087fe04b30de71a7cff9"
+introducing_commit_tree = "1d2d1a0da2f55dcb2341a02ab703f48afd384029"
+required_branch = "research/semantic-evidence-interventions"
+ancestry_requirement = "current HEAD must equal introducing_commit or have introducing_commit as an ancestor (git merge-base --is-ancestor)"
+
+[[implementation_binding.file]]
+path = "src/semantic_evidence_e3_adapter.py"
+sha256 = "341e88122b7ff031e8dfbf06876e43e16a0092c189c112b97b2cf390c8c120d1"
+role = "E3 single-window extraction interface: extract_e3_window_snapshot"
+
+[[implementation_binding.file]]
+path = "src/semantic_evidence_t320.py"
+sha256 = "a6d496f2b907f1782ccba06fe66ac47206862d96272c33238fa5601c1875f7be"
+role = "isolated T0/T320 target generator: build_t320_graph, propagate_t320, internal_upsample, stitch_windows, finalize_prediction, generate_t0_t320_targets"
+
+[[implementation_binding.file]]
+path = "tests/test_semantic_evidence_e3_adapter.py"
+sha256 = "09b15b20634abe9b08a3078c480b7e7ad776afd7c50f14fed36eaef8544ec2e4"
+role = "adapter unit tests (fake-model, CPU-only)"
+
+[[implementation_binding.file]]
+path = "tests/test_semantic_evidence_t320.py"
+sha256 = "420bf2d572ff9fdad3ff8b80ba469889189c5f790121ecf943bfed05aa290af0"
+role = "T320-module unit + regression tests (synthetic, CPU-only)"
+
+[[implementation_binding.file]]
+path = "docs/semantic_evidence_t320_implementation.md"
+sha256 = "684ecbe3103cb686258c9ae4dcd51ee152dab54f8946a8569fdc3e62de2850b6"
+role = "implementation documentation"
+
+[implementation_binding.required_properties]
+sigmoid_before_internal_interpolation = true
+internal_align_corners = true
+final_align_corners = false
+build_t320_graph_public_signature = ["dino_features"]
+public_k_override_present = false
+public_affinity_power_override_present = false
+dataset_or_model_or_checkpoint_or_gt_or_cli_path_present = false
+
+##############################################################################
+# 2. FEASIBILITY-CONTRACT DEPENDENCY BINDING
+##############################################################################
+
+[[dependency]]
+name = "feasibility_contract_toml"
+path = "research_specs/semantic_evidence_feasibility_v1.toml"
+sha256 = "39edcae9d0927ec50c640576eb6d558e413558d16651f0398594d898bd19826f"
+role = "prerequisite feasibility authority; source of Step0 closure pointers and external-weight bindings"
+
+[[dependency]]
+name = "feasibility_96_manifest"
+path = "evaluation_subsets/semantic_evidence_feasibility_96.json"
+sha256 = "e5a9ba7c9f8e4b9ea71ed5195f69e45f93eb0ee13e3f6aa893cb13d1d6e31062"
+role = "source population for the two-image smoke selection"
+
+[[dependency]]
+name = "feasibility_identity_loader"
+path = "src/semantic_evidence_feasibility_identity.py"
+sha256 = "e95ef14d901b2b27911653fae4267bc74d668371c6e27adb1169ff117a3f2dd1"
+role = "official feasibility-contract loader/validator"
+
+[[dependency]]
+name = "feasibility_protocol_doc"
+path = "docs/semantic_evidence_feasibility_protocol.md"
+sha256 = "462a393591d5be78b1157ae63c75502f3fbc85cb517116e29072c542b0c5b70a"
+role = "feasibility contract documentation"
+
+##############################################################################
+# 3. T320 SOURCE-AUTHORITY DEPENDENCY BINDING
+##############################################################################
+
+[[dependency]]
+name = "t320_source_toml"
+path = "research_specs/semantic_evidence_t320_source_v1.toml"
+sha256 = "777821c6565861337d72e19bab46a8c15f7b41a70def12fabea522c56d27a48c"
+role = "T320 scientific source-provenance authority"
+
+[[dependency]]
+name = "t320_source_manifest"
+path = "research_specs/semantic_evidence_t320_source_manifest_v1.json"
+sha256 = "843f79528bab5f4f6f56a9d17640ab05918e8f22b98388cf01aad28d4c58c983"
+role = "seven-record historical source closure manifest"
+
+[[dependency]]
+name = "t320_source_identity_loader"
+path = "src/semantic_evidence_t320_source_identity.py"
+sha256 = "756470a609e4bc323a4e4354d1230b4fa5459e0775a6db5db6aceda729cb94f4"
+role = "official T320 source-authority loader/validator"
+
+##############################################################################
+# 4. REQUIRED E3 MODEL/INFERENCE/CONFIGURATION SOURCE BINDING
+##############################################################################
+# Reused unmodified by this contract's future runner. No abandoned DFP/BALP/
+# calibration/masked-forward/component-decomposition/window_cache/CGLS/RWR
+# machinery is bound here -- none of it is reused.
+
+[[dependency]]
+name = "e3_dinotext_implementation"
+path = "src/open_vocabulary_segmentation/models/dinotext/dinotext.py"
+sha256 = "c14631b7daf0c249656c95c84ef5a171e179e9e0ded6b01ba11e145efc401df5"
+role = "DINOText construction, generate_masks() ordinary inference path"
+
+[[dependency]]
+name = "e3_masker_implementation"
+path = "src/open_vocabulary_segmentation/models/dinotext/masker.py"
+sha256 = "a1b76abd67b4dfe37af38924fcd2631d67b6b86629399ef4277892cdc20fe814"
+role = "DINOTextMasker.forward_seg: cosine similarity + sigmoid nonlinearity"
+
+[[dependency]]
+name = "e3_segmentation_evaluator"
+path = "src/open_vocabulary_segmentation/segmentation/evaluation/dinotext_seg.py"
+sha256 = "51fce6fd739fa47f891e458eea0c7a3149b8c54baa58a7b6f8c8432e555d3b66"
+role = "DINOTextSegInference.slide_inference: the current-branch canonical window builder/source (row-major window ordering, crop/stride application); align_corners=False final rescale"
+
+[[dependency]]
+name = "e3_segmentation_builder"
+path = "src/open_vocabulary_segmentation/segmentation/evaluation/dinotext_builder.py"
+sha256 = "99c76fa195325406a1cf987f0016e5a75f08ad1d6c2abfe287ec870a9f53a00c"
+role = "with_bg computation, DINOTextSegInference construction from config.evaluate"
+
+[[dependency]]
+name = "e3_projection_module"
+path = "src/model.py"
+sha256 = "0bc4673251d1dcfbcb51fac468ebd625b8b43c1501aa5a844ec8cfe9c25745d8"
+role = "ProjectionLayer architecture"
+
+[[dependency]]
+name = "e3_generic_model_builder"
+path = "src/open_vocabulary_segmentation/models/builder.py"
+sha256 = "8f55b54ff1c04e111c275205524dc7b9da0d9803d666d4c80df92a3bc637f542"
+role = "build_model(config): generic MMCV-registry model construction entry point reusable by a future smoke runner"
+
+[[dependency]]
+name = "local_weights_module"
+path = "src/local_weights.py"
+sha256 = "2f730b8ca9427c502b9595680e65466eec99b4e004054058869b758cc8ad62d7"
+role = "TALK2DINO_WEIGHT_DIR resolution; DINO_MODEL_INFO/CLIP_WEIGHT_PATHS filename mapping; fail-closed require_file"
+
+[[dependency]]
+name = "e3_primary_model_configuration"
+path = "src/open_vocabulary_segmentation/configs/stuff/dinotext_stuff_vitb_mlp_infonce_paired_soft_routing_tau010.yml"
+sha256 = "8c8025c148fdd6f49484c9a46ee61ac13dd378e1594cc236c6ea399649ed0130"
+role = "exact Step 0 model configuration (--eval_cfg)"
+
+[[dependency]]
+name = "e3_inherited_default_configuration"
+path = "src/open_vocabulary_segmentation/configs/stuff/default.yml"
+sha256 = "19b7ac74da3a86b4a55fc3f5ab330b49af1ec3d2c40fe5eb90fb74af426026f0"
+role = "_base_ of the primary model configuration"
+
+[[dependency]]
+name = "e3_coco_stuff_evaluation_configuration"
+path = "src/open_vocabulary_segmentation/configs/stuff/eval_stuff.yml"
+sha256 = "6ebcb825976e287f6c06dd01980f256319fc010580e4245cc22ce563db0804fb"
+role = "exact Step 0 evaluation configuration (--eval_base_cfg); pamr:false"
+
+[[dependency]]
+name = "e3_coco_stuff_dataset_subconfig"
+path = "src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/stuff.py"
+sha256 = "651710d2bff280a7eea1d06f43daa9e25bb0ae2525633568d06f57a528a42864"
+role = "dataset_type=COCOStuffDataset, data_root, test_cfg (mode=slide, stride=(224,224), crop_size=(448,448)) -- the current-branch source of the frozen window geometry"
+
+##############################################################################
+# 5. NEW SMOKE-POPULATION FILE BINDING (created by this task)
+##############################################################################
+
+[[dependency]]
+name = "t320_real_smoke_2_population"
+path = "evaluation_subsets/semantic_evidence_t320_real_smoke_2.json"
+sha256 = "dd1d0709198b3c018ba5fb27d6766ed0373a460885b49cd753331fc1b6eea6a2"
+role = "closed two-image discovery-order smoke population, derived from feasibility_96_manifest"
+
+##############################################################################
+# 6. EXTERNAL WEIGHT BINDING (SCIENTIFIC IDENTITY, NOT CLUSTER PATH)
+##############################################################################
+# Independently re-extracted in this task from the raw Step 0 closure
+# manifest at:
+#   /scratch/haree/semantic_evidence_interventions/
+#     step0_clean_e3_baseline_20260920T235625Z/closure_20260921T004310Z/
+#     baseline_manifest.json  (sha256 551f1c0cb8a1115f563bf6d10d090259a42282be0e0c895856964885978095ad)
+# -- not copied blindly from the feasibility contract's own [external_weights]
+# table, though the two are independently confirmed identical. Scientific
+# identity is (filename, sha256) only; the resolved cluster path is
+# operational and MUST be re-derived at future smoke preflight, never
+# trusted from this table for existence/freshness.
+
+[external_weights]
+resolution_env_var = "TALK2DINO_WEIGHT_DIR"
+resolution_env_var_source = "src/local_weights.py:11 DEFAULT_WEIGHT_DIR = os.environ.get('TALK2DINO_WEIGHT_DIR', 'weights')"
+verified_cluster_value_at_step0 = "/scratch/haree/weights"
+verified_cluster_value_is_scientific_identity = false
+verification_method = "independently re-extracted from closure_manifest .external_weight_binding.env_var_set_before_process_start and .operational_confirmation.*.resolved_path, cross-checked against src/local_weights.py:11 and dinotext.py:109 source reads in this task"
+checkpoint_tensor_loading_by_this_task = false
+torch_load_calls_by_this_task = 0
+cuda_initialization_by_this_task = false
+
+[external_weights.dino_backbone_checkpoint]
+filename = "dinov2_vitb14_reg4_pretrain.pth"
+sha256 = "73182a088cf94833c94b1666d1c99e02fe87e2007bff57b564fb6206e25dba71"
+resolved_via = "TALK2DINO_WEIGHT_DIR (src/local_weights.py DEFAULT_WEIGHT_DIR, DINO_MODEL_INFO['dinov2_vitb14_reg'])"
+resolved_cluster_path_at_step0 = "/scratch/haree/weights/dinov2_vitb14_reg4_pretrain.pth"
+git_tracked = false
+step0_confirmation_agreement = "sha256_from_cpu_hash_job_22356963 == sha256_from_gpu_smoke_job_22357843 == this value"
+
+[external_weights.clip_text_checkpoint]
+filename = "ViT-B-16.pt"
+sha256 = "5806e77cd80f8b59890b7e101eabd078d9fb84e6937f9e85e4ecb61988df416f"
+resolved_via = "TALK2DINO_WEIGHT_DIR (src/local_weights.py DEFAULT_WEIGHT_DIR, CLIP_WEIGHT_PATHS['ViT-B/16'])"
+resolved_cluster_path_at_step0 = "/scratch/haree/weights/ViT-B-16.pt"
+git_tracked = false
+step0_confirmation_agreement = "sha256_from_cpu_hash_job_22356963 == sha256_from_gpu_smoke_job_22357843 == this value"
+
+[external_weights.e3_projection_checkpoint]
+filename = "vitb_mlp_infonce_paired_soft_routing_tau010.pth"
+sha256 = "9632117c18613674eeddcb35f86193d37da203a9cbd837cf500c4121b5fa9942"
+resolved_via = "hardcoded os.path.join('weights', f'{proj_name}.pth') in dinotext.py:109, independent of TALK2DINO_WEIGHT_DIR -- confirmed by direct source read in this task"
+resolved_cluster_path_at_step0 = "/project/6114407/haree/Talk2DINO/weights/vitb_mlp_infonce_paired_soft_routing_tau010.pth"
+git_tracked = false
+git_tracked_evidence = "weights/ is listed in .gitignore; git ls-files returns empty for this path"
+step0_confirmation_agreement = "sha256_from_cpu_hash_job_22356963 == sha256_from_gpu_smoke_job_22357843 == this value == the task-prompt-provided historical hash"
+
+[external_weights.preflight_requirement]
+rehash_before_model_construction = true
+rehash_before_cuda_init = true
+mismatch_action = "fail closed before model construction; do not proceed with a mismatched checkpoint"
+
+##############################################################################
+# 7. TWO-IMAGE SMOKE POPULATION (IMAGE LEVEL)
+##############################################################################
+
+[smoke_population]
+selected_count = 2
+selection_rule = "the first two records (selection_rank 0 and 1) of the source 96-image manifest's already-ascending-selection_rank-ordered records array, both required to have partition == 'discovery'"
+selected_image_ids_ordered = ["000000567197", "000000367680"]
+holdout_overlap_count = 0
+duplicate_count = 0
+image_pixel_access_by_this_task = false
+image_metadata_access_by_this_task = false
+label_or_annotation_access_by_this_task = false
+
+##############################################################################
+# 8. WINDOW GEOMETRY (RUNTIME-DERIVED WINDOW COUNT, FROZEN RULE)
+##############################################################################
+# This contract freezes crop/stride/patch and the canonical window-ordering
+# RULE. It does NOT fabricate the two images' window counts -- image pixel
+# access is prohibited to this contract task, so per-image dimensions and
+# hence window counts are unknown until future smoke preflight resolves the
+# two authorized image files. Window count is RUNTIME_DERIVED_AND_RECORDED.
+
+[window_geometry]
+crop_pixels = [448, 448]
+stride_pixels = [224, 224]
+patch_size_pixels = [14, 14]
+crop_stride_patch_source = "src/open_vocabulary_segmentation/segmentation/configs/_base_/datasets/stuff.py test_cfg = dict(mode='slide', stride=(224,224), crop_size=(448,448)); patch14 from src/local_weights.py DINO_MODEL_INFO['dinov2_vitb14_reg']"
+canonical_window_builder_source = "src/open_vocabulary_segmentation/segmentation/evaluation/dinotext_seg.py DINOTextSegInference.slide_inference"
+canonical_window_ordering = "row-major: window_index = h_idx * w_grids + w_idx, both loop variables 0-indexed (dinotext_seg.py slide_inference 'for h_idx in range(h_grids): for w_idx in range(w_grids)')"
+flush_right_flush_bottom_behavior = "matches slide_inference's own clamped final-window placement exactly (last window in each row/column is pulled inward to stay within image bounds when stride does not evenly divide (H - crop) or (W - crop)); no independent reimplementation of this clamping logic is authorized -- the future runner must call/mirror slide_inference's own window-generation logic, not invent a new one"
+window_count_status = "RUNTIME_DERIVED_AND_RECORDED"
+window_count_fabrication_prohibited = true
+debug_subset_or_max_window_override_prohibited = true
+
+[window_geometry.future_preflight_requirements]
+resolvable_image_ids = ["000000567197", "000000367680"]
+image_dimension_read_without_gt_authorized = true
+window_universe_generation_required = true
+every_window_record_must_be_persisted = true
+canonical_ordered_window_digest_required = true
+no_window_may_be_dropped_sampled_reordered_or_replaced = true
+result_must_record = [
+    "per-image dimensions",
+    "per-image window counts",
+    "total window count N",
+    "all ordered window coordinates",
+    "canonical digest",
+]
+
+##############################################################################
+# 9. SCIENTIFIC SMOKE CHECKS
+##############################################################################
+
+[one_forward_contract]
+real_e3_model_forwards_equals_N = true
+adapter_snapshots_equals_N = true
+second_e3_forward_prohibited = true
+candidate_specific_or_t320_specific_forward_prohibited = true
+masked_forward_or_component_path_prohibited = true
+
+[preservation_contract]
+description = "For every window, compare the ordinary E3 per-window reference output from the single real forward (extract_e3_window_snapshot's second return value, ordinary_mask_output) against the adapter/T0 reconstruction from the same forward's snapshot (internal_upsample(snapshot.s0, grid_hw, output_hw))."
+comparison_strength = "bitwise_equal"
+comparison_rationale = "Both quantities are produced from the identical simmap/mask_pre_resize tensors of the SAME single forward_seg call via the SAME torch.sigmoid + F.interpolate(align_corners=True) operations (ordinary_mask_output computed directly in extract_e3_window_snapshot; T0's internal_upsample independently re-applies the identical torch.sigmoid then F.interpolate(align_corners=True) to the captured raw S0). No random, non-deterministic, or reduced-precision operation lies between them and no reduction/accumulation across windows has occurred yet at this comparison point, so bitwise equality is the strongest supported requirement, not an arbitrary tolerance."
+score_or_mask_tensors = "bitwise_equal (torch.equal)"
+prediction_tensors = "exactly_equal (torch.equal on argmax-if-computed)"
+shape_and_dtype = "exactly_equal"
+mismatch_action = "fail the smoke (FAIL_REAL_E3_T320_INTEGRATION_SMOKE)"
+
+[t320_execution_contract]
+graph_constructions_per_target_generation_repeat_per_window = 1
+recurrence_trajectories_per_repeat_per_window = 1
+updates_per_trajectory = 320
+recurrence_domain = "raw pre-sigmoid S0 (unbounded)"
+sigmoid_occurrences_per_window_per_repeat = 1
+sigmoid_timing = "applied exactly once, after update 320, inside internal_upsample -- never before or during recurrence"
+internal_interpolation_mode = "bilinear"
+internal_interpolation_align_corners = true
+stitching_domain = "sigmoid-domain overlap averaging (uniform, by overlap count only)"
+final_rescale_mode = "bilinear"
+final_rescale_align_corners = false
+prediction_rule = "ordinary torch.argmax(dim=1); no custom tie-break"
+
+[determinism_contract]
+description = "Reuse the same immutable real snapshots (from the single real forward per window); run the pure T0/T320 target generation (generate_t0_t320_targets) twice without another model forward. generate_t0_t320_targets is IMAGE-SCOPED (single scalar canvas_h/canvas_w, every snapshot in one call must match that canvas -- src/semantic_evidence_t320.py:371-410): one call processes exactly one image's windows and performs exactly one T0 stitch_windows + one T0 finalize_prediction + one T320 stitch_windows + one T320 finalize_prediction. Window-scoped operations (model forward, graph construction, recurrence, sigmoid) therefore scale with the total window count N across both images; image-scoped operations (stitching, finalization) scale with the selected image count M, not with N."
+target_generation_repeats = 2
+
+# Window-scoped: one unit of work per window, per target-generation repeat.
+# Applies to model_forwards/snapshots (repeat-independent: taken once per
+# window, reused for both repeats) and to graph/recurrence/sigmoid
+# (repeat-dependent: repeated fresh in each of the R pure-generation calls).
+[determinism_contract.window_scoped_expected_counts]
+unit = "per_window (model_forwards, snapshots); per_window_per_repeat (all others)"
+model_forwards = "N"
+snapshots = "N"
+t0_sigmoid_conversions = "N*R"
+t320_graph_constructions = "N*R"
+t320_trajectories = "N*R"
+t320_recurrence_updates = "N*R*320"
+t320_sigmoid_conversions = "N*R"
+
+# Image-scoped: generate_t0_t320_targets is called once per image per
+# repeat (never once for the whole multi-image campaign -- doing so would
+# require a single shared canvas_h/canvas_w across images with different
+# real dimensions, which the function's own snapshot.canvas_h/canvas_w
+# equality check rejects, and would corrupt stitching even where shapes
+# coincidentally matched). Each such call performs exactly one stitch and
+# one finalize per variant (T0, T320).
+[determinism_contract.image_scoped_expected_counts]
+unit = "per_image_per_repeat"
+selected_image_count = 2
+target_generation_repeat_count = 2
+expression = "selected_image_count * target_generation_repeat_count"
+t0_stitch_calls = 4
+t0_finalize_calls = 4
+t320_stitch_calls = 4
+t320_finalize_calls = 4
+
+[determinism_contract.required_between_repeats]
+identical_window_order = true
+identical_t0_scientific_digest = true
+identical_t320_scientific_digest = true
+exact_prediction_equality = true
+zero_non_finite_values = true
+snapshot_bytes_tensors_unchanged = true
+
+[determinism_contract.claims]
+cross_device_bitwise_determinism_claim = false
+determinism_scope = "same-job, same-device, same-input repetition only"
+
+[validity_contract]
+require_finite = [
+    "raw S0", "graph values", "propagated scores", "sigmoid masks",
+    "stitched scores", "final scores",
+]
+require_valid_class_dimension = true
+require_valid_image_geometry = true
+require_valid_prediction_shape = true
+require_no_input_mutation = true
+require_no_empty_result = true
+require_no_out_of_range_window = true
+
+##############################################################################
+# 10. GT AND SCOPE ISOLATION
+##############################################################################
+
+[gt_isolation]
+coco_annotations_access_authorized = false
+segmentation_labels_access_authorized = false
+ignore_masks_access_authorized = false
+class_correctness_computation_authorized = false
+iou_computation_authorized = false
+miou_computation_authorized = false
+macc_computation_authorized = false
+pixel_accuracy_computation_authorized = false
+discovery_or_holdout_performance_computation_authorized = false
+t0_vs_t320_accuracy_improvement_claim_authorized = false
+image_pixel_access_authorized_for = ["000000567197", "000000367680"]
+image_pixel_access_authorized_for_note = "the two authorized discovery IDs only; no other image's pixels may be accessed during the future smoke"
+
+[scope_isolation.explicit_prohibitions]
+any_holdout_image = "prohibited"
+remaining_46_discovery_images = "prohibited"
+complete_96_image_population = "prohibited"
+balp_350_image_development_subset = "prohibited"
+confirmation_150_image_subset = "prohibited"
+other_validation_images = "prohibited"
+training_images = "prohibited"
+training = "prohibited"
+interventions = "prohibited"
+adapter_learning = "prohibited"
+confirmation_evaluation = "prohibited"
+full_5000_image_evaluation = "prohibited"
+publication_level_accuracy_claims = "prohibited"
+
+##############################################################################
+# 11. RESOURCE AND EXECUTION CONTRACT
+##############################################################################
+
+[resource_contract]
+gpu = "1 x H100 80GB"
+cpus = 8
+host_memory_max_gb = 80
+wall_time_limit = "00:30:00"
+account = "rrg-yangw"
+fresh_process_required = true
+job_count_max = 1
+multi_job_sharding_prohibited = true
+resume_requirement = false
+overwrite_or_force_mode_prohibited = true
+self_submission_prohibited = true
+preflight_before = [
+    "importing torch-heavy model code where practical",
+    "CUDA initialization",
+    "model construction",
+    "checkpoint loading",
+    "dataset image access",
+]
+
+[resource_contract.submission_gate]
+operator_may_submit_only_after = [
+    "this contract passes independent verification",
+    "this contract is committed",
+    "the smoke runner and launcher are implemented",
+    "the runner passes independent verification",
+    "committed-HEAD readiness passes",
+]
+this_task_provides_sbatch_command = false
+
+##############################################################################
+# 12. TELEMETRY CONTRACT
+##############################################################################
+
+[telemetry_contract]
+required_fields = [
+    "slurm_job_id", "node", "gpu_model", "cuda_runtime_version",
+    "cuda_driver_version", "total_wall_time_ns", "preflight_wall_time_ns",
+    "model_construction_and_checkpoint_loading_wall_time_ns",
+    "dataset_image_preparation_wall_time_ns", "model_forward_wall_time_ns",
+    "graph_construction_wall_time_ns", "recurrence_wall_time_ns",
+    "stitching_finalization_wall_time_ns",
+    "artifact_validation_install_wall_time_ns", "peak_host_rss_bytes",
+    "peak_gpu_allocated_bytes", "peak_gpu_reserved_bytes", "gpu_total_memory_bytes",
+]
+wall_timing_clock = "time.perf_counter_ns"
+cuda_sync_requirement = "torch.cuda.synchronize() immediately before AND after every measured GPU region"
+gpu_memory_stat_reset_point = "torch.cuda.reset_peak_memory_stats() after model setup completes and before smoke execution begins"
+memory_ordering_requirement = "allocated <= reserved <= total (all in bytes)"
+timing_non_negativity_requirement = "all timing fields are non-negative integers (nanoseconds)"
+profiling_must_not_alter_scientific_digests = true
+full_dataset_runtime_estimation_from_this_smoke_prohibited = true
+
+##############################################################################
+# 13. RESULT ARTIFACT SCHEMA
+##############################################################################
+
+[result_schema]
+example_filename = "smoke_result.json"
+required_top_level_fields = [
+    "schema", "complete", "final", "identity_and_dependency_bindings",
+    "repository_commit_tree_cleanliness", "implementation_hashes",
+    "external_weight_bindings", "selected_image_ids",
+    "runtime_derived_image_dimensions", "ordered_window_records",
+    "window_count_and_digest", "forward_snapshot_graph_trajectory_update_counts",
+    "image_scoped_stitch_finalize_counts",
+    "t0_preservation_comparisons_per_window", "t0_t320_repeat_digests",
+    "prediction_equality_results", "non_finite_counts_by_stage",
+    "tensor_shapes_dtypes", "timing_telemetry", "rss_vram_telemetry",
+    "scope_disclosures", "no_gt_no_metric_fields", "final_smoke_outcome",
+]
+
+[result_schema.outcomes]
+pass_value = "PASS_REAL_E3_T320_INTEGRATION_SMOKE"
+fail_value = "FAIL_REAL_E3_T320_INTEGRATION_SMOKE"
+pass_requires_all_of = [
+    "scientific checks (Part 9/section 9 of this authority) pass",
+    "count relations (determinism_contract) pass exactly",
+    "determinism checks (two repeats) pass exactly",
+    "scope checks (no GT/metric path exercised) pass",
+    "artifact checks (schema-complete, atomically installed, post-install-verified) pass",
+]
+warning_only_bypass_to_pass_prohibited = true
+
+##############################################################################
+# 14. ARTIFACT INSTALLATION POLICY
+##############################################################################
+
+[artifact_policy]
+output_root = "scratch-only"
+fresh_destination_required = true
+overwrite_prohibited = true
+force_mode_prohibited = true
+staging_location = "sibling temporary directory"
+staged_validation_before_installation_required = true
+installation_method = "atomic directory rename"
+reopen_after_installation_required = true
+public_verifier_rerun_after_installation_required = true
+success_message_before_post_install_verification_prohibited = true
+partial_artifact_as_final_prohibited = true
+failure_preserves_prior_state = true
+temporary_residue_removed_or_reported = true
+result_artifact_committed_to_git = false
+
+##############################################################################
+# 15. CLOSURE
+##############################################################################
+
+[closure]
+complete = true
+final = true
+contract_only = true
+implements_smoke_runner = false
+executes_real_inference = false
+accesses_image_pixels = false
+accesses_annotations_or_gt = false
+loads_checkpoint_tensors = false
+initializes_cuda = false
+submits_job = false
+implements_interventions = false
+executes_96_image_feasibility_study = false
+trains_anything = false
+evaluates_accuracy_or_miou = false
+stages_or_commits_files = false

@@ -1,0 +1,54 @@
+{
+  "schema": {
+    "name": "semantic_evidence_t320_real_smoke_2_subset",
+    "version": "1.0.0"
+  },
+  "namespace": "talk2dino-semantic-evidence-t320-real-smoke-v1",
+  "source_manifest": {
+    "path": "evaluation_subsets/semantic_evidence_feasibility_96.json",
+    "sha256": "e5a9ba7c9f8e4b9ea71ed5195f69e45f93eb0ee13e3f6aa893cb13d1d6e31062",
+    "schema": {
+      "name": "semantic_evidence_feasibility_96_subset",
+      "version": "1.0.0"
+    }
+  },
+  "source_population_digest": "e1cc220cde76f9a1fc39aff5b5f8c0b128de8b071602e6d57f262697116e2906",
+  "source_discovery_digest": "b63139733c97508ee5b6272069cf466257e829c59f5d73694fd2599d56d2f1a6",
+  "source_locked_holdout_digest": "c3931d1e12b62af10839d693cac29bac25b166e448265c54b066cff5b8110592",
+  "source_discovery_rank_range": [0, 47],
+  "source_locked_holdout_rank_range": [48, 95],
+  "selection_rule": {
+    "description": "Select exactly the first two records of the source 96-image manifest's 'records' array in ascending selection_rank order, requiring partition == 'discovery' for both. The source manifest's own records are already persisted in ascending selection_rank order (0..95); this authority does not re-sort them, and re-sorting by selection_key or canonical_image_id is explicitly prohibited by this rule.",
+    "sort_key": "selection_rank (ascending, as already persisted in the source manifest; not re-derived)",
+    "selected_ranks": [0, 1],
+    "manual_override_prohibited": true,
+    "image_pixel_or_metadata_access_prohibited": true,
+    "label_or_annotation_access_prohibited": true
+  },
+  "selected_count": 2,
+  "selected_records": [
+    {
+      "canonical_image_id": "000000567197",
+      "selection_key": "0000e28e08f92aa6a1ea3e30271a3aa684a5b5308f3a1dc2f2532da4aaf21934",
+      "selection_rank": 0,
+      "partition": "discovery"
+    },
+    {
+      "canonical_image_id": "000000367680",
+      "selection_key": "00128c92cf91bc56fba5c881ae2c347b779fed2b1018c896721e89c4b8025103",
+      "selection_rank": 1,
+      "partition": "discovery"
+    }
+  ],
+  "selected_image_ids_ordered": ["000000567197", "000000367680"],
+  "both_are_discovery_ids": true,
+  "holdout_overlap_count": 0,
+  "duplicate_count": 0,
+  "canonical_record_encoding": {
+    "definition": "For the ordered list of selected canonical_image_id strings (list order is meaningful and part of the digest, equal to selected_ranks order), the digest is SHA256 of the concatenation, in list order, of each id's ASCII bytes followed by a single 0x0A (newline) byte. hexdigest() output, lowercase.",
+    "input_order": "selected_image_ids_ordered, i.e. [rank 0 id, rank 1 id]"
+  },
+  "canonical_ordered_record_digest": "7c87e5c2da0b97b19126853b5d050d06252f47860801c070fea614c90c212bab",
+  "complete": true,
+  "final": true
+}
