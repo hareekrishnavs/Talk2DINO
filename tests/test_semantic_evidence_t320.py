@@ -465,6 +465,7 @@ class TopLevelIntegrationTests(unittest.TestCase):
             canvas_h=canvas_h, canvas_w=canvas_w,
             top=top, left=left, bottom=top + infer, right=left + infer,
             infer_h=infer, infer_w=infer,
+            backbone_input_height=infer, backbone_input_width=infer,
             grid_h=grid, grid_w=grid, patch_h=patch, patch_w=patch,
             dino_features=feats, s0=s0, class_count=classes, feature_dim=feat_dim,
             dtype=feats.dtype, device=feats.device,
@@ -904,24 +905,59 @@ class SigmoidDomainRepairRegressionTests(unittest.TestCase):
     def test_H_one_forward_per_window_invariant_still_holds(self):
         # Originally a byte-identical-file check proving the sigmoid/
         # public-API repair (the task this test class belongs to) did not
-        # touch the adapter. A later, separate, authorized repair fixed an
-        # unrelated adapter defect (_project_dino_features's projection-
-        # type dispatch fallthrough -- see
-        # docs/semantic_evidence_t320_implementation.md's own "projection-
-        # type dispatch fallthrough" repair note), so this now pins the
-        # adapter to that fix's hash instead: still a structural check
-        # that whatever touches extract_e3_window_snapshot next is a
-        # deliberate, hash-visible change, not silent drift.
+        # touch the adapter. Two later, separate, authorized repairs each
+        # fixed an unrelated adapter defect (_project_dino_features's
+        # projection-type dispatch fallthrough, then WindowSnapshot's
+        # backbone-input-canvas geometry -- see
+        # docs/semantic_evidence_t320_implementation.md's own repair
+        # notes), so this now pins the adapter to the latest fix's hash
+        # instead: still a structural check that whatever touches
+        # extract_e3_window_snapshot next is a deliberate, hash-visible
+        # change, not silent drift.
         import hashlib
         adapter_path = SRC_DIR / "semantic_evidence_e3_adapter.py"
         digest = hashlib.sha256(adapter_path.read_bytes()).hexdigest()
-        self.assertEqual(digest, "d686b14e37e5814ac568d8404fcf680c8a616bea1ee63ef44219b810d0ccb04f")
+        self.assertEqual(digest, "81b2e4c600e7c0c9ad48fee6a45f1d1aaff42338b27d9a35d49d73790686d2c5")
 
     def test_H_final_align_corners_still_false(self):
         self.assertIs(t320.FINAL_RESCALE_ALIGN_CORNERS, False)
 
     def test_H_internal_align_corners_still_true(self):
         self.assertIs(t320.INTERNAL_UPSAMPLE_ALIGN_CORNERS, True)
+
+    def test_H_internal_upsample_targets_infer_not_backbone_canvas(self):
+        # infer_h/w and backbone_input_height/width are deliberately
+        # DIFFERENT here (every other fixture in this file sets them
+        # equal, which cannot distinguish which one internal_upsample
+        # actually targets) -- proves generate_t0_t320_targets's
+        # internal_upsample calls target infer_h/w (the source-window
+        # extent, e.g. a real flush-clamped window's own size) and not
+        # backbone_input_height/width (the fixed backbone canvas), the
+        # real repair's whole point (see src/semantic_evidence_e3_adapter.
+        # py's WindowSnapshot and docs/semantic_evidence_t320_
+        # implementation.md's "backbone-input-canvas geometry" repair
+        # note).
+        base = _repair_make_snapshot("w0", 0, 0, 0, grid=4, patch=4)
+        snap = e3a.WindowSnapshot(
+            window_id="w0", window_ordinal=0,
+            canvas_h=11, canvas_w=13,
+            top=0, left=0, bottom=11, right=13,
+            infer_h=11, infer_w=13,
+            backbone_input_height=16, backbone_input_width=16,  # 4*4=16, distinct from infer_h/w
+            grid_h=4, grid_w=4, patch_h=4, patch_w=4,
+            dino_features=base.dino_features, s0=base.s0,
+            class_count=base.class_count, feature_dim=base.feature_dim,
+            dtype=base.dtype, device=base.device,
+        )
+        result = t320.generate_t0_t320_targets(
+            [snap], [(0, 0, 11, 13)], canvas_h=11, canvas_w=13, ori_h=11, ori_w=13,
+        )
+        # If internal_upsample targeted backbone_input (16, 16) instead of
+        # infer_h/w (11, 13), stitching a (16, 16) window into an
+        # (11, 13)-declared box would either raise or silently produce the
+        # wrong shape -- this must succeed and produce exactly (11, 13).
+        self.assertEqual(tuple(result["t0"].shape[1:]), (11, 13))
+        self.assertEqual(tuple(result["t320"].shape[1:]), (11, 13))
 
     def test_H_no_gt_dependency_in_public_api(self):
         import inspect
@@ -973,6 +1009,7 @@ def _repair_make_snapshot(window_id, ordinal, top, left, grid=4, patch=4, classe
         canvas_h=canvas_h, canvas_w=canvas_w,
         top=top, left=left, bottom=top + infer, right=left + infer,
         infer_h=infer, infer_w=infer,
+        backbone_input_height=infer, backbone_input_width=infer,
         grid_h=grid, grid_w=grid, patch_h=patch, patch_w=patch,
         dino_features=feats, s0=s0, class_count=classes, feature_dim=feat_dim,
         dtype=feats.dtype, device=feats.device,

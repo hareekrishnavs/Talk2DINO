@@ -307,6 +307,39 @@ Both matched branches (`VisualProjectionLayer`/`DoubleMLP`) are
 byte-unchanged. See `docs/semantic_evidence_t320_real_smoke_run.md`'s own
 repair note for the fuller context this was found in.
 
+## Repair note (backbone-input-canvas geometry)
+
+The same first real GPU submission that found the projection-dispatch
+defect above (job 22591643, after that defect was already fixed) surfaced
+a second, unrelated adapter defect once real model construction and
+per-window extraction were reached: `extract_e3_window_snapshot` and
+`WindowSnapshot.__post_init__` both asserted `grid_h * patch_h ==
+infer_h` (the source window's own extent) -- true only when a window
+happens to be a full, unclamped 448x448 crop. The real, authoritative
+source (`DINOText.generate_masks`) first resizes every window to a fixed
+448x448 canvas (`image_transforms`'s `T.Resize((resize_dim, resize_dim))`,
+`resize_dim=448` in the bound E3 config) *before* the backbone ever sees
+it, regardless of the window's own extent -- so the patch grid (always
+32x32 for patch_size=14) actually derives from that fixed canvas, not
+from the source window, which can be smaller (and not a multiple of the
+patch size) whenever an image is smaller than the crop -- true of both
+real smoke images (500x407 and 450x338). `WindowSnapshot` now carries
+`backbone_input_height`/`backbone_input_width` (the actual preprocessed
+tensor's own spatial size) as a field distinct from `infer_h`/`infer_w`
+(the source window's extent, still the correct, unchanged
+`internal_upsample`/stitching target downstream in
+`src/semantic_evidence_t320.py`, which required no change at all). Source
+window dimensions are no longer required to be divisible by the patch
+size. Confirmed via source-derived equivalence tests at the real
+patch_size=14/resize_dim=448 scale, reproducing the two real smoke-image
+shapes' exact window geometry through the committed
+`compute_canonical_windows` algorithm, and via disposable-copy mutation
+checks (the original check reinstated, the canvas dimensions wrongly
+copied from the source window, the two quantities swapped, row-major node
+ordering changed, and the fixed-canvas preprocessing step removed from
+the test fixture's fake model all independently confirmed to make the new
+tests fail for the intended reason).
+
 ## What this task does not do
 
 - **No real model inference has been run.** Every test uses either purely

@@ -92,6 +92,8 @@ class WindowSnapshot:
     right: int
     infer_h: int
     infer_w: int
+    backbone_input_height: int
+    backbone_input_width: int
     grid_h: int
     grid_w: int
     patch_h: int
@@ -107,8 +109,8 @@ class WindowSnapshot:
         _require(isinstance(self.window_id, str) and self.window_id != "", "window_id must be a non-empty string")
         _require(isinstance(self.window_ordinal, int) and not isinstance(self.window_ordinal, bool) and self.window_ordinal >= 0,
                   "window_ordinal must be a non-negative int")
-        for name in ("canvas_h", "canvas_w", "infer_h", "infer_w", "grid_h", "grid_w", "patch_h", "patch_w",
-                     "class_count", "feature_dim"):
+        for name in ("canvas_h", "canvas_w", "infer_h", "infer_w", "backbone_input_height", "backbone_input_width",
+                     "grid_h", "grid_w", "patch_h", "patch_w", "class_count", "feature_dim"):
             value = getattr(self, name)
             _require(isinstance(value, int) and not isinstance(value, bool) and value > 0, f"{name} must be a positive int")
         for name in ("top", "left", "bottom", "right"):
@@ -120,8 +122,20 @@ class WindowSnapshot:
         _require(self.right <= self.canvas_w, "right must be <= canvas_w")
         _require((self.bottom - self.top) <= self.infer_h, "window height exceeds infer_h")
         _require((self.right - self.left) <= self.infer_w, "window width exceeds infer_w")
-        _require(self.grid_h * self.patch_h == self.infer_h, "grid_h * patch_h must equal infer_h")
-        _require(self.grid_w * self.patch_w == self.infer_w, "grid_w * patch_w must equal infer_w")
+        # infer_h/infer_w are the SOURCE-window extent (varies per window,
+        # e.g. 407x448 for a flush-clamped window on a sub-crop-size image)
+        # -- the internal_upsample/stitching target elsewhere, unchanged by
+        # this repair. backbone_input_height/width are the FIXED canvas the
+        # real E3 pipeline resizes every window to before the backbone
+        # (image_transforms' T.Resize((resize_dim, resize_dim)), 448 for
+        # the bound E3 config) -- a separate quantity the patch grid
+        # actually derives from. Conflating the two (the original defect)
+        # made this check fail for any window smaller than the resize
+        # canvas, which every real, non-full-crop window is.
+        _require(self.grid_h * self.patch_h == self.backbone_input_height,
+                  "grid_h * patch_h must equal backbone_input_height")
+        _require(self.grid_w * self.patch_w == self.backbone_input_width,
+                  "grid_w * patch_w must equal backbone_input_width")
 
         _require(isinstance(self.dino_features, torch.Tensor), "dino_features must be a torch.Tensor")
         _require(isinstance(self.s0, torch.Tensor), "s0 must be a torch.Tensor")
@@ -220,10 +234,19 @@ def extract_e3_window_snapshot(
               "image spatial size must equal (bottom-top, right-left)")
 
     # Exactly the same preprocessing generate_masks performs (BGR->RGB,
-    # image_transforms), before the single backbone forward.
+    # image_transforms), before the single backbone forward. image_transforms
+    # includes the real E3 config's fixed T.Resize((resize_dim, resize_dim))
+    # (448 for the bound config), applied unconditionally regardless of the
+    # source window's own extent -- so img_preprocessed's spatial size is
+    # the actual backbone-input canvas, a quantity distinct from (win_h,
+    # win_w) above whenever the window was flush-clamped smaller than the
+    # resize canvas (every real window on an image smaller than the crop).
     image_bgr_to_rgb = image[:, [2, 1, 0], :, :]
     device = next(model.parameters()).device
     img_preprocessed = model.image_transforms(image_bgr_to_rgb).to(device)
+    _require(img_preprocessed.ndim == 4 and img_preprocessed.shape[0] == 1,
+              f"preprocessed backbone input must be [1, 3, H, W], got {tuple(img_preprocessed.shape)}")
+    backbone_input_h, backbone_input_w = img_preprocessed.shape[2], img_preprocessed.shape[3]
 
     # Exactly one backbone forward, dispatched the same way generate_masks
     # dispatches on model_name -- no reimplementation of the backbone itself.
@@ -244,8 +267,13 @@ def extract_e3_window_snapshot(
     b, num_patches, channels = image_feat_proj.shape
     grid_h = grid_w = int(round(num_patches ** 0.5))
     _require(grid_h * grid_w == num_patches, f"E3 patch boundary requires a square patch grid, got {num_patches} tokens")
-    _require(grid_h * patch_h == win_h and grid_w * patch_w == win_w,
-              "patch_h/patch_w * grid do not reconstruct the window size")
+    # Compared against the actual backbone-input canvas (what the patch
+    # grid was really tokenized from), never against win_h/win_w (the
+    # source window's own extent, which need not be a multiple of the
+    # patch size and is a separate, unrelated-by-multiplication quantity
+    # -- see the img_preprocessed comment above).
+    _require(grid_h * patch_h == backbone_input_h and grid_w * patch_w == backbone_input_w,
+              "patch_h/patch_w * grid do not reconstruct the backbone-input canvas")
 
     image_feat_bchw = image_feat_proj.reshape(b, grid_h, grid_w, channels).permute(0, 3, 1, 2)
 
@@ -289,6 +317,8 @@ def extract_e3_window_snapshot(
         right=right,
         infer_h=win_h,
         infer_w=win_w,
+        backbone_input_height=backbone_input_h,
+        backbone_input_width=backbone_input_w,
         grid_h=grid_h,
         grid_w=grid_w,
         patch_h=patch_h,

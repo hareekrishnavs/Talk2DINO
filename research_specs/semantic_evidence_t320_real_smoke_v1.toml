@@ -59,7 +59,7 @@ ancestry_requirement = "current HEAD must equal introducing_commit or have intro
 
 [[implementation_binding.file]]
 path = "src/semantic_evidence_e3_adapter.py"
-sha256 = "d686b14e37e5814ac568d8404fcf680c8a616bea1ee63ef44219b810d0ccb04f"
+sha256 = "81b2e4c600e7c0c9ad48fee6a45f1d1aaff42338b27d9a35d49d73790686d2c5"
 role = "E3 single-window extraction interface: extract_e3_window_snapshot"
 
 [[implementation_binding.file]]
@@ -69,17 +69,17 @@ role = "isolated T0/T320 target generator: build_t320_graph, propagate_t320, int
 
 [[implementation_binding.file]]
 path = "tests/test_semantic_evidence_e3_adapter.py"
-sha256 = "50861e07f1356f83aeab902e9a74cd381f9a796ca9b99682329b90b92b54177b"
+sha256 = "0425e59930ed262add7902a108090b8670fe79a8503bd12d697c58d78f78e5c1"
 role = "adapter unit tests (fake-model, CPU-only)"
 
 [[implementation_binding.file]]
 path = "tests/test_semantic_evidence_t320.py"
-sha256 = "5df554a5cd3969a71aef90adc2da19fffc2938e938382b492863af6b3b9b1eec"
+sha256 = "5201cfe38f103295913125acea1aa9c990284fb6f24b4b5edb99dda42267e929"
 role = "T320-module unit + regression tests (synthetic, CPU-only)"
 
 [[implementation_binding.file]]
 path = "docs/semantic_evidence_t320_implementation.md"
-sha256 = "946bdece2adf21ff0729530f1971e0b213fc406364f610946d13bec86a19a7a2"
+sha256 = "24b73e74f4ee6d9ba5e38296d383b65052c1f264a5842c14ce8dc732f9aeb149"
 role = "implementation documentation"
 
 [implementation_binding.required_properties]

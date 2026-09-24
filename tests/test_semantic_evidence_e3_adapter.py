@@ -43,14 +43,21 @@ class VisualProjectionLayer:
 
 
 class _FakeBackbone(nn.Module):
-    """A tiny deterministic stand-in for the DINO backbone. Not a learned
-    model -- a fixed linear map from raw pixels to a patch-token sequence,
-    written independently of the adapter under test."""
+    """A tiny deterministic stand-in for the DINO backbone's patch
+    embedding: non-overlapping patch_size x patch_size average-pooling
+    (mirroring a Conv2d(kernel_size=patch, stride=patch) patch embedding's
+    spatial reduction, without a learned kernel) followed by a fixed
+    linear projection -- NOT global pooling, so the returned token grid's
+    size and content genuinely depend on the input's actual (post-resize)
+    spatial size, the way a real patch embedding does. Requires the
+    input's spatial size to already be an exact multiple of patch_size,
+    which the fixed-canvas resize in FakeDINOText.image_transforms always
+    guarantees -- written independently of the adapter under test."""
 
-    def __init__(self, num_tokens: int, raw_dim: int, seed: int = 0):
+    def __init__(self, patch_size: int, raw_dim: int, seed: int = 0):
         super().__init__()
         g = torch.Generator().manual_seed(seed)
-        self.num_tokens = num_tokens
+        self.patch_size = patch_size
         self.raw_dim = raw_dim
         self.weight = nn.Parameter(torch.randn(3, raw_dim, generator=g), requires_grad=False)
         self.call_count = 0
@@ -58,12 +65,12 @@ class _FakeBackbone(nn.Module):
     def forward_features(self, x: torch.Tensor) -> dict:
         self.call_count += 1
         b, c, h, w = x.shape
-        pooled = F.adaptive_avg_pool2d(x, output_size=1).reshape(b, c)  # [B, 3]
-        base = pooled @ self.weight  # [B, raw_dim]
-        tokens = base.unsqueeze(1).repeat(1, self.num_tokens, 1)
-        # give each token a tiny distinct deterministic offset so patches differ
-        offsets = torch.linspace(-0.05, 0.05, self.num_tokens).reshape(1, self.num_tokens, 1)
-        tokens = tokens + offsets
+        p = self.patch_size
+        assert h % p == 0 and w % p == 0, f"fake backbone input ({h}x{w}) must be a multiple of patch_size ({p})"
+        pooled = F.avg_pool2d(x, kernel_size=p, stride=p)  # [B, 3, h/p, w/p]
+        gh, gw = pooled.shape[2], pooled.shape[3]
+        flat = pooled.permute(0, 2, 3, 1).reshape(b, gh * gw, c)  # [B, N, 3], row-major (row varies slower)
+        tokens = flat @ self.weight  # [B, N, raw_dim]
         return {"x_norm_patchtokens": tokens}
 
 
@@ -88,12 +95,20 @@ class FakeDINOText(nn.Module):
     model.forward_features, proj.project_dino, masker.forward_seg,
     with_bg_clean, parameters()."""
 
-    def __init__(self, grid: int = 4, raw_dim: int = 6, feature_dim: int = 5, seed: int = 0, proj=None):
+    def __init__(self, grid: int = 4, raw_dim: int = 6, feature_dim: int = 5, seed: int = 0, proj=None,
+                 patch_size: int = 8, resize_dim: int | None = None):
         super().__init__()
         self.model_name = "dinov2_fake"  # routes into the x_norm_patchtokens dict branch
         self.with_bg_clean = False
-        num_tokens = grid * grid
-        self.model = _FakeBackbone(num_tokens, raw_dim, seed=seed)
+        self.patch_size = patch_size
+        # Fixed backbone-input canvas: authoritative E3's image_transforms
+        # resizes every source window to this size regardless of the
+        # window's own extent (T.Resize((resize_dim, resize_dim))). Default
+        # preserves every existing caller's values exactly (grid*patch_size
+        # was already the constructed test image's own size everywhere, so
+        # the resize below is a same-size no-op for all pre-existing tests).
+        self.resize_dim = resize_dim if resize_dim is not None else grid * patch_size
+        self.model = _FakeBackbone(patch_size, raw_dim, seed=seed)
         if proj is None:
             g = torch.Generator().manual_seed(seed + 1)
             proj = VisualProjectionLayer(torch.randn(raw_dim, feature_dim, generator=g))
@@ -102,7 +117,13 @@ class FakeDINOText(nn.Module):
         self._dummy_param = nn.Parameter(torch.zeros(1), requires_grad=False)
 
     def image_transforms(self, x: torch.Tensor) -> torch.Tensor:
-        return x  # identity: no real preprocessing needed for this fake
+        # Mirrors the real, authoritative DINOText.image_transforms's
+        # T.Resize((resize_dim, resize_dim)): a fixed-canvas resize applied
+        # unconditionally, regardless of the incoming window's own extent.
+        # NOT identity -- a genuinely variable-sized source window must
+        # reach a fixed size here before the fake backbone ever sees it,
+        # exactly as it must before the real one does.
+        return F.interpolate(x, size=(self.resize_dim, self.resize_dim), mode="bilinear", align_corners=False)
 
     def generate_masks_reference(self, image: torch.Tensor, text_emb: torch.Tensor) -> torch.Tensor:
         """Independently re-derives the 'ordinary E3 output' the SAME way
@@ -312,9 +333,20 @@ class InvalidInputRejectionTests(unittest.TestCase):
             )
 
     def test_non_square_patch_grid_rejected(self):
-        # backbone that returns a non-square token count
+        # A resize-canvas-driven backbone can never itself produce a
+        # non-square token count (the fixed canvas is always square), so
+        # this exercises the adapter's own defensive check directly: force
+        # the backbone to return a non-perfect-square token count and
+        # confirm extract_e3_window_snapshot still rejects it.
         model = FakeDINOText(grid=4)
-        model.model.num_tokens = 15  # not a perfect square
+        real_forward_features = model.model.forward_features
+
+        def bad_forward_features(x):
+            result = real_forward_features(x)
+            tokens = result["x_norm_patchtokens"]
+            return {"x_norm_patchtokens": tokens[:, :15, :]}  # 15 is not a perfect square
+
+        model.model.forward_features = bad_forward_features
         image = torch.rand(1, 3, 32, 32)
         text_emb = torch.randn(3, 5)
         with self.assertRaises(e3a.E3AdapterError):
@@ -434,12 +466,14 @@ class ProjectionLayerEquivalenceTests(unittest.TestCase):
         self.assertTrue(torch.allclose(adapter_output, reference_output, atol=1e-6))
 
         # Raw S0, independently recomputed the same way the reference
-        # does -- backbone forward, NO projection (ProjectionLayer
+        # does -- backbone forward (on the resized canvas, matching the
+        # real image_transforms call order), NO projection (ProjectionLayer
         # fallthrough), forward_seg -- confirms the fallthrough is
         # correct at the pre-sigmoid/pre-resize stage too, not just in
         # the final resized mask.
         image_bgr_to_rgb = image[:, [2, 1, 0], :, :]
-        image_feat_raw = model.model.forward_features(image_bgr_to_rgb)["x_norm_patchtokens"]
+        img_preprocessed = model.image_transforms(image_bgr_to_rgb)
+        image_feat_raw = model.model.forward_features(img_preprocessed)["x_norm_patchtokens"]
         b, num_patches, c = image_feat_raw.shape
         g = int(round(num_patches ** 0.5))
         image_feat_bchw = image_feat_raw.reshape(b, g, g, c).permute(0, 3, 1, 2)
@@ -447,6 +481,258 @@ class ProjectionLayerEquivalenceTests(unittest.TestCase):
         _b1, num_classes, h, w = expected_s0_bchw.shape
         expected_s0 = expected_s0_bchw.reshape(num_classes, h * w).permute(1, 0)
         self.assertTrue(torch.allclose(snap.s0, expected_s0, atol=1e-6))
+
+
+# =============================================================================
+# Repair: backbone-input-canvas vs source-window-extent geometry (found by
+# the first real GPU submission on the two real, sub-crop-size smoke
+# images -- see docs/semantic_evidence_t320_implementation.md's own
+# "backbone-input-canvas geometry" repair note). WindowSnapshot now carries
+# backbone_input_height/width (the fixed canvas image_transforms resizes
+# every window to) as a field distinct from infer_h/infer_w (the source
+# window's own, possibly-smaller, possibly-non-multiple-of-patch extent).
+# =============================================================================
+
+class BackboneCanvasGeometryTests(unittest.TestCase):
+    def _run(self, model, win_h, win_w, seed=0):
+        g = torch.Generator().manual_seed(seed + 200)
+        image = torch.rand(1, 3, win_h, win_w, generator=g)
+        text_emb = torch.randn(3, model.proj.weight.shape[1] if hasattr(model.proj, "weight") else 5,
+                                generator=torch.Generator().manual_seed(seed + 300))
+        snap, adapter_output = e3a.extract_e3_window_snapshot(
+            model, image, text_emb, window_id="w0", window_ordinal=0,
+            top=0, left=0, bottom=win_h, right=win_w,
+            canvas_h=win_h, canvas_w=win_w, patch_h=model.patch_size, patch_w=model.patch_size,
+        )
+        return snap, adapter_output, image, text_emb
+
+    def test_full_crop_window_matches_backbone_canvas(self):
+        # win_h == win_w == resize_dim: the ordinary, previously-only-tested
+        # case where source-window extent and backbone canvas coincide.
+        model = FakeDINOText(grid=4, patch_size=8)  # resize_dim = 32
+        snap, _out, _img, _te = self._run(model, 32, 32)
+        self.assertEqual((snap.infer_h, snap.infer_w), (32, 32))
+        self.assertEqual((snap.backbone_input_height, snap.backbone_input_width), (32, 32))
+        self.assertEqual((snap.grid_h, snap.grid_w), (4, 4))
+
+    def test_one_dimension_below_crop_fixed_canvas_unchanged(self):
+        # Analogous to a real 407x448 flush-clamped window: one source
+        # dimension smaller than the fixed canvas, not a multiple of
+        # patch_size (28 % 8 != 0) -- the original defect's exact shape.
+        model = FakeDINOText(grid=4, patch_size=8)  # resize_dim = 32
+        snap, _out, _img, _te = self._run(model, 28, 32)
+        self.assertEqual((snap.infer_h, snap.infer_w), (28, 32))
+        self.assertEqual((snap.backbone_input_height, snap.backbone_input_width), (32, 32))
+        self.assertEqual((snap.grid_h, snap.grid_w), (4, 4))
+
+    def test_both_dimensions_below_crop_fixed_canvas_unchanged(self):
+        # Analogous to a real 338x338-ish window: both source dimensions
+        # smaller than the fixed canvas.
+        model = FakeDINOText(grid=4, patch_size=8)  # resize_dim = 32
+        snap, _out, _img, _te = self._run(model, 22, 24)
+        self.assertEqual((snap.infer_h, snap.infer_w), (22, 24))
+        self.assertEqual((snap.backbone_input_height, snap.backbone_input_width), (32, 32))
+        self.assertEqual((snap.grid_h, snap.grid_w), (4, 4))
+
+    def test_non_multiple_of_14_source_window_accepted(self):
+        # patch_size=14, matching the REAL committed patch_size_pixels
+        # exactly; source window dims (29, 33) are deliberately not
+        # multiples of 14 -- must be accepted (only the backbone-input
+        # canvas needs to reconstruct via patch_h/patch_w, never the
+        # source window).
+        model = FakeDINOText(grid=3, patch_size=14)  # resize_dim = 42
+        snap, _out, _img, _te = self._run(model, 29, 33)
+        self.assertEqual((snap.infer_h, snap.infer_w), (29, 33))
+        self.assertEqual((snap.backbone_input_height, snap.backbone_input_width), (42, 42))
+        self.assertEqual((snap.grid_h, snap.grid_w), (3, 3))
+        self.assertEqual(29 % 14, 1)  # sanity: genuinely not a multiple
+        self.assertEqual(33 % 14, 5)
+
+    def test_internal_mask_returned_at_original_window_extent_not_canvas(self):
+        model = FakeDINOText(grid=4, patch_size=8, seed=5)
+        snap, adapter_output, image, text_emb = self._run(model, 28, 32, seed=5)
+        self.assertEqual(tuple(adapter_output.shape[2:]), (28, 32))
+        self.assertNotEqual(tuple(adapter_output.shape[2:]), (snap.backbone_input_height, snap.backbone_input_width))
+        reference_output = model.generate_masks_reference(image, text_emb)
+        self.assertTrue(torch.allclose(adapter_output, reference_output, atol=1e-6))
+
+    def test_row_major_alignment_preserved_for_clamped_window(self):
+        model = FakeDINOText(grid=4, patch_size=8, seed=9)
+        snap, _out, _img, _te = self._run(model, 28, 32, seed=9)
+        expected_nodes = snap.grid_h * snap.grid_w
+        self.assertEqual(snap.dino_features.shape[0], expected_nodes)
+        self.assertEqual(snap.s0.shape[0], expected_nodes)
+
+    def test_row_major_content_alignment_detects_ordering_defect(self):
+        # A pure node-COUNT check cannot distinguish row-major from a
+        # row/col-swapped flatten (both give the same count). This
+        # constructs an image whose patch-average-pooled content encodes
+        # each patch's (row, col) as a per-channel vector [row, col, 1]
+        # (deliberately NOT a single scalar repeated across channels --
+        # the pipeline ends in F.normalize, which collapses any positive
+        # scalar multiple of a fixed direction to the same unit vector, so
+        # a same-direction-different-magnitude pattern is invisible to it;
+        # [row, col, 1] gives each (row, col) pair a genuinely distinct
+        # direction instead), then independently recomputes (via the
+        # model's own weight matrices, not the adapter's reshape) what
+        # dino_features must equal at every position under the documented
+        # row-major layout (row varies slower than column).
+        grid, patch = 4, 8
+        model = FakeDINOText(grid=grid, patch_size=patch, seed=21)  # resize_dim = 32 = window size (identity resize)
+        canvas = grid * patch
+        image = torch.zeros(1, 3, canvas, canvas)
+        for row in range(grid):
+            for col in range(grid):
+                block = image[:, :, row * patch:(row + 1) * patch, col * patch:(col + 1) * patch]
+                block[:, 0, :, :] = float(row)
+                block[:, 1, :, :] = float(col)
+                block[:, 2, :, :] = 1.0
+        text_emb = torch.randn(3, model.proj.weight.shape[1], generator=torch.Generator().manual_seed(721))
+        snap, _out = e3a.extract_e3_window_snapshot(
+            model, image, text_emb, window_id="w0", window_ordinal=0,
+            top=0, left=0, bottom=canvas, right=canvas,
+            canvas_h=canvas, canvas_w=canvas, patch_h=patch, patch_w=patch,
+        )
+        # [N, 3], row-major by construction: index = row*grid + col.
+        # Channel order [1.0, col, row], not [row, col, 1.0]: the adapter
+        # applies image[:, [2,1,0], :, :] (BGR->RGB) before the backbone
+        # ever sees it, reordering the [row, col, 1.0] channels this test
+        # wrote into `image` to [1.0, col, row].
+        raw_pixel_values = torch.tensor([[1.0, float(i % grid), float(i // grid)] for i in range(grid * grid)])
+        backbone_out = raw_pixel_values @ model.model.weight  # matches _FakeBackbone's own weight
+        projected = backbone_out @ model.proj.weight  # matches VisualProjectionLayer.project_dino (no bias/activation)
+        expected = F.normalize(projected, dim=-1)
+        self.assertTrue(torch.allclose(snap.dino_features, expected, atol=1e-5))
+
+    def test_one_backbone_forward_for_clamped_window(self):
+        model = FakeDINOText(grid=4, patch_size=8)
+        self.assertEqual(model.model.call_count, 0)
+        self._run(model, 28, 32)
+        self.assertEqual(model.model.call_count, 1)
+
+    # --- Structural (dataclass-level) checks, independent of the adapter
+    #     function, exercising WindowSnapshot's own validation directly ---
+
+    def _valid_kwargs(self, **overrides):
+        n = 16  # grid_h*grid_w = 4*4
+        feats = torch.nn.functional.normalize(torch.randn(n, 5), dim=-1)
+        s0 = torch.randn(n, 3)
+        kwargs = dict(
+            window_id="w0", window_ordinal=0, canvas_h=100, canvas_w=100,
+            top=0, left=0, bottom=28, right=32,
+            infer_h=28, infer_w=32,
+            backbone_input_height=32, backbone_input_width=32,
+            grid_h=4, grid_w=4, patch_h=8, patch_w=8,
+            dino_features=feats, s0=s0, class_count=3, feature_dim=5,
+            dtype=feats.dtype, device=feats.device,
+        )
+        kwargs.update(overrides)
+        return kwargs
+
+    def test_source_window_not_required_divisible_by_patch_size(self):
+        # The core structural regression: infer_h=28 is NOT a multiple of
+        # patch_h=8 (28 % 8 == 4), and this must be accepted -- only
+        # backbone_input_height (32, a genuine multiple of 8) is checked
+        # against grid_h*patch_h.
+        snap = e3a.WindowSnapshot(**self._valid_kwargs())
+        self.assertEqual(snap.infer_h, 28)
+        self.assertEqual(28 % snap.patch_h, 4)
+
+    def test_invalid_backbone_canvas_grid_relationship_rejected(self):
+        with self.assertRaises(e3a.E3AdapterError):
+            e3a.WindowSnapshot(**self._valid_kwargs(backbone_input_height=33))  # 4*8=32 != 33
+
+    def test_backbone_input_height_must_be_positive_int(self):
+        with self.assertRaises(e3a.E3AdapterError):
+            e3a.WindowSnapshot(**self._valid_kwargs(backbone_input_height=0))
+        with self.assertRaises(e3a.E3AdapterError):
+            e3a.WindowSnapshot(**self._valid_kwargs(backbone_input_height=-32))
+        with self.assertRaises(e3a.E3AdapterError):
+            e3a.WindowSnapshot(**self._valid_kwargs(backbone_input_height=True))  # bool-as-int rejected
+        with self.assertRaises(e3a.E3AdapterError):
+            e3a.WindowSnapshot(**self._valid_kwargs(backbone_input_width=32.0))  # float rejected
+
+    def test_infer_h_infer_w_remain_source_window_not_canvas(self):
+        # Regression against accidentally swapping the two quantities:
+        # infer_h/infer_w must still independently accept a value smaller
+        # than (and unrelated by patch multiplication to) backbone_input.
+        # (bottom/right adjusted to stay <= the new, smaller infer_h/infer_w,
+        # an unrelated pre-existing invariant this test does not target.)
+        snap = e3a.WindowSnapshot(**self._valid_kwargs(infer_h=17, infer_w=19, bottom=17, right=19))
+        self.assertEqual((snap.infer_h, snap.infer_w), (17, 19))
+        self.assertEqual((snap.backbone_input_height, snap.backbone_input_width), (32, 32))
+
+
+class TwoRealSmokeImageShapeGeometryTests(unittest.TestCase):
+    """Reproduces the exact two real smoke-image shapes (500x407 and
+    450x338) as synthetic (non-real) tensors, through the actual committed
+    window-computation algorithm, at the real patch_size=14 and a
+    resize_dim=448 matching the bound E3 config exactly -- the scenario
+    the first real GPU submission (job 22591643) actually hit."""
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, str(SRC_DIR))
+        import semantic_evidence_t320_real_smoke as runner
+        cls.compute_canonical_windows = staticmethod(runner.compute_canonical_windows)
+
+    def _windows_for(self, w, h):
+        # compute_canonical_windows(h, w, crop_hw, stride_hw) -- matches
+        # the committed authority's window_geometry table exactly.
+        return self.compute_canonical_windows(h, w, (448, 448), (224, 224))
+
+    def test_500x407_synthetic_image_two_windows(self):
+        windows = self._windows_for(500, 407)
+        self.assertEqual(len(windows), 2)
+        for ordinal, top, left, bottom, right in windows:
+            self.assertEqual(bottom - top, 407)
+            self.assertEqual(right - left, 448)
+
+    def test_450x338_synthetic_image_two_windows(self):
+        windows = self._windows_for(450, 338)
+        self.assertEqual(len(windows), 2)
+        for ordinal, top, left, bottom, right in windows:
+            self.assertEqual(bottom - top, 338)
+            self.assertEqual(right - left, 448)
+
+    def test_total_N_across_both_real_smoke_image_shapes_is_4(self):
+        n1 = len(self._windows_for(500, 407))
+        n2 = len(self._windows_for(450, 338))
+        self.assertEqual(n1 + n2, 4)
+
+    def test_407x448_window_through_adapter_at_real_patch_and_canvas_scale(self):
+        model = FakeDINOText(grid=32, patch_size=14, seed=13)  # resize_dim = 448, matching the bound E3 config
+        g = torch.Generator().manual_seed(413)
+        image = torch.rand(1, 3, 407, 448, generator=g)
+        text_emb = torch.randn(3, 5, generator=torch.Generator().manual_seed(513))
+        snap, adapter_output = e3a.extract_e3_window_snapshot(
+            model, image, text_emb, window_id="img1:w0", window_ordinal=0,
+            top=0, left=0, bottom=407, right=448,
+            canvas_h=407, canvas_w=448, patch_h=14, patch_w=14,
+        )
+        self.assertEqual((snap.infer_h, snap.infer_w), (407, 448))
+        self.assertEqual((snap.backbone_input_height, snap.backbone_input_width), (448, 448))
+        self.assertEqual((snap.grid_h, snap.grid_w), (32, 32))
+        self.assertEqual(tuple(adapter_output.shape[2:]), (407, 448))
+        reference_output = model.generate_masks_reference(image, text_emb)
+        self.assertTrue(torch.allclose(adapter_output, reference_output, atol=1e-6))
+
+    def test_338x448_window_through_adapter_at_real_patch_and_canvas_scale(self):
+        model = FakeDINOText(grid=32, patch_size=14, seed=17)  # resize_dim = 448
+        g = torch.Generator().manual_seed(417)
+        image = torch.rand(1, 3, 338, 448, generator=g)
+        text_emb = torch.randn(3, 5, generator=torch.Generator().manual_seed(517))
+        snap, adapter_output = e3a.extract_e3_window_snapshot(
+            model, image, text_emb, window_id="img2:w0", window_ordinal=0,
+            top=0, left=0, bottom=338, right=448,
+            canvas_h=338, canvas_w=448, patch_h=14, patch_w=14,
+        )
+        self.assertEqual((snap.infer_h, snap.infer_w), (338, 448))
+        self.assertEqual((snap.backbone_input_height, snap.backbone_input_width), (448, 448))
+        self.assertEqual((snap.grid_h, snap.grid_w), (32, 32))
+        self.assertEqual(tuple(adapter_output.shape[2:]), (338, 448))
+        reference_output = model.generate_masks_reference(image, text_emb)
+        self.assertTrue(torch.allclose(adapter_output, reference_output, atol=1e-6))
 
 
 if __name__ == "__main__":
