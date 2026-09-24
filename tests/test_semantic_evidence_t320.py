@@ -902,13 +902,20 @@ class SigmoidDomainRepairRegressionTests(unittest.TestCase):
     #        already-updated existing test classes above) ---
 
     def test_H_one_forward_per_window_invariant_still_holds(self):
-        # Re-verified via the adapter's own existing guarantees (unchanged
-        # file); this is a structural signature check that extract_e3_window_snapshot
-        # was not touched by this repair (byte-identical file requirement).
+        # Originally a byte-identical-file check proving the sigmoid/
+        # public-API repair (the task this test class belongs to) did not
+        # touch the adapter. A later, separate, authorized repair fixed an
+        # unrelated adapter defect (_project_dino_features's projection-
+        # type dispatch fallthrough -- see
+        # docs/semantic_evidence_t320_implementation.md's own "projection-
+        # type dispatch fallthrough" repair note), so this now pins the
+        # adapter to that fix's hash instead: still a structural check
+        # that whatever touches extract_e3_window_snapshot next is a
+        # deliberate, hash-visible change, not silent drift.
         import hashlib
         adapter_path = SRC_DIR / "semantic_evidence_e3_adapter.py"
         digest = hashlib.sha256(adapter_path.read_bytes()).hexdigest()
-        self.assertEqual(digest, "341e88122b7ff031e8dfbf06876e43e16a0092c189c112b97b2cf390c8c120d1")
+        self.assertEqual(digest, "d686b14e37e5814ac568d8404fcf680c8a616bea1ee63ef44219b810d0ccb04f")
 
     def test_H_final_align_corners_still_false(self):
         self.assertIs(t320.FINAL_RESCALE_ALIGN_CORNERS, False)

@@ -88,14 +88,16 @@ class FakeDINOText(nn.Module):
     model.forward_features, proj.project_dino, masker.forward_seg,
     with_bg_clean, parameters()."""
 
-    def __init__(self, grid: int = 4, raw_dim: int = 6, feature_dim: int = 5, seed: int = 0):
+    def __init__(self, grid: int = 4, raw_dim: int = 6, feature_dim: int = 5, seed: int = 0, proj=None):
         super().__init__()
         self.model_name = "dinov2_fake"  # routes into the x_norm_patchtokens dict branch
         self.with_bg_clean = False
         num_tokens = grid * grid
         self.model = _FakeBackbone(num_tokens, raw_dim, seed=seed)
-        g = torch.Generator().manual_seed(seed + 1)
-        self.proj = VisualProjectionLayer(torch.randn(raw_dim, feature_dim, generator=g))
+        if proj is None:
+            g = torch.Generator().manual_seed(seed + 1)
+            proj = VisualProjectionLayer(torch.randn(raw_dim, feature_dim, generator=g))
+        self.proj = proj
         self.masker = _FakeMasker()
         self._dummy_param = nn.Parameter(torch.zeros(1), requires_grad=False)
 
@@ -108,12 +110,27 @@ class FakeDINOText(nn.Module):
         proj, forward_seg, resize with align_corners=True) -- written
         separately from extract_e3_window_snapshot, calling the SAME
         underlying fake sub-methods, to serve as the ordinary-path oracle
-        for output-preservation tests."""
+        for output-preservation tests.
+
+        Projection dispatch mirrors the real, authoritative
+        DINOText.generate_masks source exactly (two independent `if`s,
+        matched by exact type name, never an isinstance/elif/else): for
+        any proj type other than VisualProjectionLayer/DoubleMLP -- e.g.
+        the real src/model.py ProjectionLayer, which has no DINO/visual-
+        side projection method at all -- image_feat is left untouched.
+        This is written directly against that real dispatch logic, not by
+        calling or trusting the adapter under test."""
         h, w = image.shape[2:]
         image_bgr_to_rgb = image[:, [2, 1, 0], :, :]
         img_preprocessed = self.image_transforms(image_bgr_to_rgb)
         image_feat_raw = self.model.forward_features(img_preprocessed)["x_norm_patchtokens"]
-        image_feat_proj = self.proj.project_dino(image_feat_raw.float())
+        proj_type_name = type(self.proj).__name__
+        if proj_type_name == "VisualProjectionLayer":
+            image_feat_proj = self.proj.project_dino(image_feat_raw.float())
+        elif proj_type_name == "DoubleMLP":
+            image_feat_proj = self.proj.project_visual(image_feat_raw.float())
+        else:
+            image_feat_proj = image_feat_raw
         b, num_patches, c = image_feat_proj.shape
         grid = int(round(num_patches ** 0.5))
         image_feat_bchw = image_feat_proj.reshape(b, grid, grid, c).permute(0, 3, 1, 2)
@@ -305,6 +322,131 @@ class InvalidInputRejectionTests(unittest.TestCase):
                 model, image, text_emb, window_id="w0", window_ordinal=0,
                 top=0, left=0, bottom=32, right=32, canvas_h=32, canvas_w=32, patch_h=8, patch_w=8,
             )
+
+
+# =============================================================================
+# Repair: _project_dino_features fallthrough for unmatched proj types (e.g.
+# the real ProjectionLayer, which has no DINO/visual-side projection method
+# at all) must leave image_feat_raw unchanged, exactly matching
+# generate_masks's real, authoritative two-independent-`if` dispatch (never
+# a third branch/else in the real source).
+# =============================================================================
+
+class _ModelStub:
+    """Minimal stand-in exposing only `.proj`, the one attribute
+    _project_dino_features reads."""
+
+    def __init__(self, proj):
+        self.proj = proj
+
+
+class RealProjectionTypeDispatchTests(unittest.TestCase):
+    """Exercises the adapter's projection dispatch against the ACTUAL
+    src/model.py classes (VisualProjectionLayer, DoubleMLP,
+    ProjectionLayer) -- not merely fakes named to match them -- since the
+    original defect was invisible to every prior test that only ever used
+    a hand-rolled fake VisualProjectionLayer."""
+
+    @classmethod
+    def setUpClass(cls):
+        if str(SRC_DIR) not in sys.path:
+            sys.path.insert(0, str(SRC_DIR))
+        from model import VisualProjectionLayer as RealVisualProjectionLayer
+        from model import DoubleMLP as RealDoubleMLP
+        from model import ProjectionLayer as RealProjectionLayer
+        cls.RealVisualProjectionLayer = RealVisualProjectionLayer
+        cls.RealDoubleMLP = RealDoubleMLP
+        cls.RealProjectionLayer = RealProjectionLayer
+
+    def test_real_visual_projection_layer_branch_still_dispatches(self):
+        proj = self.RealVisualProjectionLayer(dino_embed_dim=8, clip_embed_dim=6)
+        x = torch.randn(1, 4, 8)
+        expected = proj.project_dino(x.float())
+        actual = e3a._project_dino_features(_ModelStub(proj), x)
+        self.assertTrue(torch.equal(actual, expected))
+
+    def test_real_double_mlp_branch_still_dispatches(self):
+        proj = self.RealDoubleMLP(dino_embed_dim=8, clip_embed_dim=6, hidden_layer=True)
+        x = torch.randn(1, 4, 8)
+        expected = proj.project_visual(x.float())
+        actual = e3a._project_dino_features(_ModelStub(proj), x)
+        self.assertTrue(torch.equal(actual, expected))
+
+    def test_real_projection_layer_fallthrough_preserves_object_identity(self):
+        proj = self.RealProjectionLayer()
+        x = torch.randn(1, 4, 8)
+        result = e3a._project_dino_features(_ModelStub(proj), x)
+        self.assertIs(result, x)  # exact same Python object, not a copy
+
+    def test_real_projection_layer_fallthrough_preserves_values_dtype_device_shape(self):
+        proj = self.RealProjectionLayer()
+        for dtype in (torch.float32, torch.float64, torch.float16):
+            x = torch.randn(1, 4, 8).to(dtype)
+            result = e3a._project_dino_features(_ModelStub(proj), x)
+            self.assertTrue(torch.equal(result, x))
+            self.assertEqual(result.dtype, x.dtype)
+            self.assertEqual(result.device, x.device)
+            self.assertEqual(result.shape, x.shape)
+
+    def test_real_projection_layer_has_no_dino_visual_projection_method(self):
+        # Confirms the premise the fix rests on directly against the real
+        # class, not as an assumption.
+        proj = self.RealProjectionLayer()
+        self.assertFalse(hasattr(proj, "project_dino"))
+        self.assertFalse(hasattr(proj, "project_visual"))
+        self.assertTrue(hasattr(proj, "project_clip_txt"))
+
+
+class ProjectionLayerEquivalenceTests(unittest.TestCase):
+    """Source-derived equivalence: using identical cached features and
+    text embeddings, compares the repaired adapter (against a model whose
+    .proj is the REAL, unmodified src/model.py ProjectionLayer) against
+    an independently-written authoritative reference (FakeDINOText.
+    generate_masks_reference's now-general dispatch, itself written
+    directly against generate_masks's real two-independent-`if` source,
+    not against the adapter under test), checking raw S0, the
+    sigmoid/upsampled mask output, and the one-backbone-forward
+    invariant."""
+
+    def test_s0_and_mask_match_authoritative_reference_with_real_projection_layer(self):
+        if str(SRC_DIR) not in sys.path:
+            sys.path.insert(0, str(SRC_DIR))
+        from model import ProjectionLayer as RealProjectionLayer
+
+        raw_dim = 8
+        grid = 4
+        model = FakeDINOText(grid=grid, raw_dim=raw_dim, seed=11, proj=RealProjectionLayer())
+        infer = grid * 8
+        image = torch.rand(1, 3, infer, infer, generator=torch.Generator().manual_seed(211))
+        # text_emb's last dim must match the UNPROJECTED feature width
+        # (raw_dim): with ProjectionLayer, image_feat is never projected.
+        text_emb = torch.randn(3, raw_dim, generator=torch.Generator().manual_seed(311))
+
+        self.assertEqual(model.model.call_count, 0)
+        snap, adapter_output = e3a.extract_e3_window_snapshot(
+            model, image, text_emb, window_id="w0", window_ordinal=0,
+            top=0, left=0, bottom=infer, right=infer,
+            canvas_h=infer, canvas_w=infer, patch_h=8, patch_w=8,
+        )
+        self.assertEqual(model.model.call_count, 1)  # one-backbone-forward invariant
+
+        reference_output = model.generate_masks_reference(image, text_emb)
+        self.assertTrue(torch.allclose(adapter_output, reference_output, atol=1e-6))
+
+        # Raw S0, independently recomputed the same way the reference
+        # does -- backbone forward, NO projection (ProjectionLayer
+        # fallthrough), forward_seg -- confirms the fallthrough is
+        # correct at the pre-sigmoid/pre-resize stage too, not just in
+        # the final resized mask.
+        image_bgr_to_rgb = image[:, [2, 1, 0], :, :]
+        image_feat_raw = model.model.forward_features(image_bgr_to_rgb)["x_norm_patchtokens"]
+        b, num_patches, c = image_feat_raw.shape
+        g = int(round(num_patches ** 0.5))
+        image_feat_bchw = image_feat_raw.reshape(b, g, g, c).permute(0, 3, 1, 2)
+        _mask, expected_s0_bchw = model.masker.forward_seg(image_feat_bchw, text_emb, deterministic=True, hard=False)
+        _b1, num_classes, h, w = expected_s0_bchw.shape
+        expected_s0 = expected_s0_bchw.reshape(num_classes, h * w).permute(1, 0)
+        self.assertTrue(torch.allclose(snap.s0, expected_s0, atol=1e-6))
 
 
 if __name__ == "__main__":

@@ -153,14 +153,29 @@ class WindowSnapshot:
 
 def _project_dino_features(model: Any, image_feat_raw: torch.Tensor) -> torch.Tensor:
     """Apply E3's existing projection, exactly as `generate_masks` does
-    (lines ~331-334 at the reviewed E3 base): calls the model's own
-    `self.proj.project_dino`/`project_visual`, never reimplemented."""
+    (lines ~331-334 at the reviewed E3 base):
+
+        if type(self.proj) == VisualProjectionLayer:
+            image_feat = self.proj.project_dino(image_feat.float())
+        if type(self.proj) == DoubleMLP:
+            image_feat = self.proj.project_visual(image_feat.float())
+
+    These are two independent `if`s, not `if`/`elif`/`else` -- for any
+    other `self.proj` type (e.g. `ProjectionLayer`, which projects the
+    CLIP text side via `project_clip_txt` and has no DINO/visual-side
+    projection method at all -- src/model.py's `ProjectionLayer`) neither
+    branch matches and `image_feat` is left completely untouched by the
+    real, authoritative source. This function mirrors that exactly: the
+    fall-through returns `image_feat_raw` unchanged -- no clone, no
+    dtype/device cast, no normalization -- never `.float()`, which the
+    real source only applies inside the two matched branches, immediately
+    before the call each one already makes."""
     proj_type_name = type(model.proj).__name__
     if proj_type_name == "VisualProjectionLayer":
         return model.proj.project_dino(image_feat_raw.float())
     if proj_type_name == "DoubleMLP":
         return model.proj.project_visual(image_feat_raw.float())
-    raise E3AdapterError(f"unsupported projection type {proj_type_name!r}; cannot compose existing E3 projection")
+    return image_feat_raw
 
 
 def extract_e3_window_snapshot(

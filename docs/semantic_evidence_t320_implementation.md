@@ -286,6 +286,27 @@ any of these comparisons; the fake model in
 deterministic stand-in that matches the current E3 API surface, not a
 model of DINOText's actual learned behavior.
 
+## Repair note (projection-type dispatch fallthrough)
+
+The first real GPU submission of the two-image E3/T320 smoke (a later,
+separate task) surfaced a defect in `src/semantic_evidence_e3_adapter.py`
+invisible to every test above, all of which used a fake model whose
+`.proj` was always named `VisualProjectionLayer`: `_project_dino_features`
+raised `E3AdapterError` for any projection type other than
+`VisualProjectionLayer`/`DoubleMLP`. The real, authoritative source
+(`DINOText.generate_masks`, `dinotext.py:329-332`) has no such error path
+-- it is two independent `if`s, and for any other type (including the
+real model's actual `src/model.py` `ProjectionLayer`, which projects only
+the CLIP text side via `project_clip_txt` and has no DINO/visual-side
+projection method at all) `image_feat` is left completely untouched.
+Repaired by returning `image_feat_raw` unchanged in that case, matching
+`generate_masks` exactly -- confirmed against the real `ProjectionLayer`
+class (not a fake), with an equivalence test against an independently-
+written reference using identical cached features and text embeddings.
+Both matched branches (`VisualProjectionLayer`/`DoubleMLP`) are
+byte-unchanged. See `docs/semantic_evidence_t320_real_smoke_run.md`'s own
+repair note for the fuller context this was found in.
+
 ## What this task does not do
 
 - **No real model inference has been run.** Every test uses either purely
