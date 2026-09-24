@@ -552,6 +552,9 @@ def _default_real_image_loader(image_root: Path, image_id: str):
     return bgr, h, w
 
 
+_EXPECTED_COCO_STUFF_CLASS_COUNT = 171
+
+
 def _default_real_model_and_text_provider(repo_root: Path, weight_dir: str):
     """Real E3 model + text-embedding construction, reusing the exact
     committed, already-Step0-proven construction path: models.builder's
@@ -562,13 +565,25 @@ def _default_real_model_and_text_provider(repo_root: Path, weight_dir: str):
     dinotext_builder.build_dinotext_seg_inference uses. Model is
     constructed, and its weights loaded, exactly once (DINOText.__init__
     itself performs the single DINOv2/CLIP/projection-checkpoint load).
-    Lazy imports live only inside this function."""
+    Lazy imports live only inside this function.
+
+    Import convention: this repository's own internal modules
+    (src/open_vocabulary_segmentation/models/dinotext/masker.py etc.) use
+    the FLAT top-level import style (`from models.builder import MODELS`),
+    exactly as demo.py establishes via
+    `sys.path.insert(0, "src/open_vocabulary_segmentation")` +
+    `from models import build_model`. Mixing that with a package-qualified
+    `open_vocabulary_segmentation.models` import makes the same module
+    load under two distinct identities, so its `@MODELS.register_module()`
+    decorators run twice and mmcv's registry raises a duplicate-key error
+    on the second one -- so this function must use ONLY the flat style,
+    never the package-qualified one."""
     import torch
     from omegaconf import OmegaConf
 
     os.environ.setdefault("TALK2DINO_WEIGHT_DIR", str(weight_dir))
 
-    sys_path_added = str(repo_root)
+    sys_path_added = str(repo_root / "src" / "open_vocabulary_segmentation")
     import sys
     if sys_path_added not in sys.path:
         sys.path.insert(0, sys_path_added)
@@ -579,20 +594,37 @@ def _default_real_model_and_text_provider(repo_root: Path, weight_dir: str):
     eval_cfg = OmegaConf.load(repo_root / "src/open_vocabulary_segmentation/configs/stuff/eval_stuff.yml")
     cfg = OmegaConf.merge(default_cfg, eval_cfg)
 
-    from open_vocabulary_segmentation.models import build_model
+    from models import build_model
     model = build_model(cfg.model)
     model.eval()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
 
-    from open_vocabulary_segmentation.segmentation.datasets.coco_object import COCOStuffDataset  # noqa: F401
-    classnames = COCOStuffDataset.CLASSES
+    # COCOStuffDataset (171 classes) is provided by mmseg itself -- not by
+    # open_vocabulary_segmentation.segmentation.datasets.coco_object, which
+    # only defines COCOObjectDataset (a *different*, 80-class COCO-Object
+    # dataset). Importing the wrong one would feed the wrong class list
+    # into build_dataset_class_tokens/build_text_embedding without raising,
+    # silently corrupting every downstream T0/T320 computation's semantic
+    # meaning -- so the exact class count is asserted below, not assumed.
+    from mmseg.datasets import COCOStuffDataset
+    classnames = list(COCOStuffDataset.CLASSES)
     if classnames and classnames[0] == "background":
         classnames = classnames[1:]
+    if len(classnames) != _EXPECTED_COCO_STUFF_CLASS_COUNT:
+        raise SmokeRunnerError(
+            f"expected exactly {_EXPECTED_COCO_STUFF_CLASS_COUNT} ordered COCOStuffDataset "
+            f"class names, got {len(classnames)}"
+        )
 
     text_tokens = model.build_dataset_class_tokens(cfg.evaluate.template, classnames)
     text_embedding = model.build_text_embedding(text_tokens)
+    if text_embedding.shape[0] != len(classnames):
+        raise SmokeRunnerError(
+            f"text_embedding row count ({text_embedding.shape[0]}) does not match "
+            f"the {len(classnames)}-class list used to build it"
+        )
 
     return model, text_embedding
 

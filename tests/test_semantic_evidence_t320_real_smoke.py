@@ -869,6 +869,21 @@ class LauncherTests(unittest.TestCase):
         text = (REPO_ROOT / "semantic_evidence_t320_real_smoke_h100.sbatch").read_text()
         self.assertIn('if [ -e "${T320_SMOKE_OUTPUT_ROOT}" ]', text)
 
+    def test_launcher_loads_opencv_module_before_venv_python(self):
+        text = (REPO_ROOT / "semantic_evidence_t320_real_smoke_h100.sbatch").read_text()
+        self.assertIn("module load opencv/4.14.0", text)
+        module_load_pos = text.index("module load opencv/4.14.0")
+        first_python_bin_use_pos = text.index('"${PYTHON_BIN}"')
+        self.assertLess(
+            module_load_pos, first_python_bin_use_pos,
+            "opencv module must be loaded before the venv python3 is ever invoked",
+        )
+
+    def test_launcher_venv_python_used_for_all_three_subcommands(self):
+        text = (REPO_ROOT / "semantic_evidence_t320_real_smoke_h100.sbatch").read_text()
+        self.assertEqual(text.count('"${PYTHON_BIN}" "${CLI}"'), 3)
+        self.assertNotIn("\npython3 \"${CLI}\"", text)
+
 
 # =============================================================================
 # REPAIR_T320_REAL_SMOKE_RUNNER: tests for the three repaired defects.
@@ -1369,6 +1384,116 @@ class ProvenanceTests(unittest.TestCase):
         bad[0]["role"] = "smoke_backdoor_role"
         with self.assertRaises(runner.SmokeRunnerError):
             runner._validate_provenance_records(bad)
+
+
+# --- Repair: real-model-provider import convention (fixes a diamond import
+# and a wrong 80-class dataset import, both invisible to every prior test
+# because they only ever exercised the injected fake provider) ---
+
+class RealModelProviderImportSourceTests(unittest.TestCase):
+    """Cheap, dependency-free source-level regression tests: no torch,
+    mmcv, or mmseg required, so these always run regardless of what real
+    dependencies happen to be installed in the environment."""
+
+    def setUp(self):
+        self.source = (SRC_DIR / "semantic_evidence_t320_real_smoke.py").read_text()
+
+    def test_wrong_coco_object_import_path_absent(self):
+        # The original defect: COCOStuffDataset does not exist in this
+        # module at all (it only defines the *different*, 80-class
+        # COCOObjectDataset) -- this exact import string must never
+        # reappear.
+        self.assertNotIn(
+            "open_vocabulary_segmentation.segmentation.datasets.coco_object import COCOStuffDataset",
+            self.source,
+        )
+
+    def test_correct_mmseg_coco_stuff_import_present(self):
+        self.assertIn("from mmseg.datasets import COCOStuffDataset", self.source)
+
+    def test_package_qualified_model_import_absent(self):
+        # The original defect: importing open_vocabulary_segmentation.models
+        # alongside masker.py's own flat `from models.builder import MODELS`
+        # loads the same module under two identities and double-runs its
+        # @MODELS.register_module() decorators.
+        self.assertNotIn("from open_vocabulary_segmentation.models import build_model", self.source)
+
+    def test_flat_model_import_present(self):
+        self.assertIn("from models import build_model", self.source)
+
+    def test_sys_path_targets_open_vocabulary_segmentation_not_bare_repo_root(self):
+        self.assertIn('sys_path_added = str(repo_root / "src" / "open_vocabulary_segmentation")', self.source)
+
+    def test_class_count_constant_and_assertions_present(self):
+        self.assertIn("_EXPECTED_COCO_STUFF_CLASS_COUNT = 171", self.source)
+        self.assertIn("len(classnames) != _EXPECTED_COCO_STUFF_CLASS_COUNT", self.source)
+        self.assertIn("text_embedding.shape[0] != len(classnames)", self.source)
+
+
+class RealModelProviderRealImportTests(unittest.TestCase):
+    """Fresh-process, real-dependency (no fake model) proof that the fixed
+    import convention resolves cleanly: no duplicate mmcv registry error,
+    and COCOStuffDataset really does have exactly 171 ordered classes.
+    Constructs no model and loads no checkpoint tensors (that remains real
+    execution, deliberately out of scope here) -- only exercises the
+    import statements _default_real_model_and_text_provider itself runs
+    before ever calling build_model(). Requires the same opencv module +
+    venv this project's launcher uses; skips (not fails) if unavailable,
+    so this test suite stays portable to environments without them."""
+
+    _OPENCV_MODULE = "opencv/4.14.0"
+
+    def test_real_import_chain_no_duplicate_registry_no_fake_model(self):
+        probe = (
+            "import sys, os\n"
+            f"sys.path.insert(0, {str(SRC_DIR)!r})\n"
+            f"sys.path.insert(0, {str(SRC_DIR / 'open_vocabulary_segmentation')!r})\n"
+            "os.environ['TALK2DINO_WEIGHT_DIR'] = '/scratch/haree/weights'\n"
+            "from models import build_model\n"
+            "from mmseg.datasets import COCOStuffDataset\n"
+            "classnames = list(COCOStuffDataset.CLASSES)\n"
+            "if classnames and classnames[0] == 'background':\n"
+            "    classnames = classnames[1:]\n"
+            "assert len(classnames) == 171, len(classnames)\n"
+            "print('REAL_IMPORT_CHAIN_OK')\n"
+        )
+        venv_python = "/scratch/haree/venv/talk2dino-a100/bin/python3"
+        if not Path(venv_python).exists():
+            self.skipTest(f"established venv not present in this environment: {venv_python}")
+        result = subprocess.run(
+            ["bash", "-c", f"module load {self._OPENCV_MODULE} >/dev/null 2>&1; exec {venv_python} -c \"$0\"", probe],
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode != 0 and "No module" in result.stderr and "opencv" in result.stderr.lower():
+            self.skipTest(f"opencv module unavailable in this environment: {result.stderr}")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("REAL_IMPORT_CHAIN_OK", result.stdout)
+        self.assertNotIn("already registered", result.stderr)
+        self.assertNotIn("KeyError", result.stderr)
+
+    def test_wrong_import_path_genuinely_fails_if_reinstated(self):
+        # Demonstrates the original defect was real, not hypothetical: the
+        # old import string genuinely raises ImportError against the real
+        # coco_object module, which only defines COCOObjectDataset. Needs
+        # the opencv module loaded too, purely so the failure is the
+        # intended ImportError on COCOStuffDataset and not an unrelated
+        # earlier `No module named 'cv2'` from mmcv's own import chain.
+        venv_python = "/scratch/haree/venv/talk2dino-a100/bin/python3"
+        if not Path(venv_python).exists():
+            self.skipTest(f"established venv not present in this environment: {venv_python}")
+        probe = (
+            "import sys\n"
+            f"sys.path.insert(0, {str(SRC_DIR)!r})\n"
+            "from open_vocabulary_segmentation.segmentation.datasets.coco_object import COCOStuffDataset\n"
+        )
+        result = subprocess.run(
+            ["bash", "-c", f"module load {self._OPENCV_MODULE} >/dev/null 2>&1; exec {venv_python} -c \"$0\"", probe],
+            capture_output=True, text=True, timeout=30,
+        )
+        if "No module" in result.stderr and "opencv" in result.stderr.lower():
+            self.skipTest(f"opencv module unavailable in this environment: {result.stderr}")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("COCOStuffDataset", result.stderr)
 
 
 if __name__ == "__main__":

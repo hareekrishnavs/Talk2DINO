@@ -89,12 +89,30 @@ fi
 # established CPU/GPU-capable virtualenv (built via `module load python`
 # + `virtualenv --no-download` + wheelhouse installs, per docs/
 # semantic_evidence_t320_implementation.md's own reference to this same
-# venv) is self-contained and does not require an explicit `module load`
-# to run (its interpreter resolves its own base install via absolute
-# CVMFS paths recorded in pyvenv.cfg).
+# venv) is self-contained for torch/mmcv/etc and does not require an
+# explicit `module load` for those.
+#
+# cv2 (OpenCV) is the one exception: the venv has no cv2 install, the
+# Alliance wheelhouse deliberately ships a dummy `opencv` pip package that
+# fails with a message pointing at the real `opencv` environment module
+# (see https://docs.alliancecan.ca/wiki/OpenCV), and that module must be
+# loaded BEFORE the venv's python3 is used, per the Alliance-documented
+# order. opencv/4.14.0 (paired with cuda/13.2, matching this venv's own
+# torch CUDA build) is used rather than the module's default/oldest
+# version because it is the only one confirmed compatible with the numpy
+# 2.x already installed in this venv -- opencv/4.10.0 (matching the venv's
+# own stale talk2dino-a100-requirements.txt pin, and StdEnv/2023's default
+# module) is compiled against numpy 1.x and fails combined with numpy 2.x
+# with "AttributeError: _ARRAY_API not found" (confirmed 2026-09-24).
+module load opencv/4.14.0
+
 PYTHON_BIN="/scratch/haree/venv/talk2dino-a100/bin/python3"
 if [ ! -x "${PYTHON_BIN}" ]; then
     echo "FATAL: established venv python3 not found or not executable: ${PYTHON_BIN}" >&2
+    exit 1
+fi
+if ! "${PYTHON_BIN}" -c "import cv2" >/dev/null 2>&1; then
+    echo "FATAL: cv2 not importable through the venv python3 even after 'module load opencv/4.14.0'" >&2
     exit 1
 fi
 

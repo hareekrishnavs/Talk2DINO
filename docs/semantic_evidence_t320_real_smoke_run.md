@@ -251,3 +251,64 @@ limits, or authorization boundary; the same fake-provider fixture produces
 bit-identical scientific digests (window digest, T0/T320 prediction
 digests, all window- and image-scoped counts) before and after this repair.
 This document still does not claim the real smoke has executed.
+
+## Repair note (real-model-provider import convention, launcher environment)
+
+The first real `sbatch` submission of the H100 launcher surfaced three
+defects that every prior review, by design, never exercised: all of them
+used a dependency-injected fake model/loader precisely to avoid real model
+construction, checkpoint access, and CUDA initialization before explicit
+execution authorization. Repaired here:
+
+1. **Launcher `REPO_ROOT` resolution under real `sbatch`.** Slurm copies a
+   submitted script into a per-job spool directory and runs it from there,
+   so `dirname "${BASH_SOURCE[0]}"` resolved to the spool copy, not the
+   repository. Fixed by preferring `$SLURM_SUBMIT_DIR` (the directory
+   `sbatch` was invoked from) when set, falling back to the old
+   `BASH_SOURCE` logic only for a direct, non-`sbatch` invocation.
+2. **Launcher interpreter.** The launcher invoked the bare `python3` on
+   `PATH`, which resolves to the system/CVMFS interpreter with no torch
+   installed. Fixed by invoking the project's established torch-capable
+   venv (`/scratch/haree/venv/talk2dino-a100/bin/python3`) explicitly for
+   all three CLI subcommands.
+3. **Launcher missing `cv2`.** That same venv has no working `cv2` install
+   (the Alliance wheelhouse deliberately ships a dummy `opencv` package
+   that fails with a message pointing at the `opencv` environment module).
+   `module load opencv/4.14.0` is now loaded before the venv's python3 is
+   ever invoked -- specifically 4.14.0, not the default/oldest module
+   version, because it is the only one confirmed compatible with the
+   numpy 2.x already installed in this venv (older builds are linked
+   against numpy 1.x and fail combined with numpy 2.x).
+4. **Runner: diamond import in `_default_real_model_and_text_provider`.**
+   The function added the bare repository root to `sys.path` and imported
+   `open_vocabulary_segmentation.models` (package-qualified), while
+   `masker.py` (imported transitively) uses this codebase's own
+   established flat-import convention (`from models.builder import
+   MODELS`, exactly as `demo.py` establishes via
+   `sys.path.insert(0, "src/open_vocabulary_segmentation")` +
+   `from models import build_model`). Mixing both styles loads the same
+   module under two identities, so mmcv's `@MODELS.register_module()`
+   decorators ran twice and the second one raised a duplicate-registry
+   `KeyError`. Fixed by using only the flat convention.
+5. **Runner: wrong dataset class.** The function imported `COCOStuffDataset`
+   from `open_vocabulary_segmentation.segmentation.datasets.coco_object`,
+   which does not define any such class -- it only defines the
+   *different*, 80-class `COCOObjectDataset`. This failed loudly rather
+   than silently, but had it accidentally resolved to something, it would
+   have fed the wrong 80-class list into
+   `build_dataset_class_tokens`/`build_text_embedding`, silently
+   corrupting the semantic meaning of every downstream T0/T320
+   computation. The correct, established source (matching
+   `open_vocabulary_segmentation/main.py`'s own usage) is
+   `from mmseg.datasets import COCOStuffDataset`, which has exactly the
+   171 ordered classes the E3 COCO-Stuff evaluation config expects; the
+   function now asserts this count explicitly, and separately asserts the
+   constructed text embedding has one row per class, rather than assuming
+   either.
+
+None of these five repairs touch window geometry, event counting,
+provenance binding, the image whitelist, or the result schema -- they only
+make real model construction and text-embedding generation reach the point
+where the existing, already-verified instrumentation and validation take
+over. This document still does not claim the real smoke has executed to
+completion.
