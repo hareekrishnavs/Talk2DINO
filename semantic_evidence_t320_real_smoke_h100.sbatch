@@ -84,15 +84,29 @@ if [ ! -f "${CLI}" ]; then
     exit 1
 fi
 
+# The bare `python3` resolved from PATH on a compute node is the system/
+# CVMFS interpreter, which does not have torch installed. The project's
+# established CPU/GPU-capable virtualenv (built via `module load python`
+# + `virtualenv --no-download` + wheelhouse installs, per docs/
+# semantic_evidence_t320_implementation.md's own reference to this same
+# venv) is self-contained and does not require an explicit `module load`
+# to run (its interpreter resolves its own base install via absolute
+# CVMFS paths recorded in pyvenv.cfg).
+PYTHON_BIN="/scratch/haree/venv/talk2dino-a100/bin/python3"
+if [ ! -x "${PYTHON_BIN}" ]; then
+    echo "FATAL: established venv python3 not found or not executable: ${PYTHON_BIN}" >&2
+    exit 1
+fi
+
 echo "--- fresh process, one job, no self-submission, no resume ---"
 echo "--- Step 1/3: torch-free preflight ---"
-python3 "${CLI}" preflight \
+"${PYTHON_BIN}" "${CLI}" preflight \
     --weight-dir "${T320_SMOKE_WEIGHT_DIR}" \
     --image-root "${T320_SMOKE_IMAGE_ROOT}" \
     --output-root "${T320_SMOKE_OUTPUT_ROOT}"
 
 echo "--- Step 2/3: execute (lazy torch import, model construction, real E3/T320 smoke) ---"
-python3 "${CLI}" execute \
+"${PYTHON_BIN}" "${CLI}" execute \
     --weight-dir "${T320_SMOKE_WEIGHT_DIR}" \
     --image-root "${T320_SMOKE_IMAGE_ROOT}" \
     --output-root "${T320_SMOKE_OUTPUT_ROOT}" \
@@ -100,7 +114,7 @@ python3 "${CLI}" execute \
     --node "${SLURMD_NODENAME:-$(hostname)}"
 
 echo "--- Step 3/3: torch-free public result verification ---"
-python3 "${CLI}" verify-result --result-path "${T320_SMOKE_OUTPUT_ROOT}/smoke_result.json"
+"${PYTHON_BIN}" "${CLI}" verify-result --result-path "${T320_SMOKE_OUTPUT_ROOT}/smoke_result.json"
 
 echo "=== smoke job complete; see ${T320_SMOKE_OUTPUT_ROOT}/smoke_result.json for the closed result ==="
 echo "AUTHORIZATION BOUNDARY (repeated): PASS on this smoke authorizes"
