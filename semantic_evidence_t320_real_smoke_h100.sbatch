@@ -66,8 +66,23 @@ export PYTHONDONTWRITEBYTECODE=1
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Under real sbatch execution, Slurm copies this script into a per-job
+# spool directory and runs it from there, so BASH_SOURCE no longer points
+# at the repository -- SLURM_SUBMIT_DIR (the directory `sbatch` was
+# invoked from) is the correct resolution mechanism in that case. Fall
+# back to BASH_SOURCE only for a direct, non-sbatch invocation.
+if [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
+    REPO_ROOT="${SLURM_SUBMIT_DIR}"
+else
+    REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
 CLI="${REPO_ROOT}/diagnostics/run_semantic_evidence_t320_real_smoke.py"
+
+if [ ! -f "${CLI}" ]; then
+    echo "FATAL: resolved REPO_ROOT does not contain the smoke CLI: ${REPO_ROOT}" >&2
+    echo "       (SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR:-<unset>})" >&2
+    exit 1
+fi
 
 echo "--- fresh process, one job, no self-submission, no resume ---"
 echo "--- Step 1/3: torch-free preflight ---"
