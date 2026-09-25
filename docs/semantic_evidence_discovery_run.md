@@ -78,6 +78,44 @@ defects, all now repaired:
    authority requires: before staging, after the staged reopen, after
    atomic installation, and through the public `verify-result` path.
 
+## Preflight GT-root check (later, narrow repair)
+
+Committed-head production-readiness review found that `preflight()` checked
+the repository/authority state, all 48 discovery image files, and all three
+external checkpoint hashes, but had no `gt_root` parameter at all -- so it
+could report `READY_FOR_48_IMAGE_DISCOVERY_EXECUTION` even when the GT
+annotation directory was absent or missing one of the 48 required files. The
+failure would only have surfaced during Phase B of the first image, after
+real GPU compute had already been spent on that image's Phase A.
+
+`preflight()` now takes a required `gt_root` keyword argument (no default,
+no environment-variable fallback -- the operator must supply it explicitly,
+exactly as `execute` already requires) and checks, for each of the exact 48
+discovery IDs in canonical order, that `gt_root/{image_id}.png` exists and is
+a regular file. This is a **path/metadata check only**: it calls
+`Path.exists()` / `Path.is_dir()` / `Path.is_file()`, never opens or decodes
+a GT annotation's pixel content, and never imports PIL, OpenCV, torch, or any
+other decoder. It never enumerates or checks any of the 48 locked-holdout
+GT paths, and never touches any file in `gt_root` outside the 48 required
+names. A missing, wrong-typed (e.g. a directory instead of a file), or
+wrong-extension path is reported by discovery image ID, failing closed with
+the same `DiscoveryExecutionError` domain exception preflight already uses
+for missing images or mismatched checkpoint hashes.
+
+The CLI's `preflight` subcommand now has a required `--gt-root` flag
+(argparse-enforced; omitting it fails before any Python-level code runs),
+and the launcher passes the same `${DISCOVERY_GT_ROOT}` variable to both the
+`preflight` and `execute` steps, so the two commands are guaranteed to see
+byte-identical GT-root strings.
+
+Successful preflight now means: the discovery image paths, the discovery GT
+paths, the three external checkpoint hashes, the committed authority's own
+dependency/population checks, and output-root safety have all passed. It
+still does not execute any inference, still does not construct the model,
+still does not initialize CUDA, and still does not guarantee scientific
+success -- only that the real-path/environment preconditions `execute` will
+need are present.
+
 ## The 7 files
 
 1. `src/semantic_evidence_intervention_features.py` -- pure, torch-using
@@ -121,8 +159,9 @@ defects, all now repaired:
    GT-free/GT-label linkage, atomic install/overwrite-refusal, full
    `run_discovery` integration (fresh, interrupted+resume, per-phase
    resume after a checkpoint- or label-write failure, finalize_only,
-   GT-isolation), and defect-reinstatement tests for the repair's own
-   five findings.
+   GT-isolation), the preflight `gt_root` check (missing root/file, wrong
+   type, wrong extension, holdout-isolation, no-decode, torch-free, CLI, and
+   launcher tests), and defect-reinstatement tests for every repair's findings.
 7. This file.
 
 ## How Phase A (GT-free) and Phase B (GT-dependent) are wired

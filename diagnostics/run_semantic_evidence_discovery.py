@@ -51,6 +51,7 @@ def _cmd_preflight(args: argparse.Namespace) -> int:
             REPO_ROOT,
             weight_dir=args.weight_dir,
             image_root=Path(args.image_root),
+            gt_root=Path(args.gt_root),
             output_root=Path(args.output_root),
             mode=args.mode,
         )
@@ -106,6 +107,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_pf = sub.add_parser("preflight", help="Torch-free readiness check")
     p_pf.add_argument("--weight-dir", required=True, help="TALK2DINO_WEIGHT_DIR value (DINOv2/CLIP checkpoint directory)")
     p_pf.add_argument("--image-root", required=True, help="COCO-Stuff val2017 images directory")
+    p_pf.add_argument("--gt-root", required=True, help="COCO-Stuff semantic annotation directory (path/existence checked only, never decoded)")
     p_pf.add_argument("--output-root", required=True, help="Destination directory for the installed discovery result")
     p_pf.add_argument("--mode", choices=("fresh", "resume", "finalize_only"), default="fresh")
     p_pf.set_defaults(func=_cmd_preflight)

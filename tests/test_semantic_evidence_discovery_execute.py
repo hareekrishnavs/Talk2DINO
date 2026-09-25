@@ -250,6 +250,253 @@ class ValidateDiscoveryImageIdTests(unittest.TestCase):
             ex.validate_discovery_image_id("1234", self.authorized)
 
 
+class PreflightGtRootTests(unittest.TestCase):
+    """Synthetic, torch-free tests for the repaired preflight() gt_root
+    check. Never opens/decodes a real (or even a synthetic) GT file's
+    content -- every fixture file is an arbitrary placeholder byte string,
+    and every check below only exercises path/existence/type logic."""
+
+    def setUp(self):
+        self.ids = _real_discovery_ids()
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmpdir.name)
+        self.image_root = self.root / "images"
+        self.gt_root = self.root / "gt"
+        self.weight_dir = self.root / "weights"
+        self.image_root.mkdir()
+        self.gt_root.mkdir()
+        self.weight_dir.mkdir()
+        for iid in self.ids:
+            (self.image_root / f"{iid}.jpg").write_bytes(b"placeholder-image-bytes")
+            (self.gt_root / f"{iid}.png").write_bytes(b"placeholder-gt-bytes")
+
+        # Checkpoint hash mocking: dino/clip point at small synthetic files
+        # under our own weight_dir; the E3 projection checkpoint keeps using
+        # the real, already-committed, already-verified repo file (its path
+        # is hardcoded to repo_root/"weights"/filename regardless of
+        # weight_dir, so it cannot be redirected -- reusing the real file
+        # avoids needing to fake it while still exercising the real hash-
+        # match code path for that entry).
+        real_e3_binding = next(b for b in ex._external_checkpoint_bindings() if b[0] == "e3_projection_checkpoint")
+        dino_bytes = b"fake-dino-backbone-checkpoint-bytes"
+        clip_bytes = b"fake-clip-text-checkpoint-bytes"
+        (self.weight_dir / "dino.bin").write_bytes(dino_bytes)
+        (self.weight_dir / "clip.bin").write_bytes(clip_bytes)
+        self._fake_bindings = [
+            ("dino_backbone_checkpoint", "dino.bin", hashlib.sha256(dino_bytes).hexdigest()),
+            ("clip_text_checkpoint", "clip.bin", hashlib.sha256(clip_bytes).hexdigest()),
+            real_e3_binding,
+        ]
+        self._real_bindings_fn = ex._external_checkpoint_bindings
+        ex._external_checkpoint_bindings = lambda: self._fake_bindings
+
+        self.output_root = self.root / "out"  # deliberately never created
+
+    def tearDown(self):
+        ex._external_checkpoint_bindings = self._real_bindings_fn
+        self.tmpdir.cleanup()
+
+    def _preflight(self, **overrides):
+        kwargs = dict(
+            weight_dir=str(self.weight_dir), image_root=self.image_root, gt_root=self.gt_root,
+            output_root=self.output_root, mode="fresh",
+        )
+        kwargs.update(overrides)
+        return ex.preflight(REPO_ROOT, **kwargs)
+
+    # --- A: positive ---
+    def test_A_positive_synthetic_preflight_succeeds(self):
+        result = self._preflight()
+        self.assertEqual(result["status"], "READY_FOR_48_IMAGE_DISCOVERY_EXECUTION")
+        self.assertEqual(result["gt_checks_count"], 48)
+        self.assertFalse(self.output_root.exists(), "preflight must never create the output root")
+
+    # --- B: missing GT root ---
+    def test_B_missing_gt_root_rejected(self):
+        with self.assertRaises(ex.DiscoveryExecutionError) as ctx:
+            self._preflight(gt_root=self.root / "nonexistent_gt_root")
+        self.assertIn("gt_root", str(ctx.exception))
+
+    # --- C: GT root is a file, not a directory ---
+    def test_C_gt_root_as_file_rejected(self):
+        gt_file = self.root / "gt_root_is_a_file"
+        gt_file.write_bytes(b"not a directory")
+        with self.assertRaises(ex.DiscoveryExecutionError):
+            self._preflight(gt_root=gt_file)
+
+    # --- D: one missing discovery GT file ---
+    def test_D_one_missing_discovery_gt_identifies_the_id(self):
+        missing_id = self.ids[0]
+        (self.gt_root / f"{missing_id}.png").unlink()
+        with self.assertRaises(ex.DiscoveryExecutionError) as ctx:
+            self._preflight()
+        self.assertIn(missing_id, str(ctx.exception))
+
+    # --- E: required path is a directory instead of a file ---
+    def test_E_gt_path_as_directory_rejected(self):
+        target_id = self.ids[1]
+        (self.gt_root / f"{target_id}.png").unlink()
+        (self.gt_root / f"{target_id}.png").mkdir()
+        with self.assertRaises(ex.DiscoveryExecutionError) as ctx:
+            self._preflight()
+        self.assertIn(target_id, str(ctx.exception))
+
+    # --- F: wrong extension does not substitute ---
+    def test_F_wrong_extension_does_not_substitute(self):
+        target_id = self.ids[2]
+        (self.gt_root / f"{target_id}.png").unlink()
+        (self.gt_root / f"{target_id}.jpg").write_bytes(b"wrong extension")
+        with self.assertRaises(ex.DiscoveryExecutionError) as ctx:
+            self._preflight()
+        self.assertIn(target_id, str(ctx.exception))
+
+    # --- G: holdout isolation ---
+    def test_G_only_the_48_discovery_gt_paths_are_checked(self):
+        checked_paths = []
+        real_is_file = Path.is_file
+
+        def recording_is_file(self_path):
+            checked_paths.append(str(self_path))
+            return real_is_file(self_path)
+
+        Path.is_file = recording_is_file
+        try:
+            self._preflight()
+        finally:
+            Path.is_file = real_is_file
+
+        checked_gt_paths = [p for p in checked_paths if str(self.gt_root) in p]
+        checked_ids_in_order = [Path(p).stem for p in checked_gt_paths]
+        self.assertEqual(checked_ids_in_order, self.ids, "must check exactly the 48 discovery IDs, in canonical order")
+        self.assertEqual(len(checked_gt_paths), 48)
+
+        # Independently confirm zero holdout GT paths were ever checked, by
+        # deleting the GT root entirely and confirming preflight behavior is
+        # driven solely by the 48 discovery files (already proven above) --
+        # plus a direct membership check against the real holdout digest set.
+        import json as _json
+        with open(REPO_ROOT / "evaluation_subsets" / "semantic_evidence_feasibility_96.json") as f:
+            manifest = _json.load(f)
+        records = sorted(manifest["records"], key=lambda r: r["selection_rank"])
+        holdout_ids = {r["canonical_image_id"] for r in records if 48 <= r["selection_rank"] <= 95}
+        self.assertEqual(set(checked_ids_in_order) & holdout_ids, set(), "zero holdout GT paths may ever be checked")
+
+    def test_G_absent_holdout_gt_files_never_affect_preflight(self):
+        # The gt_root here contains ONLY the 48 discovery GT files (holdout
+        # GT files were never created in this fixture at all) -- preflight
+        # already succeeds in test_A, proving their absence is irrelevant.
+        result = self._preflight()
+        self.assertEqual(result["status"], "READY_FOR_48_IMAGE_DISCOVERY_EXECUTION")
+
+    # --- H: no GT decode ---
+    def test_H_no_gt_decode_attempted(self):
+        import builtins
+        real_open = builtins.open
+        gt_root_str = str(self.gt_root)
+        opened_gt_files = []
+
+        def watchdog_open(file, *a, **kw):
+            if isinstance(file, (str, Path)) and gt_root_str in str(file):
+                opened_gt_files.append(str(file))
+            return real_open(file, *a, **kw)
+
+        builtins.open = watchdog_open
+        try:
+            self._preflight()
+        finally:
+            builtins.open = real_open
+        self.assertEqual(opened_gt_files, [], "preflight must never open a GT file's content")
+
+    def test_H_pil_and_cv2_never_touched_for_gt(self):
+        # PIL/cv2 are not even importable without torch-adjacent heavy deps
+        # being present; if they ARE importable in this environment, poison
+        # them defensively to prove preflight doesn't reach for them.
+        poisoned = {}
+        try:
+            import PIL.Image as _PILImage
+            real_pil_open = _PILImage.open
+            def poisoned_pil_open(*a, **kw):
+                raise AssertionError("preflight must never call PIL.Image.open for GT")
+            _PILImage.open = poisoned_pil_open
+            poisoned["PIL"] = (_PILImage, real_pil_open)
+        except ImportError:
+            pass
+        try:
+            import cv2 as _cv2
+            real_cv2_imread = _cv2.imread
+            def poisoned_cv2_imread(*a, **kw):
+                raise AssertionError("preflight must never call cv2.imread for GT")
+            _cv2.imread = poisoned_cv2_imread
+            poisoned["cv2"] = (_cv2, real_cv2_imread)
+        except ImportError:
+            pass
+        try:
+            result = self._preflight()
+            self.assertEqual(result["status"], "READY_FOR_48_IMAGE_DISCOVERY_EXECUTION")
+        finally:
+            if "PIL" in poisoned:
+                poisoned["PIL"][0].open = poisoned["PIL"][1]
+            if "cv2" in poisoned:
+                poisoned["cv2"][0].imread = poisoned["cv2"][1]
+
+    # --- I: torch-free preflight ---
+    def test_I_torch_free_preflight(self):
+        import builtins
+        real_import = builtins.__import__
+        poisoned_names = {"torch", "torchvision", "mmcv", "mmseg", "timm"}
+        touched = []
+
+        def poisoned_import(name, *a, **kw):
+            top = name.split(".")[0]
+            if top in poisoned_names:
+                touched.append(name)
+                raise ImportError(f"POISONED: {name} must not be imported by preflight")
+            return real_import(name, *a, **kw)
+
+        builtins.__import__ = poisoned_import
+        try:
+            result = self._preflight()
+        finally:
+            builtins.__import__ = real_import
+        self.assertEqual(touched, [])
+        self.assertEqual(result["status"], "READY_FOR_48_IMAGE_DISCOVERY_EXECUTION")
+
+    # --- L: fatal exceptions during the GT metadata-check path ---
+    def test_L_fatal_exceptions_propagate_through_gt_check(self):
+        for exc_cls in (MemoryError, KeyboardInterrupt, SystemExit):
+            real_is_file = Path.is_file
+            def raiser(self_path):
+                raise exc_cls("injected during GT metadata check")
+            Path.is_file = raiser
+            try:
+                with self.assertRaises(exc_cls):
+                    self._preflight()
+            finally:
+                Path.is_file = real_is_file
+
+    # --- Defect-reinstatement (Section 8) ---
+    def test_defect_reinstatement_mutant_checks_only_gt_root_existence(self):
+        # A mutant that checks gt_root.exists() but never iterates the 48
+        # exact files -- the missing-one-file scenario must still be caught
+        # by the REAL implementation even though this mutant would accept it.
+        def mutant_preflight_gt_check(gt_root):
+            gt_root = Path(gt_root)
+            if not gt_root.exists() or not gt_root.is_dir():
+                raise ex.DiscoveryExecutionError("gt_root missing")
+            return True  # BUG: never checks the 48 individual files
+
+        missing_id = self.ids[5]
+        (self.gt_root / f"{missing_id}.png").unlink()
+
+        # the mutant incorrectly accepts this broken fixture
+        self.assertTrue(mutant_preflight_gt_check(self.gt_root))
+
+        # the real, repaired preflight() correctly rejects it
+        with self.assertRaises(ex.DiscoveryExecutionError) as ctx:
+            self._preflight()
+        self.assertIn(missing_id, str(ctx.exception))
+
+
 class CheckpointMetadataTests(unittest.TestCase):
     def setUp(self):
         self.ids = ["a", "b", "c"]
@@ -1251,6 +1498,93 @@ class DefectReinstatementTests(unittest.TestCase):
         outer_key_only_mutant_validator(garbage)  # the mutant accepts it (does not raise)
         with self.assertRaises(ex.DiscoveryExecutionError):
             ex.validate_gt_label_artifact(garbage)  # the repaired validator rejects the same input
+
+
+CLI_PATH = REPO_ROOT / "diagnostics" / "run_semantic_evidence_discovery.py"
+LAUNCHER_PATH = REPO_ROOT / "semantic_evidence_discovery_h100.sbatch"
+
+
+class PreflightCliTests(unittest.TestCase):
+    """Subprocess-based tests against the real CLI script -- fast,
+    torch-free, argument-parsing checks only (no real preflight run)."""
+
+    def _run(self, args):
+        import subprocess
+        return subprocess.run(
+            [sys.executable, str(CLI_PATH)] + args,
+            capture_output=True, text=True, timeout=30,
+        )
+
+    def test_J_preflight_help_lists_gt_root(self):
+        result = self._run(["preflight", "--help"])
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("--gt-root", result.stdout)
+
+    def test_J_preflight_without_gt_root_fails_via_argparse(self):
+        result = self._run([
+            "preflight", "--weight-dir", "/nonexistent", "--image-root", "/nonexistent",
+            "--output-root", "/nonexistent",
+        ])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--gt-root", result.stderr)
+
+    def test_J_execute_still_requires_its_own_gt_root(self):
+        result = self._run(["execute", "--help"])
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("--gt-root", result.stdout)
+
+    def test_J_no_new_subcommand_or_forbidden_flag(self):
+        result = self._run(["--help"])
+        self.assertEqual(result.returncode, 0)
+        for sub in ("verify-protocol", "preflight", "execute", "verify-result"):
+            self.assertIn(sub, result.stdout)
+        forbidden = ("--image-id", "--manifest", "--split", "--holdout", "--all-96",
+                     "--full-5000", "--max-images", "--debug", "--overwrite", "--force")
+        preflight_help = self._run(["preflight", "--help"]).stdout
+        for flag in forbidden:
+            self.assertNotIn(flag, preflight_help)
+
+
+class LauncherGtRootTests(unittest.TestCase):
+    """Pure text inspection of the committed launcher -- no subprocess, no
+    sbatch, no submission."""
+
+    def setUp(self):
+        self.text = LAUNCHER_PATH.read_text()
+
+    def test_K_single_gt_root_configuration_source(self):
+        # Exactly one operator-facing GT-root variable is declared as required.
+        required_decls = [l for l in self.text.splitlines() if ":?" in l and "GT_ROOT" in l]
+        self.assertEqual(len(required_decls), 1, f"expected exactly one required GT-root declaration, found {required_decls}")
+        self.assertIn("DISCOVERY_GT_ROOT", required_decls[0])
+
+    def test_K_preflight_and_execute_both_use_the_same_variable(self):
+        import re
+        preflight_block = self.text[self.text.index('"${CLI}" preflight'):self.text.index('"${CLI}" execute')]
+        execute_block = self.text[self.text.index('"${CLI}" execute'):]
+        self.assertIn('--gt-root "${DISCOVERY_GT_ROOT}"', preflight_block)
+        self.assertIn('--gt-root "${DISCOVERY_GT_ROOT}"', execute_block)
+
+    def test_K_preflight_appears_before_execute(self):
+        self.assertLess(self.text.index('"${CLI}" preflight'), self.text.index('"${CLI}" execute'))
+
+    def test_K_resource_directives_unchanged(self):
+        for directive in ("--gres=gpu:h100:1", "--cpus-per-task=8", "--mem=80G",
+                           "--time=02:00:00", "--account=rrg-yangw"):
+            self.assertIn(directive, self.text)
+
+    def test_K_no_self_submission(self):
+        import re
+        executable_sbatch_calls = [
+            l for l in self.text.splitlines()
+            if re.match(r"^\s*sbatch\s", l) or re.match(r'^\s*"\S*sbatch"\s', l)
+        ]
+        self.assertEqual(executable_sbatch_calls, [])
+
+    def test_K_bash_syntax_valid(self):
+        import subprocess
+        result = subprocess.run(["bash", "-n", str(LAUNCHER_PATH)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":

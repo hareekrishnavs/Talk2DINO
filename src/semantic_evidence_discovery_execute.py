@@ -133,10 +133,13 @@ def validate_discovery_image_id(image_id: str, authorized_ids: tuple) -> str:
     return image_id
 
 
-def preflight(repo_root: Path, *, weight_dir: str, image_root: Path, output_root: Path, mode: str = "fresh") -> dict:
+def preflight(repo_root: Path, *, weight_dir: str, image_root: Path, gt_root: Path, output_root: Path, mode: str = "fresh") -> dict:
     """Torch-free readiness check. Never imports torch/torchvision/mmcv/
     mmseg/numpy/PIL and never calls torch.load; checkpoint verification is
-    raw-byte SHA-256 only."""
+    raw-byte SHA-256 only; GT verification is path/metadata only -- never
+    opens or decodes a GT annotation file. `gt_root` is required and has no
+    default or environment-variable fallback: an operator must supply it
+    explicitly, exactly as `execute` already requires."""
     _require(mode in ("fresh", "resume", "finalize_only"), f"unknown mode: {mode!r}")
 
     import sys
@@ -156,6 +159,29 @@ def preflight(repo_root: Path, *, weight_dir: str, image_root: Path, output_root
     image_root = Path(image_root)
     missing_images = [i for i in discovery_ids if not (image_root / f"{i}.jpg").exists()]
     _require(not missing_images, f"missing discovery image files: {missing_images[:3]}{'...' if len(missing_images) > 3 else ''}")
+
+    gt_root = Path(gt_root)
+    _require(gt_root.exists(), f"gt_root does not exist: {gt_root}")
+    _require(gt_root.is_dir(), f"gt_root is not a directory: {gt_root}")
+    gt_checks = []
+    gt_problems = []
+    for image_id in discovery_ids:
+        gt_path = gt_root / f"{image_id}.png"
+        if not gt_path.exists():
+            gt_problems.append(f"{image_id}: missing ({gt_path})")
+            present = False
+        elif not gt_path.is_file():
+            gt_problems.append(f"{image_id}: exists but is not a regular file ({gt_path})")
+            present = False
+        else:
+            present = True
+        gt_checks.append({"image_id": image_id, "path": str(gt_path), "present": present})
+    _require(
+        not gt_problems,
+        f"invalid or missing discovery GT annotation paths ({len(gt_problems)} of 48): "
+        f"{gt_problems[:3]}{'...' if len(gt_problems) > 3 else ''} "
+        f"(each discovery image requires exactly gt_root/{{image_id}}.png)",
+    )
 
     checkpoint_checks = []
     for key, filename, expected_sha in _external_checkpoint_bindings():
@@ -182,6 +208,7 @@ def preflight(repo_root: Path, *, weight_dir: str, image_root: Path, output_root
         "discovery_image_count": len(discovery_ids),
         "discovery_id_prefix_sample": discovery_ids[:2],
         "checkpoint_checks": checkpoint_checks,
+        "gt_checks_count": len(gt_checks),
         "output_root": str(output_root),
         "authorizes": {
             "holdout": False, "full_96_image_study": False, "full_evaluation": False,

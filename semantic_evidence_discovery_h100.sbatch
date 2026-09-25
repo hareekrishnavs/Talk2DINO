@@ -128,6 +128,7 @@ echo "--- Step 1/3: torch-free preflight ---"
 "${PYTHON_BIN}" "${CLI}" preflight \
     --weight-dir "${DISCOVERY_WEIGHT_DIR}" \
     --image-root "${DISCOVERY_IMAGE_ROOT}" \
+    --gt-root "${DISCOVERY_GT_ROOT}" \
     --output-root "${DISCOVERY_OUTPUT_ROOT}" \
     --mode "${DISCOVERY_MODE}"
 
