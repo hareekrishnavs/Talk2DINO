@@ -1,0 +1,800 @@
+##############################################################################
+# semantic_evidence_discovery_execution_v1.toml
+#
+# TASK: FREEZE_48_IMAGE_SEMANTIC_EVIDENCE_DISCOVERY_EXECUTION_AUTHORITY
+#
+# Purpose (closed): convert the already-committed feasibility contract
+# (research_specs/semantic_evidence_feasibility_v1.toml), the already-
+# committed T320 source authority and isolated implementation, and the
+# independently verified real-model smoke result (job 22640114) into a
+# mechanical execution contract for exactly one bounded discovery-phase
+# experiment on the frozen 48-image discovery split.
+#
+# This authority does not implement anything. It binds every scientific
+# value it needs by exact path + SHA-256 to the predecessor contracts, and
+# duplicates critical values only alongside a mandatory runtime equality
+# check against the predecessor, never by restating a formula from memory
+# without that check.
+#
+# SCOPE: discovery-only. The locked 48-image holdout is out of scope for
+# this authority and for the future implementation it authorizes. A
+# discovery PASS authorizes only the creation of a later, separate holdout
+# authority -- never holdout execution, never the full 96-image gate
+# decision, never the 5,000-image validation set.
+##############################################################################
+
+[identity]
+schema_name = "semantic_evidence_discovery_execution_authority"
+schema_version = "1.0.0"
+created_at_utc = "2026-09-25T00:00:00Z"
+task = "FREEZE_48_IMAGE_SEMANTIC_EVIDENCE_DISCOVERY_EXECUTION_AUTHORITY"
+purpose = "bind the exact discovery-phase execution contract for the 48-image discovery split; authorize authority creation only, never execution"
+
+##############################################################################
+# 1. PREREQUISITE GATE
+##############################################################################
+
+[prerequisite]
+required_branch = "research/semantic-evidence-interventions"
+required_head = "87756d927331d994a70477b8eac8fa6e32d61c77"
+required_head_subject = "fix: normalize T320 interpolation layout"
+required_head_tree = "b13aa618faebda7f84e8dc46275eb1a611eca87a"
+working_tree_must_be_clean_at_freeze_time = true
+
+##############################################################################
+# 2. DEPENDENCY BINDINGS (every load-bearing committed file, by exact path
+#    and SHA-256, re-verified against `git show <required_head>:<path>` at
+#    load time -- never trusted from this table alone)
+##############################################################################
+
+[[dependency]]
+role = "feasibility_contract"
+path = "research_specs/semantic_evidence_feasibility_v1.toml"
+sha256 = "39edcae9d0927ec50c640576eb6d558e413558d16651f0398594d898bd19826f"
+must_be_committed_at_required_head = true
+reason = "source of every scientific formula, population, anchor/query rule, statistical design, and gate this authority inherits"
+
+[[dependency]]
+role = "feasibility_loader"
+path = "src/semantic_evidence_feasibility_identity.py"
+sha256 = "e95ef14d901b2b27911653fae4267bc74d668371c6e27adb1169ff117a3f2dd1"
+must_be_committed_at_required_head = true
+reason = "torch-free loader/validator for the feasibility contract and the 96-image manifest"
+
+[[dependency]]
+role = "feasibility_tests"
+path = "tests/test_semantic_evidence_feasibility_identity.py"
+sha256 = "3e1369523857c456e023b33e080695eef7174b5fc3f73cf38dc135cf345d4681"
+must_be_committed_at_required_head = true
+reason = "predecessor regression coverage for the feasibility contract"
+
+[[dependency]]
+role = "feasibility_docs"
+path = "docs/semantic_evidence_feasibility_protocol.md"
+sha256 = "462a393591d5be78b1157ae63c75502f3fbc85cb517116e29072c542b0c5b70a"
+must_be_committed_at_required_head = true
+reason = "prose explanation this authority's own documentation must remain consistent with"
+
+[[dependency]]
+role = "population_manifest"
+path = "evaluation_subsets/semantic_evidence_feasibility_96.json"
+sha256 = "e5a9ba7c9f8e4b9ea71ed5195f69e45f93eb0ee13e3f6aa893cb13d1d6e31062"
+must_be_committed_at_required_head = true
+reason = "the frozen, ordered 96-image (48 discovery / 48 locked_holdout) population this authority's execution_population is drawn from"
+
+[[dependency]]
+role = "t320_source_authority"
+path = "research_specs/semantic_evidence_t320_source_v1.toml"
+sha256 = "777821c6565861337d72e19bab46a8c15f7b41a70def12fabea522c56d27a48c"
+must_be_committed_at_required_head = true
+reason = "binds the exact historical graph/recurrence/geometry/interpolation/stitching/prediction source this authority's T320 target inherits; this is the required_successor_action the feasibility contract's [propagation_target_authority] anticipated"
+
+[[dependency]]
+role = "t320_source_manifest"
+path = "research_specs/semantic_evidence_t320_source_manifest_v1.json"
+sha256 = "843f79528bab5f4f6f56a9d17640ab05918e8f22b98388cf01aad28d4c58c983"
+must_be_committed_at_required_head = true
+reason = "canonical, digest-bound closure of the 7 historical T320 source files the T320 source authority binds"
+
+[[dependency]]
+role = "e3_adapter"
+path = "src/semantic_evidence_e3_adapter.py"
+sha256 = "81b2e4c600e7c0c9ad48fee6a45f1d1aaff42338b27d9a35d49d73790686d2c5"
+must_be_committed_at_required_head = true
+reason = "isolated, single-forward E3 window extraction interface this authority's T0/T320 target generation must reuse unmodified"
+
+[[dependency]]
+role = "t320_implementation"
+path = "src/semantic_evidence_t320.py"
+sha256 = "27d5761a9d2e6efaf6828e44a1ae1d791a58d569a5ab1e9c72d52400d3269409"
+must_be_committed_at_required_head = true
+reason = "isolated T0/T320 target generator (graph, recurrence, internal upsample, stitching, finalize_prediction), independently verified real-model-correct by job 22640114; this exact hash is the repaired (contiguity-fixed) version"
+
+[[dependency]]
+role = "e3_adapter_tests"
+path = "tests/test_semantic_evidence_e3_adapter.py"
+sha256 = "0425e59930ed262add7902a108090b8670fe79a8503bd12d697c58d78f78e5c1"
+must_be_committed_at_required_head = true
+reason = "predecessor regression coverage for the E3 adapter"
+
+[[dependency]]
+role = "t320_implementation_tests"
+path = "tests/test_semantic_evidence_t320.py"
+sha256 = "50cda89b6735464cac8df013dad21c3c0fc5c331e0315989926875a75616eb44"
+must_be_committed_at_required_head = true
+reason = "predecessor regression coverage for the T320 implementation, including the contiguity repair regression tests"
+
+[[dependency]]
+role = "t320_implementation_docs"
+path = "docs/semantic_evidence_t320_implementation.md"
+sha256 = "ba77ffb22df21331ace5090584017283c7407bdc1ab07d588ab949c41b0354f7"
+must_be_committed_at_required_head = true
+reason = "prose implementation and repair-history record for the isolated T320 module"
+
+[[dependency]]
+role = "smoke_authority"
+path = "research_specs/semantic_evidence_t320_real_smoke_v1.toml"
+sha256 = "28dbaf6d6ba2a45fa344010f5945d6ad06bdd38b0c2819ac79608a147eb80919"
+must_be_committed_at_required_head = true
+reason = "authority that produced and validated job 22640114's real E3/T320 integration smoke"
+
+[[dependency]]
+role = "smoke_authority_loader"
+path = "src/semantic_evidence_t320_real_smoke_identity.py"
+sha256 = "a00955da1e33e1fc6c4a42ebb3ce69615e43d8da67b3c4651c3c21fd2d2b3c09"
+must_be_committed_at_required_head = true
+reason = "torch-free loader/validator for the smoke authority and its installed result"
+
+[[dependency]]
+role = "smoke_runner"
+path = "src/semantic_evidence_t320_real_smoke.py"
+sha256 = "e7f9f0517488d03a7bdeffb608e0f3c484ec06e94416f66deb837436a0cae709"
+must_be_committed_at_required_head = true
+reason = "the runner that produced job 22640114's installed smoke_result.json"
+
+[[dependency]]
+role = "smoke_cli"
+path = "diagnostics/run_semantic_evidence_t320_real_smoke.py"
+sha256 = "47b28ef983a0863d6f158f60f574be667a1b6ca6f0e33217f48b27c0ae9290e8"
+must_be_committed_at_required_head = true
+reason = "the CLI that drove job 22640114"
+
+[[dependency]]
+role = "smoke_launcher"
+path = "semantic_evidence_t320_real_smoke_h100.sbatch"
+sha256 = "2b977d089c8095731ca4b18e79c3dc2044773e136eeef55fa35cb50ff4fe6073"
+must_be_committed_at_required_head = true
+reason = "the launcher that submitted job 22640114; the future discovery launcher must follow its resource-boundary precedent"
+
+[[dependency]]
+role = "smoke_two_image_manifest"
+path = "evaluation_subsets/semantic_evidence_t320_real_smoke_2.json"
+sha256 = "dd1d0709198b3c018ba5fb27d6766ed0373a460885b49cd753331fc1b6eea6a2"
+must_be_committed_at_required_head = true
+reason = "the exact two images job 22640114 processed; both are rank-0/rank-1 discovery images, independently confirming the discovery split is real-model-executable"
+
+##############################################################################
+# 3. SMOKE PREREQUISITE (external evidence binding, not a repository file)
+##############################################################################
+
+[smoke_prerequisite]
+job_id = "22640114"
+execution_head = "87756d927331d994a70477b8eac8fa6e32d61c77"
+execution_tree = "b13aa618faebda7f84e8dc46275eb1a611eca87a"
+result_path = "/scratch/haree/semantic_evidence_interventions/t320_real_smoke_20260925T020626Z/smoke_result.json"
+result_sha256 = "28720acb6b33ffcccaacd43a4538d30d532aab5b37eb354975eed67d5c356f5f"
+result_schema_name = "semantic_evidence_t320_real_smoke_result"
+result_schema_version = "1.0.0"
+outcome_required = "PASS_REAL_E3_T320_INTEGRATION_SMOKE"
+public_verification_required = true
+path_disclosure_is_operational_not_scientific_identity = true
+scientific_smoke_status = "PASS"
+smoke_profiling_status = "NOT_AUTHORITY_FOR_RUNTIME_OR_THROUGHPUT_CLAIMS"
+smoke_profiling_defects = [
+    "missing torch.cuda.synchronize() immediately before and after every measured GPU region, despite the smoke telemetry_contract requiring it",
+    "missing torch.cuda.reset_peak_memory_stats() at the frozen reset point, despite the smoke telemetry_contract requiring it",
+    "graph_construction_wall_time_ns and recurrence_wall_time_ns are an arbitrary 50/50 split of one combined timer, not independent measurements",
+    "stitching_finalization_wall_time_ns and artifact_validation_install_wall_time_ns are hardcoded to 0, never measured",
+    "gpu_model, cuda_runtime_version, and cuda_driver_version are hardcoded empty strings, never queried",
+]
+smoke_profiling_defects_repair_authorized_by_this_task = false
+smoke_profiling_defects_inherited_by_this_authority = false
+smoke_rerun_authorized = false
+
+[smoke_prerequisite.scientific_facts_required]
+m = 2
+n = 4
+r = 2
+t0_bitwise_preservation_all_windows = true
+t0_t320_repeat_determinism = true
+counts_match = true
+non_finite_counts_all_zero = true
+gt_accessed = false
+interventions_executed = false
+
+##############################################################################
+# 4. POPULATION (discovery-only execution scope)
+##############################################################################
+
+[population]
+source_manifest_role = "population_manifest"
+namespace = "talk2dino-semantic-evidence-feasibility-v1"
+total_selected_count = 96
+discovery_count = 48
+locked_holdout_count = 48
+discovery_holdout_overlap = 0
+discovery_rank_range = [0, 47]
+locked_holdout_rank_range = [48, 95]
+canonical_source_digest = "e1cc220cde76f9a1fc39aff5b5f8c0b128de8b071602e6d57f262697116e2906"
+selected_record_digest = "26d4716147ae28b64a091a184bcab1ce4ce04a3f13243708e57fe7301fa7a13d"
+discovery_digest = "b63139733c97508ee5b6272069cf466257e829c59f5d73694fd2599d56d2f1a6"
+locked_holdout_digest = "c3931d1e12b62af10839d693cac29bac25b166e448265c54b066cff5b8110592"
+digest_definition = "SHA256 of the ASCII bytes of each canonical_image_id followed by a single 0x0A byte, concatenated in the stated order; see [population_selection.digest_serialization] in the feasibility contract"
+execution_population = "discovery_only"
+smoke_images_are_discovery_rank_0_and_1 = true
+smoke_images_confirm_discovery_split_is_real_model_executable = true
+
+[population.holdout_protection]
+holdout_ids_bound_by_digest_only_in_this_authority = true
+holdout_ids_not_enumerated_in_this_document = true
+future_runner_must_accept_only_discovery_ids = true
+future_runner_prohibited_selectable_populations = [
+    "the locked 48-image holdout",
+    "all 96 images",
+    "any other subset",
+    "arbitrary image IDs",
+    "a max-images/debug subset",
+    "confirmation images",
+    "the complete 5,000-image validation set",
+]
+
+##############################################################################
+# 5. SCIENTIFIC INHERITANCE (every field below is bound to an exact
+#    predecessor table/key; the loader must load the predecessor TOML fresh
+#    and assert equality for every duplicated value -- it must never trust
+#    this table alone)
+##############################################################################
+
+[scientific_inheritance]
+predecessor = "feasibility_contract"
+inheritance_rule = "no new feature, normalization, query, intervention, anchor, model, metric, gate, or threshold may be introduced; every value below must equal the predecessor's own value at load time"
+
+[scientific_inheritance.e3_geometry]
+predecessor_table = "e3_geometry"
+resize_dim_pixels = 448
+patch_size_pixels = 14
+patch_grid_side = 32
+crop_size_pixels = [448, 448]
+stride_pixels = [224, 224]
+border_excluded_patch_rings = 1
+eligible_grid_range = [1, 30]
+tie_behavior = "lowest class index"
+pamr_active = false
+
+[scientific_inheritance.anchor_selection]
+predecessor_table = "anchor_selection"
+target_anchors_per_window = 8
+strata = ["boundary_low", "boundary_high", "interior_low", "interior_high"]
+anchors_per_stratum = 2
+queries_per_anchor = 2
+gt_or_correctness_forbidden_in_selection = true
+
+[scientific_inheritance.interventions]
+predecessor_table = "interventions"
+views = ["ORIGINAL", "CONTEXT_BLURRED", "REGION_BLURRED", "AREA_MATCHED_CONTROL"]
+view_count = 4
+core_patch_count = 9
+core_pixel_size = [42, 42]
+
+[scientific_inheritance.gaussian_blur]
+predecessor_table = "gaussian_blur"
+source = "torchvision.transforms.functional.gaussian_blur"
+kernel_size = [31, 31]
+sigma = [8.0, 8.0]
+padding_mode = "reflect"
+deterministic = true
+
+[scientific_inheritance.scores]
+predecessor_table = "scores.formulas"
+formula_names = [
+    "s_original_q", "s_context_q", "s_region_q", "s_control_q",
+    "context_change_q", "region_drop_q", "control_change_q",
+    "context_stability_q", "specific_region_drop_q", "region_necessity_q",
+    "intervention_reliability_q",
+]
+intervention_reliability_range = [0.0, 1.0]
+validity_predecessor_table = "scores.validity"
+input_finiteness_required = true
+input_range_required = [-1.0, 1.0]
+output_finiteness_required = true
+output_range_required = [0.0, 1.0]
+input_failure_prohibited_actions = ["clamp", "impute", "replace_with_default", "silently_launder_into_a_finite_output"]
+
+[scientific_inheritance.controls]
+predecessor_table = "control"
+count = 8
+ids = [1, 2, 3, 4, 5, 6, 7, 8]
+control_7_status = "NOT_AVAILABLE_IN_E3"
+control_7_used_by_any_task = false
+
+[scientific_inheritance.statistics]
+predecessor_table = "statistics"
+task_identifiers = ["query_correctness", "propagation_outcome"]
+model_settings_predecessor_table = "statistics.model_settings"
+estimator = "logistic_regression"
+C = 1.0
+penalty = "l2"
+class_weight = "balanced"
+solver = "liblinear"
+max_iter = 1000
+random_state = 0
+hyperparameter_search = false
+standardization = "fit on discovery ROWS of the model's own task/row-population only"
+
+[scientific_inheritance.model_fits]
+predecessor_table = "statistics.model_fits"
+count = 4
+ids = [1, 2, 3, 4]
+fit_partition = "discovery"
+evaluate_partition = "locked_holdout"
+
+[scientific_inheritance.bootstrap]
+predecessor_table = "statistics.bootstrap"
+resample_unit = "locked_holdout image"
+replicates = 10000
+seed = 0
+interval_type = "percentile"
+confidence_level = 0.95
+paired = true
+refit_inside_replicates = false
+min_valid_replicate_fraction = 0.90
+
+[scientific_inheritance.gt_targets]
+predecessor_table = "gt_targets.primary_correctness"
+ignore_gt_value = 255
+min_valid_footprint_fraction = 0.75
+min_majority_share = 0.80
+ambiguous_label = "AMBIGUOUS_GT"
+propagation_outcome_predecessor_table = "gt_targets.propagation_outcome"
+propagation_categories = ["beneficial", "harmful", "unchanged_correct", "changed_but_same_correctness", "unchanged_incorrect"]
+
+##############################################################################
+# 6. T0/T320 TARGET AUTHORITY
+##############################################################################
+
+[t0_t320_target_authority]
+t0_predecessor_table = "propagation_target_authority.t0_definition"
+t0_status = "BOUND_TO_COMMITTED_E3_UNARY_INFERENCE"
+t0_reuses = "e3_adapter dependency, unmodified"
+t320_status_in_feasibility_contract = "DEFERRED_REQUIRES_SUCCESSOR_AUTHORITY"
+t320_required_successor_action = "freeze exact graph construction, recurrence, stitching, prediction extraction, source commit, source paths, and SHA-256 bindings"
+t320_required_successor_action_fulfilled_by = ["t320_source_authority", "t320_implementation", "smoke_prerequisite"]
+t320_status_under_this_authority = "BOUND_AND_INDEPENDENTLY_SMOKE_VERIFIED"
+t320_status_supersedes_feasibility_contract_deferred_flag = false
+t320_status_supersedes_note = "this authority does not and cannot edit the feasibility contract's own DEFERRED flag (that file is closed); it instead asserts, as its own new fact, that the required_successor_action the feasibility contract names has now been fulfilled by the three dependencies listed above, and binds T320 on that basis for THIS authority's own scope only"
+
+[t0_t320_target_authority.frozen_constants]
+k = 12
+alpha = 0.98
+affinity_power = 3.0
+steps = 320
+directed_row_stochastic_graph = true
+stable_neighbor_tie_breaking = true
+recurrence_input = "raw pre-sigmoid S0"
+early_stopping = false
+internal_sigmoid_count = 1
+internal_interpolation_mode = "bilinear"
+internal_align_corners = true
+contiguous_grid_before_sigmoid_interpolation = true
+final_interpolation_mode = "bilinear"
+final_align_corners = false
+prediction_rule = "torch.argmax(dim=1)"
+
+[t0_t320_target_authority.modification_boundary]
+e3_adapter_modification_authorized = false
+t320_implementation_modification_authorized = false
+reimplementation_of_graph_recurrence_interpolation_stitching_finalization_authorized = false
+future_runner_must_reuse_directly = true
+
+##############################################################################
+# 7. DISCOVERY EXPERIMENT UNIT STRUCTURE
+##############################################################################
+
+[discovery_unit_structure]
+intervention_view_count = 4
+intervention_view_ids_in_order = ["ORIGINAL", "CONTEXT_BLURRED", "REGION_BLURRED", "AREA_MATCHED_CONTROL"]
+anchors_per_accepted_window = 8
+queries_per_accepted_anchor = 2
+
+[discovery_unit_structure.query_correctness_task]
+predecessor_table = "statistics.tasks.query_correctness"
+unit_of_analysis = "anchor_query"
+rows_per_accepted_anchor = 2
+computable_from_discovery_features = true
+eligibility = "AMBIGUOUS_GT anchors excluded"
+model_fit_ids = [1, 2]
+
+[discovery_unit_structure.propagation_outcome_task]
+predecessor_table = "statistics.tasks.propagation_outcome"
+unit_of_analysis = "anchor"
+rows_per_eligible_anchor = 1
+query_used = "q1"
+computable_from_discovery_features = true
+note = "row materialization for this task requires T320, now bound by [t0_t320_target_authority]; it does NOT require holdout access -- discovery-side rows and discovery-side model FITTING are in scope for this authority; holdout-side EVALUATION of these fits is not"
+model_fit_ids = [3, 4]
+no_query_2_leakage_required = true
+
+[discovery_unit_structure.logistic_fits]
+count = 4
+fit_ids = [1, 2, 3, 4]
+fit_partition_for_all_four = "discovery"
+evaluate_partition_for_all_four = "locked_holdout"
+evaluate_partition_out_of_scope_for_this_authority = true
+refit_inside_bootstrap_authorized = false
+rejected_or_invalid_anchor_handling = "recorded per [scores.validity]/[interventions.AREA_MATCHED_CONTROL].no_valid_control_behavior; never silently dropped"
+non_finite_rejection_policy = "per [scores.validity].input_failure_behavior: STRUCTURALLY_INVALID, counted, never clamped/imputed/defaulted"
+
+##############################################################################
+# 8. GT ISOLATION (two-phase boundary)
+##############################################################################
+
+[gt_isolation_boundary]
+predecessor_table = "gt_isolation"
+gt_affects_intervention_reliability = false
+gt_affects_selection = false
+
+[gt_isolation_boundary.phase_a_gt_free]
+steps = [
+    "load image",
+    "construct windows",
+    "run E3 exactly once per window",
+    "capture reusable E3 snapshot",
+    "generate T0/T320 predictions",
+    "select anchors without GT",
+    "select queries without GT",
+    "generate intervention views without GT",
+    "compute raw and derived intervention features without GT",
+    "persist and validate GT-free feature rows/digests",
+]
+gt_accessible_during_phase_a = false
+
+[gt_isolation_boundary.phase_b_gt_dependent]
+steps = [
+    "open GT only after Phase A for the image is complete and immutable",
+    "compute query-correctness labels",
+    "compute T0/T320 correctness relations",
+    "assign the frozen propagation-outcome category",
+    "accumulate the frozen statistical tables",
+]
+gt_may_open_only_after_phase_a_complete = true
+
+[gt_isolation_boundary.digest_separation]
+gt_free_feature_digest_required = true
+gt_dependent_label_digest_required = true
+gt_mutation_must_not_change_gt_free_feature_digest = true
+gt_must_not_affect = [
+    "image selection", "window selection", "anchor selection",
+    "query selection", "intervention construction", "confidence features",
+    "intervention-reliability features", "any T0/T320 tensor", "any prediction",
+]
+
+##############################################################################
+# 9. ONE-FORWARD AND REUSE CONTRACT
+##############################################################################
+
+[one_forward_reuse_contract]
+one_real_e3_forward_per_canonical_source_window = true
+one_e3_snapshot_per_canonical_source_window = true
+t0_and_t320_reuse_that_snapshot = true
+intervention_processing_reuses_frozen_feature_scoring_boundary = true
+accidental_second_backbone_forward_prohibited_for = ["T0", "T320", "repeated statistics", "checkpoint recovery"]
+candidate_specific_t320_recurrence_prohibited = true
+masked_forward_component_provenance_path_prohibited = true
+balp_path_prohibited = true
+cgls_rwr_path_prohibited = true
+pamr_path_prohibited_unless_explicit = true
+pamr_explicitly_included_by_predecessor = false
+additional_model_evaluations_for_interventions = "each of the 3 non-ORIGINAL intervention views (CONTEXT_BLURRED, REGION_BLURRED, AREA_MATCHED_CONTROL) requires its own E3 forward per accepted anchor, per predecessor [region]/[interventions]; these are intervention-view forwards, authorized and counted separately from the one canonical-window forward above, and must never be classified as a reused forward"
+invented_caching_policy_prohibited = true
+
+##############################################################################
+# 10. ARTIFACT CONTRACT (closed schemas; JSON + sibling NPZ arrays permitted)
+##############################################################################
+
+[artifact_contract]
+physical_representation = "JSON metadata plus sibling NPZ feature/label arrays"
+independently_verifiable_without_importing_the_real_model = true
+smoke_profiling_included_as_scientific_field = false
+detailed_runtime_profiling_required_for_discovery_decision = false
+job_elapsed_time_status = "operational metadata only, labeled non-scientific, must not enter any gate"
+
+[artifact_contract.checkpoint_metadata]
+schema_name = "semantic_evidence_discovery_checkpoint"
+schema_version = "1.0.0"
+required_fields = [
+    "schema", "complete", "final", "mode", "discovery_image_count",
+    "completed_image_ids_ordered", "completed_image_prefix_digest",
+    "identity_and_dependency_bindings", "checkpoint_array_hashes",
+]
+
+[artifact_contract.gt_free_features]
+schema_name = "semantic_evidence_discovery_gt_free_features"
+schema_version = "1.0.0"
+required_fields = [
+    "schema", "image_id", "window_ids_ordered", "anchor_ids_ordered",
+    "query_ranks", "intervention_view_scores", "control_features",
+    "intervention_reliability", "structural_validity_flags", "gt_free_feature_digest",
+]
+
+[artifact_contract.gt_dependent_labels]
+schema_name = "semantic_evidence_discovery_gt_dependent_labels"
+schema_version = "1.0.0"
+required_fields = [
+    "schema", "image_id", "query_correctness_labels", "propagation_outcome_categories",
+    "ambiguous_gt_anchor_ids", "gt_dependent_label_digest",
+]
+
+[artifact_contract.final_result]
+schema_name = "semantic_evidence_discovery_result"
+schema_version = "1.0.0"
+required_fields = [
+    "schema", "complete", "final", "identity_and_dependency_bindings",
+    "population_binding", "implementation_binding",
+    "discovery_image_ids_ordered", "gt_free_feature_digest",
+    "gt_dependent_label_digest", "scientific_collection_digest",
+    "model_fit_summaries", "primary_metrics", "bootstrap_intervals",
+    "gate_inputs", "gate_pass_fail", "final_frozen_outcome",
+    "holdout_accessed", "full_evaluation_accessed",
+]
+
+[artifact_contract.decision_document]
+schema_name = "semantic_evidence_discovery_decision"
+schema_version = "1.0.0"
+required_fields = [
+    "schema", "gate_a_discovery_side", "gate_e_discovery_side",
+    "gate_b_status", "gate_c_status", "gate_d_status",
+    "overall_gates_outcome_status", "discovery_decision", "next_step",
+]
+
+[artifact_contract.closed_schema_requirements]
+unknown_keys_rejected = true
+missing_keys_rejected = true
+nested_mappings_closed = true
+strict_scalar_container_types = true
+boolean_as_integer_rejected = true
+nan_infinity_rejected = true
+duplicate_ids_rejected = true
+wrong_population_order_rejected = true
+unknown_model_metric_gate_id_rejected = true
+
+##############################################################################
+# 11. CHECKPOINT / RESUME / ATOMICITY LIFECYCLE
+##############################################################################
+
+[lifecycle_contract]
+modes = ["fresh", "resume", "finalize_only"]
+overwrite_prohibited = true
+force_mode_prohibited = true
+completed_id_prefix_validation_exact = true
+zero_reprocessing_of_completed_images = true
+checkpoint_arrays_hash_bound_to_checkpoint_metadata = true
+staged_write_required = true
+staged_reopen_and_validation_required = true
+atomic_installation_method = "atomic directory rename"
+post_install_reopen_required = true
+public_reverification_required = true
+no_success_before_post_install_verification = true
+no_orphaned_temporary_files = true
+previous_valid_generation_preserved_on_failure = true
+resume_must_not_alter_scientific_content = true
+
+[lifecycle_contract.determinism_identity]
+requirement = "for all scientific digests and final decision fields: clean fresh execution == interrupted execution + resume == complete-but-unfinalized + finalize-only"
+
+[lifecycle_contract.scope]
+elaborate_generation_system_beyond_48_image_run_prohibited = true
+
+##############################################################################
+# 12. STATISTICAL EXECUTION CONTRACT (inherited exactly; see section 5)
+##############################################################################
+
+[statistical_execution_contract]
+predecessor_table = "statistics"
+adaptive_thresholds_prohibited = true
+tuning_on_discovery_outcomes_prohibited_unless_predecessor_defines_it = true
+predecessor_defines_tuning_on_discovery_outcomes = false
+holdout_inspection_during_discovery_fitting_or_evaluation_prohibited = true
+degenerate_discovery_sample_behavior = "fail closed to the predecessor-defined stop outcome (INCONCLUSIVE, per [gates.outcome].inconclusive_handling)"
+minimum_data_requirements_predecessor_table = "statistics.minimum_data_requirements"
+min_eligible_query_correctness_rows_discovery = 500
+
+##############################################################################
+# 13. GATE AND DECISION CONTRACT
+##############################################################################
+# Every one of Gates B, C, D and the overall [gates.outcome] proceed/stop
+# decision structurally requires locked_holdout evaluation
+# ([gates.B]/[gates.C].*_holdout, [gates.D].rule comparing model pairs on the
+# same evaluated population as B/C, [statistics.fit_evaluate].evaluate_partition
+# = "locked_holdout"). Holdout access is out of scope for this authority.
+# Therefore this authority freezes Gates A and E as discovery-side-computable
+# now, and freezes B, C, D, and the overall outcome as NOT_COMPUTABLE_WITHOUT_HOLDOUT
+# -- never silently PASSed, SKIPped, or assumed. This is the same
+# computable_under_this_contract pattern the feasibility contract itself
+# already uses for Gate C pending T320 binding, extended to the new reason.
+
+[gate_contract]
+predecessor_table = "gates"
+use_predecessor_outcome_strings_exactly = true
+proceed_value = "PROCEED_TO_DEPLOYABLE_SIGNAL_SPECIFICATION"
+stop_value = "STOP_SEMANTIC_EVIDENCE_INTERVENTION_TRACK"
+inconclusive_handling = "INCONCLUSIVE counts as STOP for this bounded project, UNLESS caused by a mechanical implementation defect repairable without changing population or scientific definition"
+post_hoc_threshold_changes_authorized = false
+
+[gate_contract.A]
+name = "intervention_validity"
+predecessor_table = "gates.A"
+min_structural_validity_fraction = 0.95
+max_gt_dependent_intervention_records = 0
+max_non_finite_scores = 0
+reliability_range = [0.0, 1.0]
+computable_under_this_contract = true
+computed_over = "discovery-phase generated records only (48 images); the same Gate A is independently re-evaluated over locked_holdout by a future successor holdout authority before the overall [gates.outcome] decision is reached"
+
+[gate_contract.B]
+name = "query_correctness_information"
+predecessor_table = "gates.B"
+min_auroc_improvement_holdout = 0.03
+paired_bootstrap_95_lower_bound_required = "> 0"
+computable_under_this_contract = false
+computable_note = "requires locked_holdout evaluation ([gates.B].auroc_improvement_definition explicitly evaluates on locked_holdout anchor_query rows); out of scope for this discovery-only authority; model fits 1/2 ARE fit on discovery by this authority, but their holdout evaluation is deferred"
+status = "NOT_COMPUTABLE_WITHOUT_HOLDOUT"
+
+[gate_contract.C]
+name = "propagation_outcome_information"
+predecessor_table = "gates.C"
+min_auroc_improvement_holdout = 0.03
+paired_bootstrap_95_lower_bound_required = "> 0"
+computable_under_this_contract = false
+computable_note = "T320 is now bound (see [t0_t320_target_authority]), resolving the feasibility contract's original blocking reason; Gate C nonetheless still requires locked_holdout evaluation and remains out of scope for this discovery-only authority; model fits 3/4 ARE fit on discovery by this authority, but their holdout evaluation is deferred"
+status = "NOT_COMPUTABLE_WITHOUT_HOLDOUT"
+
+[gate_contract.D]
+name = "subgroup_sanity"
+predecessor_table = "gates.D"
+subgroups = ["predicted_boundary_vs_interior", "thing_vs_stuff_gt_category", "low_vs_high_unary_margin"]
+min_subgroup_size_for_check = 100
+max_negative_auroc_difference = -0.01
+computable_under_this_contract = false
+computable_note = "the rule compares AUROC differences on the same evaluated population as Gates B/C, i.e. locked_holdout; out of scope for this discovery-only authority"
+status = "NOT_COMPUTABLE_WITHOUT_HOLDOUT"
+
+[gate_contract.E]
+name = "compute_feasibility"
+predecessor_table = "gates.E"
+max_h100_hours_96_image_feasibility_run = 2.0
+max_h100_hours_1000_image_projection = 8.0
+projection_formula_and_uncertainty_disclosure_required = true
+deployment_runtime_claim_authorized = false
+computable_under_this_contract = true
+computed_over = "discovery-phase (48-image) Slurm elapsed time only, projected; job elapsed time is operational metadata per [artifact_contract], never a scientific field, and the smoke's own profiling defects (see [smoke_prerequisite]) must not be inherited into this projection's methodology"
+
+[gate_contract.outcome]
+overall_status = "PENDING_HOLDOUT_EVALUATION"
+overall_status_reachable_by_this_authority = false
+discovery_decision_values = ["DISCOVERY_FEATURES_READY_FOR_HOLDOUT_AUTHORITY", "DISCOVERY_STOP_GATE_A_FAILED", "DISCOVERY_INCONCLUSIVE"]
+discovery_decision_definition = "DISCOVERY_FEATURES_READY_FOR_HOLDOUT_AUTHORITY iff Gate A passes on discovery-side records AND Gate E passes on the discovery-side compute projection AND all four model fits complete without a degenerate-sample stop; DISCOVERY_STOP_GATE_A_FAILED iff Gate A fails; DISCOVERY_INCONCLUSIVE iff a degenerate discovery sample or Gate E failure occurs"
+discovery_decision_is_not_the_predecessor_gates_outcome = true
+discovery_pass_authorizes_only = "creation of a successor holdout authority"
+discovery_pass_does_not_authorize = ["holdout execution", "the full 96-image gate decision", "any accuracy or mIoU claim", "any paper claim"]
+discovery_stop_ends_research_direction_under_frozen_hypothesis = true
+
+##############################################################################
+# 14. COMPUTE AND RESOURCE BOUNDARY
+##############################################################################
+
+[resource_contract]
+inherits_compute_ceiling_from = "gates.E in the feasibility contract"
+larger_budget_prohibited = true
+gpu_type = "H100"
+gpu_count = 1
+gpu_memory_gb = 80
+precedent = "smoke_launcher dependency (semantic_evidence_t320_real_smoke_h100.sbatch)"
+profiling_scope = "out of scope; only Slurm elapsed time retained as non-scientific operational metadata (see [artifact_contract])"
+stage_level_profiling_requirement_introduced = false
+
+[resource_contract.prohibited]
+multi_gpu_execution = true
+alternate_gpu_type = true
+login_node_execution = true
+distributed_execution = true
+training = true
+parameter_updates = true
+full_96_image_execution = true
+holdout_execution = true
+full_5000_image_execution = true
+arbitrary_subset_execution = true
+overwrite_force = true
+launcher_self_submission = true
+
+[resource_contract.this_task]
+submits_anything = false
+
+##############################################################################
+# 15. AUTHORIZATION STATE
+##############################################################################
+
+[authorization.current_task]
+authority_creation_authorized = true
+implementation_in_this_task = false
+dataset_access_in_this_task = false
+gt_access_in_this_task = false
+model_construction_in_this_task = false
+checkpoint_loading_in_this_task = false
+cuda_initialization_in_this_task = false
+gpu_submission_in_this_task = false
+discovery_execution_in_this_task = false
+
+[authorization.successor_implementation]
+discovery_runner_implementation_authorized_after_commit = true
+cli_implementation_authorized_after_commit = true
+launcher_implementation_authorized_after_commit = true
+
+[authorization.future_execution_conditions]
+requires_this_authority_independently_verified_pass = true
+requires_this_authority_committed = true
+requires_discovery_implementation_independently_verified_pass = true
+requires_discovery_implementation_committed = true
+requires_committed_head_production_readiness_pass = true
+requires_operator_explicit_job_submission = true
+
+[authorization.frozen_flags]
+discovery_execution_authorized_now = false
+holdout_execution_authorized = false
+full_96_image_execution_authorized = false
+full_5000_image_execution_authorized = false
+training_authorized = false
+scientific_kernel_modification_authorized = false
+e3_modification_authorized = false
+t320_modification_authorized = false
+smoke_rerun_authorized = false
+
+##############################################################################
+# 16. AUTHORIZED FUTURE IMPLEMENTATION FILES
+##############################################################################
+
+[future_implementation_files]
+paths = [
+    "src/semantic_evidence_intervention_features.py",
+    "src/semantic_evidence_discovery_execute.py",
+    "diagnostics/run_semantic_evidence_discovery.py",
+    "semantic_evidence_discovery_h100.sbatch",
+    "tests/test_semantic_evidence_intervention_features.py",
+    "tests/test_semantic_evidence_discovery_execute.py",
+    "docs/semantic_evidence_discovery_run.md",
+]
+collision_checked_at_freeze_time = true
+collision_found = false
+no_other_new_production_file_authorized = true
+modification_of_existing_scientific_files_authorized = false
+this_task_creates_none_of_these_files = true
+
+##############################################################################
+# 17. FILES CREATED BY THIS TASK
+##############################################################################
+
+[this_authoritys_own_files]
+toml_path = "research_specs/semantic_evidence_discovery_execution_v1.toml"
+identity_loader_path = "src/semantic_evidence_discovery_execution_identity.py"
+identity_tests_path = "tests/test_semantic_evidence_discovery_execution_identity.py"
+docs_path = "docs/semantic_evidence_discovery_execution.md"
+exactly_four_files_authorized = true
+no_existing_file_modification_authorized = true
+
+##############################################################################
+# 18. END OF FROZEN AUTHORITY
+##############################################################################
+
+[closure]
+complete = true
+final = true
+self_referential_hash_created = false
