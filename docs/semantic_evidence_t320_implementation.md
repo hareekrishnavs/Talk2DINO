@@ -340,6 +340,50 @@ ordering changed, and the fixed-canvas preprocessing step removed from
 the test fixture's fake model all independently confirmed to make the new
 tests fail for the intended reason).
 
+## Repair note (internal-upsample reconstructed-grid contiguity)
+
+The next real submission after the geometry repair above (job 22611384,
+first job to reach RUNNING) failed the real smoke runner's own same-forward
+T0-preservation cross-check: `internal_upsample(snapshot.s0, ...)` did not
+`torch.equal` the adapter's own `ordinary_mask_output` for the same window,
+despite both being nominally the same computation. Diagnosed (a separate,
+prior read-only task) as a genuine CPU-reproducible PyTorch behavior, not a
+GPU/CUDA/autocast/TF32 effect (confirmed none exist in this pipeline):
+`internal_upsample` reconstructs the flat `S0`/propagated score tensor
+(`[N, C]`) back to `[1, C, grid_h, grid_w]` via
+`patch_scores.permute(1, 0).reshape(...)`. Because a reshape of a
+transposed tensor's trailing dimension is representable as a strided VIEW
+here (no copy), the reconstructed grid carries non-standard strides even
+though its values already exactly equal the authoritative source's
+naturally-contiguous simmap. `F.interpolate`'s bilinear kernel is not
+guaranteed bit-exact across differently-strided-but-value-identical inputs,
+so the two nominally-equal computation paths could diverge by a handful of
+ULPs on a large minority of output elements. Repaired by inserting a single
+`.contiguous()` call on the reconstructed grid immediately after the
+reshape and before `torch.sigmoid`, changing no value, formula, or
+constant -- only memory layout. Confirmed via a direct discriminating
+experiment (an independently-written, naturally-contiguous reference path)
+that this restores strict `torch.equal` bitwise equality at the real
+32x32x171 grid scale for both real smoke image output sizes as well as at
+non-square grid scales, non-contiguous inputs, and float16/float64 dtypes,
+and via disposable-copy mutation checks (the original defect reinstated,
+contiguity applied to an unhelpful intermediate tensor instead, and other
+unrelated single-line mutations) that the new regression tests correctly
+detect the defect. The T320 branch (`propagate_t320`'s output, likewise
+fed through the same `internal_upsample`) shares the identical fix
+automatically, since both the T0 and T320 targets are produced by this one
+function -- confirmed the T320 branch's own reconstructed grid was equally
+exposed to the same non-contiguous-view defect and is resolved identically
+by the same single `.contiguous()` call, without requiring or receiving
+any separate change. `stitch_windows` and `finalize_prediction` were
+audited and found not to carry a comparable risk: `stitch_windows`
+accumulates into a freshly-allocated `torch.zeros` buffer via in-place
+slice assignment, which is always naturally contiguous regardless of its
+input windows' own layout (confirmed empirically, including bitwise
+identity of the stitched output whether or not the input windows were
+contiguous), and `finalize_prediction` has no independently-computed
+parallel path anywhere in the codebase to diverge from.
+
 ## What this task does not do
 
 - **No real model inference has been run.** Every test uses either purely

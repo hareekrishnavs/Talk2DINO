@@ -126,7 +126,7 @@ snapshots — no second model forward.
 **Two count families, two different units.** `generate_t0_t320_targets` is
 **image-scoped**: it takes a single scalar `canvas_h`/`canvas_w` pair and
 explicitly asserts every snapshot passed to one call shares that canvas
-(`src/semantic_evidence_t320.py:371-410`) — so one call processes exactly
+(`src/semantic_evidence_t320.py:384-453`) — so one call processes exactly
 one image's windows, never a multi-image campaign's. Two independent count
 families follow from this:
 

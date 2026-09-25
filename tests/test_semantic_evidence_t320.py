@@ -369,6 +369,141 @@ class InterpolationTests(unittest.TestCase):
         self.assertFalse(torch.allclose(actual, up_false))
 
 
+# =============================================================================
+# Repair: internal_upsample's reconstructed grid must be normalized to
+# contiguous NCHW layout before sigmoid/interpolation (found by the first
+# real GPU submission, job 22611384, then reproduced entirely on CPU --
+# see docs/semantic_evidence_t320_implementation.md's own repair note).
+# `patch_scores.permute(1, 0).reshape(1, C, grid_h, grid_w)` is
+# value-exact but returns a non-standard-strided VIEW for this reshape
+# pattern; F.interpolate's bilinear kernel is not guaranteed bit-exact
+# across differently-strided-but-value-identical inputs, so without
+# `.contiguous()` the strict same-forward torch.equal check downstream
+# (semantic_evidence_t320_real_smoke.py) can fail even though no value
+# ever diverges. These tests use random, non-symmetric floating-point
+# values (not small integer fixtures) and require strict torch.equal,
+# never allclose, at real production scale.
+# =============================================================================
+
+class InternalUpsampleContiguityRepairTests(unittest.TestCase):
+    def _authoritative_reference(self, simmap, output_hw):
+        """Independently re-derives the authoritative E3 path's own output
+        -- naturally contiguous simmap -> sigmoid -> bilinear interpolate,
+        align_corners=True -- written separately from internal_upsample,
+        never calling it."""
+        mask = torch.sigmoid(simmap)
+        return torch.nn.functional.interpolate(mask, size=output_hw, mode="bilinear", align_corners=True)
+
+    def test_reconstructed_grid_is_contiguous_before_sigmoid(self):
+        # Exercises the REAL internal_upsample function (not a hand-copied
+        # pattern in the test body) by capturing the exact tensor it passes
+        # to torch.sigmoid, to directly verify the internal implementation
+        # detail rather than only its external input/output behavior.
+        torch.manual_seed(1)
+        grid_h, grid_w, C = 4, 4, 5
+        simmap = torch.randn(1, C, grid_h, grid_w, dtype=torch.float32) * 7
+        s0 = simmap[0].permute(1, 2, 0).reshape(grid_h * grid_w, C).contiguous()
+
+        captured = {}
+        real_sigmoid = torch.sigmoid
+
+        def capturing_sigmoid(x, *a, **kw):
+            captured["input"] = x
+            return real_sigmoid(x, *a, **kw)
+
+        torch.sigmoid = capturing_sigmoid
+        try:
+            t320.internal_upsample(s0, (grid_h, grid_w), (10, 10))
+        finally:
+            torch.sigmoid = real_sigmoid
+
+        self.assertIn("input", captured, "torch.sigmoid was never called")
+        self.assertTrue(captured["input"].is_contiguous(),
+                         "internal_upsample must pass a contiguous tensor to sigmoid")
+
+    def _real_scale_case(self, output_hw, seed):
+        torch.manual_seed(seed)
+        grid_h, grid_w, C = 32, 32, 171
+        simmap = torch.randn(1, C, grid_h, grid_w, dtype=torch.float32) * 4
+        s0 = simmap[0].permute(1, 2, 0).reshape(grid_h * grid_w, C).contiguous()
+        actual = t320.internal_upsample(s0, (grid_h, grid_w), output_hw)
+        expected = self._authoritative_reference(simmap, output_hw)
+        self.assertEqual(tuple(actual.shape), tuple(expected.shape))
+        self.assertEqual(actual.dtype, expected.dtype)
+        self.assertTrue(torch.equal(actual, expected),
+                         f"strict torch.equal failed for real-scale {output_hw}: "
+                         f"{(actual != expected).sum().item()} differing elements, "
+                         f"max abs diff {(actual.float() - expected.float()).abs().max().item():.3e}")
+        return actual, expected
+
+    def test_real_scale_1024x171_output_407x448_strict_equal(self):
+        self._real_scale_case((407, 448), seed=11)
+
+    def test_real_scale_1024x171_output_338x448_strict_equal(self):
+        self._real_scale_case((338, 448), seed=12)
+
+    def test_real_scale_1024x171_output_448x448_strict_equal(self):
+        self._real_scale_case((448, 448), seed=13)
+
+    def test_non_square_grid_2x3_strict_equal(self):
+        torch.manual_seed(21)
+        grid_h, grid_w, C = 2, 3, 6
+        simmap = torch.randn(1, C, grid_h, grid_w, dtype=torch.float32) * 5
+        s0 = simmap[0].permute(1, 2, 0).reshape(grid_h * grid_w, C).contiguous()
+        actual = t320.internal_upsample(s0, (grid_h, grid_w), (10, 15))
+        expected = self._authoritative_reference(simmap, (10, 15))
+        self.assertTrue(torch.equal(actual, expected))
+
+    def test_non_contiguous_s0_input_still_strict_equal(self):
+        torch.manual_seed(31)
+        grid_h, grid_w, C = 32, 32, 171
+        simmap = torch.randn(1, C, grid_h, grid_w, dtype=torch.float32) * 4
+        s0_noncontig = simmap[0].permute(1, 2, 0).reshape(grid_h * grid_w, C)  # no .contiguous()
+        self.assertFalse(s0_noncontig.is_contiguous())
+        actual = t320.internal_upsample(s0_noncontig, (grid_h, grid_w), (407, 448))
+        expected = self._authoritative_reference(simmap, (407, 448))
+        self.assertTrue(torch.equal(actual, expected))
+
+    def test_contiguous_s0_input_strict_equal(self):
+        torch.manual_seed(32)
+        grid_h, grid_w, C = 32, 32, 171
+        simmap = torch.randn(1, C, grid_h, grid_w, dtype=torch.float32) * 4
+        s0_contig = simmap[0].permute(1, 2, 0).reshape(grid_h * grid_w, C).contiguous()
+        self.assertTrue(s0_contig.is_contiguous())
+        actual = t320.internal_upsample(s0_contig, (grid_h, grid_w), (338, 448))
+        expected = self._authoritative_reference(simmap, (338, 448))
+        self.assertTrue(torch.equal(actual, expected))
+
+    def test_float64_strict_equal(self):
+        torch.manual_seed(41)
+        grid_h, grid_w, C = 32, 32, 171
+        simmap = (torch.randn(1, C, grid_h, grid_w, dtype=torch.float32) * 4).double()
+        s0 = simmap[0].permute(1, 2, 0).reshape(grid_h * grid_w, C).contiguous()
+        actual = t320.internal_upsample(s0, (grid_h, grid_w), (407, 448))
+        expected = self._authoritative_reference(simmap, (407, 448))
+        self.assertEqual(actual.dtype, torch.float64)
+        self.assertTrue(torch.equal(actual, expected))
+
+    def test_float16_strict_equal(self):
+        torch.manual_seed(42)
+        grid_h, grid_w, C = 32, 32, 171
+        simmap = (torch.randn(1, C, grid_h, grid_w, dtype=torch.float32) * 4).half()
+        s0 = simmap[0].permute(1, 2, 0).reshape(grid_h * grid_w, C).contiguous()
+        actual = t320.internal_upsample(s0, (grid_h, grid_w), (338, 448))
+        expected = self._authoritative_reference(simmap, (338, 448))
+        self.assertEqual(actual.dtype, torch.float16)
+        self.assertTrue(torch.equal(actual, expected))
+
+    def test_repeated_identical_calls_bitwise_stable(self):
+        torch.manual_seed(51)
+        grid_h, grid_w, C = 32, 32, 171
+        simmap = torch.randn(1, C, grid_h, grid_w, dtype=torch.float32) * 4
+        s0 = simmap[0].permute(1, 2, 0).reshape(grid_h * grid_w, C).contiguous()
+        first = t320.internal_upsample(s0, (grid_h, grid_w), (407, 448))
+        second = t320.internal_upsample(s0, (grid_h, grid_w), (407, 448))
+        self.assertTrue(torch.equal(first, second))
+
+
 class PredictionTests(unittest.TestCase):
     def test_class_axis_argmax(self):
         stitched = torch.zeros(1, 3, 2, 2)

@@ -287,7 +287,20 @@ def internal_upsample(patch_scores: torch.Tensor, grid_hw: tuple, output_hw: tup
     _require(patch_scores.shape[0] == grid_h * grid_w, "patch_scores node count must equal grid_h*grid_w")
     _require_finite(patch_scores, "patch_scores")
     num_classes = patch_scores.shape[1]
-    grid = patch_scores.permute(1, 0).reshape(1, num_classes, grid_h, grid_w)
+    # .reshape() of a transposed 2D tensor's last dim into two is
+    # representable as a strided VIEW here (no copy), so grid ends up with
+    # non-standard strides even though its VALUES already exactly equal the
+    # authoritative source's naturally-contiguous simmap (proven bitwise
+    # equal by the tests below, before this line ever runs). F.interpolate's
+    # bilinear kernel is not guaranteed bit-exact across differently-strided
+    # inputs of otherwise-identical values, so without normalizing layout
+    # here the same-forward T0-preservation check
+    # (semantic_evidence_t320_real_smoke.py) can fail strict torch.equal
+    # against the adapter's own (naturally contiguous) computation, even
+    # though no value ever differs. .contiguous() materializes the exact
+    # same values into the standard NCHW layout the authoritative path
+    # already uses -- it changes no value, no formula, no constant.
+    grid = patch_scores.permute(1, 0).reshape(1, num_classes, grid_h, grid_w).contiguous()
     mask = torch.sigmoid(grid)
     upsampled = F.interpolate(mask, size=tuple(output_hw), mode="bilinear", align_corners=INTERNAL_UPSAMPLE_ALIGN_CORNERS)
     _require_finite(upsampled, "internal_upsample output")

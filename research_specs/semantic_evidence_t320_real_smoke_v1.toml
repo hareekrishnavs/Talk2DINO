@@ -64,7 +64,7 @@ role = "E3 single-window extraction interface: extract_e3_window_snapshot"
 
 [[implementation_binding.file]]
 path = "src/semantic_evidence_t320.py"
-sha256 = "a6d496f2b907f1782ccba06fe66ac47206862d96272c33238fa5601c1875f7be"
+sha256 = "27d5761a9d2e6efaf6828e44a1ae1d791a58d569a5ab1e9c72d52400d3269409"
 role = "isolated T0/T320 target generator: build_t320_graph, propagate_t320, internal_upsample, stitch_windows, finalize_prediction, generate_t0_t320_targets"
 
 [[implementation_binding.file]]
@@ -74,12 +74,12 @@ role = "adapter unit tests (fake-model, CPU-only)"
 
 [[implementation_binding.file]]
 path = "tests/test_semantic_evidence_t320.py"
-sha256 = "5201cfe38f103295913125acea1aa9c990284fb6f24b4b5edb99dda42267e929"
+sha256 = "50cda89b6735464cac8df013dad21c3c0fc5c331e0315989926875a75616eb44"
 role = "T320-module unit + regression tests (synthetic, CPU-only)"
 
 [[implementation_binding.file]]
 path = "docs/semantic_evidence_t320_implementation.md"
-sha256 = "24b73e74f4ee6d9ba5e38296d383b65052c1f264a5842c14ce8dc732f9aeb149"
+sha256 = "ba77ffb22df21331ace5090584017283c7407bdc1ab07d588ab949c41b0354f7"
 role = "implementation documentation"
 
 [implementation_binding.required_properties]
@@ -363,7 +363,7 @@ final_rescale_align_corners = false
 prediction_rule = "ordinary torch.argmax(dim=1); no custom tie-break"
 
 [determinism_contract]
-description = "Reuse the same immutable real snapshots (from the single real forward per window); run the pure T0/T320 target generation (generate_t0_t320_targets) twice without another model forward. generate_t0_t320_targets is IMAGE-SCOPED (single scalar canvas_h/canvas_w, every snapshot in one call must match that canvas -- src/semantic_evidence_t320.py:371-410): one call processes exactly one image's windows and performs exactly one T0 stitch_windows + one T0 finalize_prediction + one T320 stitch_windows + one T320 finalize_prediction. Window-scoped operations (model forward, graph construction, recurrence, sigmoid) therefore scale with the total window count N across both images; image-scoped operations (stitching, finalization) scale with the selected image count M, not with N."
+description = "Reuse the same immutable real snapshots (from the single real forward per window); run the pure T0/T320 target generation (generate_t0_t320_targets) twice without another model forward. generate_t0_t320_targets is IMAGE-SCOPED (single scalar canvas_h/canvas_w, every snapshot in one call must match that canvas -- src/semantic_evidence_t320.py:384-453): one call processes exactly one image's windows and performs exactly one T0 stitch_windows + one T0 finalize_prediction + one T320 stitch_windows + one T320 finalize_prediction. Window-scoped operations (model forward, graph construction, recurrence, sigmoid) therefore scale with the total window count N across both images; image-scoped operations (stitching, finalization) scale with the selected image count M, not with N."
 target_generation_repeats = 2
 
 # Window-scoped: one unit of work per window, per target-generation repeat.
