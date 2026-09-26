@@ -42,13 +42,26 @@ because their underlying algorithm differs:
 
 AUTHORIZATION: `preflight_holdout` and `run_holdout_evaluation` (the only
 two functions the CLI/launcher may call for real holdout access) check
-`[authorization.frozen_flags].holdout_execution_authorized` in the
-committed holdout authority as their FIRST action, before touching any
-image/GT path, before any torch import. Under the currently committed
-authority this flag is False, so both raise `HoldoutEvaluationError`
-immediately. Real execution requires a separate, later, explicit
-successor authority to set that flag True -- this module does not, and
-cannot, do that itself.
+`_resolve_holdout_execution_grant`'s independently-verified grant from a
+fixed, hardcoded successor-authority path
+(`HOLDOUT_EXECUTION_AUTHORITY_TOML_PATH`) as their FIRST action, before
+touching any image/GT path, before any torch import. The committed
+PREDECESSOR authority's own `[authorization.frozen_flags].holdout_
+execution_authorized` is NEVER consulted for this decision -- it is
+always False, must never be edited, and a verified successor is the SOLE
+possible source of a grant. This means an uncommitted or locally altered
+predecessor file, even one whose own on-disk flag reads True, can never
+authorize anything by itself. No successor is currently committed, so
+both functions raise `HoldoutEvaluationError` immediately. The predecessor
+authority is never edited by this module or by
+`_resolve_holdout_execution_grant`; a grant can only ever come from a
+SEPARATE document, committed at the exact bytes this module independently
+re-verifies against its own stated `required_head` (absent, uncommitted,
+locally-altered, malformed, hash-mismatched, or drifted-since-required_head
+successors are all rejected, never partially honored). Gate C's own
+execution authorization is resolved separately and more narrowly than the
+general holdout grant -- see
+`_resolve_holdout_execution_grant`'s docstring.
 """
 
 from __future__ import annotations
@@ -281,15 +294,302 @@ def verify_discovery_result_file_hash(holdout_data: dict, discovery_result_path:
     return {"expected_sha256": expected, "actual_sha256": actual, "match": True}
 
 
+def _load_discovery_result_json(discovery_result_path: Path) -> dict:
+    """Parses an already-existence-checked, already-whole-file-hash-verified
+    `discovery_result.json` -- called only AFTER `verify_discovery_result_
+    file_hash` passes, so the raw bytes are already known to match the
+    committed holdout authority's bound hash. That hash check only proves
+    the BYTES are the expected ones; it says nothing about whether they
+    are valid UTF-8 or valid JSON. A malformed-but-correctly-hashed file
+    (a corrupted write, a truncated copy, a binary file that happens to
+    collide on some OTHER declared hash in a future authority -- moot here
+    since the hash is already independently verified, but the bytes
+    themselves are never assumed well-formed) would otherwise leak a raw
+    `UnicodeDecodeError` or `json.JSONDecodeError` here instead of
+    `HoldoutEvaluationError` -- shared by both `preflight_holdout` and
+    `run_holdout_evaluation` so neither drifts from the other."""
+    try:
+        raw_bytes = Path(discovery_result_path).read_bytes()
+        text = raw_bytes.decode("utf-8")
+        return json.loads(text)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HoldoutEvaluationError(f"discovery_result_path is not valid UTF-8 JSON ({discovery_result_path}): {exc}") from exc
+
+
+# ---------------------------------------------------------------------------
+# Successor-authority resolution (fail-closed; the predecessor authority
+# above is never edited -- this only lets a SEPARATE, later, committed
+# document layer a conditional grant on top of it)
+# ---------------------------------------------------------------------------
+
+HOLDOUT_EXECUTION_AUTHORITY_TOML_PATH = "research_specs/semantic_evidence_holdout_execution_authority_v1.toml"
+
+# Fixed, hardcoded expected path for every successor dependency role -- a
+# successor cannot redirect a role to an attacker- or mistake-chosen path;
+# only role names already bound at these exact paths are ever accepted.
+_SUCCESSOR_EXPECTED_DEPENDENCY_PATHS = {
+    "holdout_evaluation_authority": HOLDOUT_AUTHORITY_TOML_PATH,
+    "feasibility_contract": "research_specs/semantic_evidence_feasibility_v1.toml",
+    "holdout_runner_implementation": "src/semantic_evidence_holdout_evaluate.py",
+    "holdout_runner_cli": "diagnostics/run_semantic_evidence_holdout_evaluation.py",
+    "holdout_runner_launcher": "semantic_evidence_holdout_evaluation_h100.sbatch",
+    "holdout_runner_tests": "tests/test_semantic_evidence_holdout_evaluate.py",
+    "holdout_runner_documentation": "docs/semantic_evidence_holdout_evaluation_run.md",
+    "discovery_executor_implementation": "src/semantic_evidence_discovery_execute.py",
+}
+_SUCCESSOR_EXPECTED_DEPENDENCY_ROLES = frozenset(_SUCCESSOR_EXPECTED_DEPENDENCY_PATHS)
+
+_SUCCESSOR_EXECUTION_GRANT_REQUIRED_FIELDS = frozenset({
+    "description", "holdout_execution_intended", "holdout_gt_access_intended",
+    "gate_b_computation_execution_intended", "gate_c_computation_execution_intended",
+    "gate_d_computation_execution_intended", "combined_96_image_execution_intended",
+    "combined_96_image_note", "full_5000_image_execution_intended", "full_5000_image_note",
+    "population_enlargement_intended", "refit_intended", "refit_note", "training_intended",
+    "scientific_kernel_modification_intended", "accuracy_or_deployment_claim_intended",
+    "accuracy_or_deployment_claim_note",
+})
+# fields that must be exactly False for a grant to be honored at all -- a
+# successor claiming any of these is rejected outright, never partially
+# honored, regardless of what holdout_execution_intended itself says.
+_SUCCESSOR_EXECUTION_GRANT_MUST_BE_FALSE = (
+    "combined_96_image_execution_intended", "full_5000_image_execution_intended",
+    "population_enlargement_intended", "refit_intended", "training_intended",
+    "scientific_kernel_modification_intended", "accuracy_or_deployment_claim_intended",
+)
+_SUCCESSOR_GATE_C_AUTHORIZATION_REQUIRED_FIELDS = frozenset({
+    "rule_reference", "computable_under_this_contract", "computable_basis",
+    "min_auroc_improvement_holdout", "paired_bootstrap_95_lower_bound_required",
+    "average_precision_difference_requirement",
+    "min_beneficial_dominant_holdout_propagation_outcome_rows",
+    "min_harmful_dominant_holdout_propagation_outcome_rows", "below_minimum_result",
+    "execution_intended_by_this_document", "execution_intended_note",
+})
+
+
+def _resolve_holdout_execution_grant(repo_root: Path) -> dict:
+    """Fail-closed successor resolver. Returns
+    {"holdout_execution_authorized": bool, "gate_c_execution_authorized": bool,
+    "successor_present": bool, "denial_reason": str | None}.
+
+    NEVER raises: a self-declared grant in an absent, uncommitted, altered,
+    malformed, or hash-mismatched successor can never produce True here --
+    every failure mode below falls through to the same all-False `denied`
+    result. This function never reads `HOLDOUT_AUTHORITY_TOML_PATH` itself
+    (the predecessor authority) and never edits it; it only ever consults
+    a SEPARATE, fixed, hardcoded successor path, and even that consultation
+    is conditioned on independently re-verified bindings, never on the
+    successor's own say-so alone:
+
+      1. the successor file must exist on disk;
+      2. it must be committed at the CURRENT `git rev-parse HEAD` (a file
+         that merely exists untracked, or was never committed, is rejected);
+      3. its on-disk bytes must be BYTE-IDENTICAL to that committed blob
+         (a locally altered copy of an otherwise-committed successor is
+         rejected, not silently replaced by the older committed content);
+      4. its own `prerequisite.required_branch`/`required_head` must match
+         the current branch, with `required_head` an ancestor of current
+         HEAD (`git merge-base --is-ancestor`);
+      5. its dependency list must declare exactly the fixed, hardcoded
+         roles in `_SUCCESSOR_EXPECTED_DEPENDENCY_PATHS`, each at exactly
+         its expected path, each with `must_be_committed_at_required_head
+         = true`, and each declared SHA-256 independently re-verified
+         THREE ways, none of them trusted from the successor's own text:
+         (a) `git show <required_head>:<path>` (the successor's OWN
+         stated required_head, not merely current_head -- otherwise a
+         successor could pair a deliberately older, still-ancestor-valid
+         required_head with hashes that only actually match some LATER
+         commit) must match the declared hash; (b) `git show
+         <current_head>:<path>` must be BYTE-IDENTICAL to the
+         required_head bytes, confirming the protected/frozen file has
+         not drifted between commits; (c) the LIVE file actually on disk
+         at `repo_root / path` must ALSO be byte-identical to the
+         required_head bytes -- (a) and (b) alone only ever compare git
+         BLOBS, never the working-tree file a running process actually
+         imports/reads, so an uncommitted, live edit to a bound
+         dependency (e.g. this very runner's own source file) would move
+         no commit and pass both, while the code actually executing
+         differs from what was reviewed and hash-bound;
+      6. its `authorization.execution_grant_pending_wiring` and
+         `gate_c_authorization` tables must match a closed schema
+         (`_SUCCESSOR_EXECUTION_GRANT_REQUIRED_FIELDS` /
+         `_SUCCESSOR_GATE_C_AUTHORIZATION_REQUIRED_FIELDS` -- no missing,
+         no extra field), and every field in
+         `_SUCCESSOR_EXECUTION_GRANT_MUST_BE_FALSE` must be exactly
+         `False` -- a successor cannot smuggle in a 96-image, 5000-image,
+         refit, population-enlargement, training, kernel-modification, or
+         accuracy/deployment-claim grant no matter what it sets
+         `holdout_execution_intended` to.
+
+    Only if every one of these independently holds does this function
+    return `holdout_execution_authorized=True`; Gate C is a SEPARATE,
+    strictly narrower grant requiring both the general holdout grant AND
+    its own `gate_c_computation_execution_intended` /
+    `gate_c_authorization.execution_intended_by_this_document`."""
+    denied = {
+        "holdout_execution_authorized": False, "gate_c_execution_authorized": False,
+        "successor_present": False, "denial_reason": "no successor authority file present",
+    }
+    try:
+        successor_path = repo_root / HOLDOUT_EXECUTION_AUTHORITY_TOML_PATH
+        if not successor_path.exists():
+            return denied
+        denied["successor_present"] = True
+
+        current_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo_root), capture_output=True, text=True).stdout.strip()
+        current_branch = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=str(repo_root), capture_output=True, text=True).stdout.strip()
+
+        show = subprocess.run(["git", "show", f"{current_head}:{HOLDOUT_EXECUTION_AUTHORITY_TOML_PATH}"], cwd=str(repo_root), capture_output=True)
+        if show.returncode != 0:
+            denied["denial_reason"] = "successor authority is not committed at current HEAD"
+            return denied
+        committed_bytes = show.stdout
+
+        disk_bytes = successor_path.read_bytes()
+        if disk_bytes != committed_bytes:
+            denied["denial_reason"] = "successor authority's working-tree bytes differ from its committed HEAD bytes"
+            return denied
+
+        successor = tomllib.loads(committed_bytes.decode("utf-8"))
+
+        prereq = successor["prerequisite"]
+        if prereq["required_branch"] != current_branch:
+            denied["denial_reason"] = f"successor required_branch {prereq['required_branch']!r} != current branch {current_branch!r}"
+            return denied
+        ancestor_check = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", prereq["required_head"], current_head],
+            cwd=str(repo_root), capture_output=True,
+        )
+        if ancestor_check.returncode != 0:
+            denied["denial_reason"] = "successor's required_head is not an ancestor of current HEAD"
+            return denied
+
+        deps = successor.get("dependency")
+        if not isinstance(deps, list) or not deps:
+            denied["denial_reason"] = "successor dependency list is missing, empty, or not a list"
+            return denied
+        declared_roles = frozenset(e.get("role") for e in deps if isinstance(e, dict))
+        if declared_roles != _SUCCESSOR_EXPECTED_DEPENDENCY_ROLES:
+            denied["denial_reason"] = (
+                f"successor dependency role set mismatch: missing={sorted(_SUCCESSOR_EXPECTED_DEPENDENCY_ROLES - declared_roles)}, "
+                f"extra={sorted(declared_roles - _SUCCESSOR_EXPECTED_DEPENDENCY_ROLES)}"
+            )
+            return denied
+        seen_roles = set()
+        for entry in deps:
+            if not isinstance(entry, dict) or frozenset(entry.keys()) != _HOLDOUT_DEPENDENCY_RECORD_KEYS:
+                denied["denial_reason"] = "successor dependency entry key mismatch"
+                return denied
+            role, path, declared_sha = entry["role"], entry["path"], entry["sha256"]
+            if role in seen_roles:
+                denied["denial_reason"] = f"duplicate successor dependency role: {role!r}"
+                return denied
+            seen_roles.add(role)
+            if path != _SUCCESSOR_EXPECTED_DEPENDENCY_PATHS[role]:
+                denied["denial_reason"] = f"successor dependency {role!r} points at an unexpected path: {path!r}"
+                return denied
+            if entry.get("must_be_committed_at_required_head") is not True:
+                denied["denial_reason"] = f"successor dependency {role!r} does not declare must_be_committed_at_required_head=true"
+                return denied
+            # Verify the declared hash against bytes AT THE SUCCESSOR'S OWN
+            # STATED required_head -- not at current_head. must_be_committed_
+            # at_required_head=true is a claim about THAT commit specifically;
+            # checking current_head instead would let a successor pair a
+            # deliberately-older (but still ancestor-valid) required_head
+            # with hashes that only actually match some LATER commit.
+            bytes_at_required_head = disc._git_show_bytes(repo_root, prereq["required_head"], path)
+            sha_at_required_head = hashlib.sha256(bytes_at_required_head).hexdigest()
+            if sha_at_required_head != declared_sha:
+                denied["denial_reason"] = (
+                    f"successor dependency {role!r} hash mismatch AT ITS OWN STATED required_head "
+                    f"({prereq['required_head']}): declared={declared_sha} actual={sha_at_required_head}"
+                )
+                return denied
+            # Separately, confirm this "protected" (frozen, never-edited-
+            # after-freeze) file has not drifted between required_head and
+            # the current HEAD -- a distinct claim from "the successor told
+            # the truth about required_head" above.
+            bytes_at_current_head = disc._git_show_bytes(repo_root, current_head, path)
+            if bytes_at_current_head != bytes_at_required_head:
+                denied["denial_reason"] = (
+                    f"successor dependency {role!r} has drifted between required_head "
+                    f"({prereq['required_head']}) and current HEAD ({current_head}) -- "
+                    "a protected/frozen file must be byte-identical at both"
+                )
+                return denied
+            # Both checks above compare only git BLOBS (required_head vs
+            # current HEAD) -- neither reads the actual LIVE file on disk,
+            # which is what a running process (this one included) actually
+            # imports/executes/reads. A live, uncommitted edit to a bound
+            # dependency -- e.g. the runner's own source file -- would move
+            # HEAD not at all and so pass both git-based checks above while
+            # the code actually running differs from what was reviewed and
+            # hash-bound. Close that gap explicitly: the live bytes must
+            # also match required_head's bytes.
+            live_path = repo_root / path
+            if not live_path.exists():
+                denied["denial_reason"] = f"successor dependency {role!r}'s live file is missing on disk: {path!r}"
+                return denied
+            live_bytes = live_path.read_bytes()
+            if live_bytes != bytes_at_required_head:
+                denied["denial_reason"] = (
+                    f"successor dependency {role!r}'s LIVE on-disk bytes differ from required_head "
+                    f"({prereq['required_head']}) -- a protected/frozen file's live, working-tree copy "
+                    "must be byte-identical to its committed content, not merely git-HEAD-consistent"
+                )
+                return denied
+
+        grant = successor.get("authorization", {}).get("execution_grant_pending_wiring")
+        if not isinstance(grant, dict) or frozenset(grant.keys()) != _SUCCESSOR_EXECUTION_GRANT_REQUIRED_FIELDS:
+            denied["denial_reason"] = "successor authorization.execution_grant_pending_wiring key mismatch"
+            return denied
+        for field in _SUCCESSOR_EXECUTION_GRANT_MUST_BE_FALSE:
+            if grant[field] is not False:
+                denied["denial_reason"] = f"successor declares a withheld permission as non-false: {field}"
+                return denied
+
+        gate_c = successor.get("gate_c_authorization")
+        if not isinstance(gate_c, dict) or frozenset(gate_c.keys()) != _SUCCESSOR_GATE_C_AUTHORIZATION_REQUIRED_FIELDS:
+            denied["denial_reason"] = "successor gate_c_authorization key mismatch"
+            return denied
+
+        holdout_ok = (
+            grant["holdout_execution_intended"] is True
+            and grant["holdout_gt_access_intended"] is True
+            and grant["gate_b_computation_execution_intended"] is True
+            and grant["gate_d_computation_execution_intended"] is True
+        )
+        gate_c_ok = (
+            holdout_ok
+            and grant["gate_c_computation_execution_intended"] is True
+            and gate_c["execution_intended_by_this_document"] is True
+        )
+        return {
+            "holdout_execution_authorized": holdout_ok,
+            "gate_c_execution_authorized": gate_c_ok,
+            "successor_present": True,
+            "denial_reason": None if holdout_ok else "successor's own execution_grant_pending_wiring does not grant every required holdout field",
+        }
+    except Exception as exc:
+        _reraise_if_fatal(exc)
+        denied["denial_reason"] = f"successor authority failed verification: {exc}"
+        return denied
+
+
 def preflight_holdout(repo_root: Path, *, weight_dir: str, image_root: Path, gt_root: Path, output_root: Path,
                        discovery_result_path: Path, mode: str = "fresh") -> dict:
     """Torch-free readiness check. FAILS CLOSED, before touching any
-    holdout image/GT path, if
-    `[authorization.frozen_flags].holdout_execution_authorized` is not
-    True in the committed holdout authority -- currently always the case.
-    Never imports torch/torchvision/mmcv/mmseg/numpy/PIL and never calls
-    torch.load; checkpoint verification is raw-byte SHA-256 only; GT
-    verification is path/metadata only.
+    holdout image/GT path, unless `_resolve_holdout_execution_grant`
+    independently verifies a valid, committed successor grant -- currently
+    it does not. The committed PREDECESSOR authority's own
+    `[authorization.frozen_flags].holdout_execution_authorized` is NEVER
+    consulted for this decision (it is always False and must never be
+    edited); a verified successor is the SOLE source of a grant, so an
+    uncommitted or locally altered predecessor file -- even one whose own
+    flag reads True on disk -- can never authorize anything by itself. See
+    `_resolve_holdout_execution_grant`'s own docstring for the full
+    verification chain. Never imports torch/torchvision/mmcv/mmseg/numpy/
+    PIL and never calls torch.load; checkpoint verification is raw-byte
+    SHA-256 only; GT verification is path/metadata only.
 
     Raises `HoldoutEvaluationError` for every documented holdout-domain
     failure -- including a reused discovery-module validator's own
@@ -304,13 +604,14 @@ def preflight_holdout(repo_root: Path, *, weight_dir: str, image_root: Path, gt_
     deps = verify_dependency_hashes_holdout(repo_root, data)
     _require(deps["all_match"], "committed holdout-authority dependency hashes do not match")
 
-    frozen = data["authorization"]["frozen_flags"]
+    grant = _resolve_holdout_execution_grant(repo_root)
     _require(
-        frozen["holdout_execution_authorized"] is True,
-        "holdout execution is not authorized under the committed authority "
-        f"({HOLDOUT_AUTHORITY_TOML_PATH}: authorization.frozen_flags.holdout_execution_authorized=False). "
-        "A separate, explicit successor authority must set this flag to true before any "
-        "real holdout preflight may proceed past this point.",
+        grant["holdout_execution_authorized"] is True,
+        "holdout execution is not authorized: the committed predecessor authority "
+        f"({HOLDOUT_AUTHORITY_TOML_PATH}) never grants execution by itself, and no valid "
+        f"successor authority does either ({HOLDOUT_EXECUTION_AUTHORITY_TOML_PATH}: {grant['denial_reason']}). "
+        "A separate, explicit, independently-verified, committed successor authority must grant this "
+        "before any real holdout preflight may proceed past this point.",
     )
 
     try:
@@ -340,7 +641,7 @@ def _preflight_holdout_core(repo_root: Path, data: dict, *, weight_dir: str, ima
     discovery_result_path = Path(discovery_result_path)
     _require(discovery_result_path.exists(), f"discovery_result_path does not exist: {discovery_result_path}")
     verify_discovery_result_file_hash(data, discovery_result_path)
-    discovery_result = json.loads(discovery_result_path.read_text())
+    discovery_result = _load_discovery_result_json(discovery_result_path)
     fit_checks = _verify_fit_digests(data, discovery_result)
     _require(len(fit_checks) == 4, f"expected exactly 4 frozen fit bindings, found {len(fit_checks)}")
     _require(all(c["match"] for c in fit_checks), f"frozen fit_digest mismatch: {[c for c in fit_checks if not c['match']]}")
@@ -794,11 +1095,18 @@ def run_holdout_evaluation(repo_root: Path, *, weight_dir: str, image_root: Path
                             slurm_job_id: str = "", node: str = "",
                             image_loader=None, model_and_text_provider=None, gt_loader=None, forward_fn=None) -> dict:
     """Public entry point. FAILS CLOSED, before importing torch, before
-    touching any holdout path, if
-    `[authorization.frozen_flags].holdout_execution_authorized` is not
-    True in the committed holdout authority -- currently always the case.
-    This is the ONLY function the CLI/launcher's `execute` command may
-    call for real holdout evaluation.
+    touching any holdout path, unless `_resolve_holdout_execution_grant`
+    independently verifies a valid, committed successor grant -- currently
+    it does not. The committed PREDECESSOR authority's own
+    `[authorization.frozen_flags].holdout_execution_authorized` is NEVER
+    consulted for this decision (it is always False and must never be
+    edited); a verified successor is the SOLE source of a grant, so an
+    uncommitted or locally altered predecessor file -- even one whose own
+    flag reads True on disk -- can never authorize anything by itself.
+    Gate C's own execution authorization is resolved separately (see
+    `_resolve_holdout_execution_grant`) and is never implied by the
+    general holdout grant alone. This is the ONLY function the
+    CLI/launcher's `execute` command may call for real holdout evaluation.
 
     Raises `HoldoutEvaluationError` for every documented holdout-domain
     failure -- including a reused discovery-module validator's own
@@ -810,21 +1118,39 @@ def run_holdout_evaluation(repo_root: Path, *, weight_dir: str, image_root: Path
     _require(mode in ("fresh", "resume", "finalize_only"), f"unknown mode: {mode!r}")
 
     data = _load_holdout_authority(repo_root)
-    frozen = data["authorization"]["frozen_flags"]
+    grant = _resolve_holdout_execution_grant(repo_root)
     _require(
-        frozen["holdout_execution_authorized"] is True,
-        "holdout execution is not authorized under the committed authority "
-        f"({HOLDOUT_AUTHORITY_TOML_PATH}: authorization.frozen_flags.holdout_execution_authorized=False). "
-        "A separate, explicit successor authority must set this flag to true before any "
-        "real holdout evaluation may proceed.",
+        grant["holdout_execution_authorized"] is True,
+        "holdout execution is not authorized: the committed predecessor authority "
+        f"({HOLDOUT_AUTHORITY_TOML_PATH}) never grants execution by itself, and no valid "
+        f"successor authority does either ({HOLDOUT_EXECUTION_AUTHORITY_TOML_PATH}: {grant['denial_reason']}). "
+        "A separate, explicit, independently-verified, committed successor authority must grant this "
+        "before any real holdout evaluation may proceed.",
     )
+    # Gate C stays a strictly narrower, separately-resolved grant, taken
+    # SOLELY from the verified successor's own gate_c_execution_authorized
+    # -- the predecessor's own working-tree gate_c_authorization.
+    # execution_authorized_by_this_document is NEVER consulted here (it is
+    # read from disk with no git-commit verification, unlike the
+    # successor); an uncommitted, locally altered predecessor claiming
+    # Gate C is authorized must never override a verified successor's
+    # explicit denial of it. See _resolve_holdout_execution_grant's own
+    # docstring.
+    data = dict(data)
+    data["gate_c_authorization"] = dict(data["gate_c_authorization"])
+    data["gate_c_authorization"]["execution_authorized_by_this_document"] = grant["gate_c_execution_authorized"] is True
 
     try:
         discovery_result_path = Path(discovery_result_path)
         # Whole-file integrity gate FIRST, before any coefficient is parsed
-        # -- see verify_discovery_result_file_hash's own docstring.
+        # -- see verify_discovery_result_file_hash's own docstring. The
+        # existence check is required here (not implied by the hash check
+        # itself, which would otherwise leak a raw FileNotFoundError for a
+        # missing file instead of HoldoutEvaluationError) -- mirrors
+        # _preflight_holdout_core's identical guard.
+        _require(discovery_result_path.exists(), f"discovery_result_path does not exist: {discovery_result_path}")
         verify_discovery_result_file_hash(data, discovery_result_path)
-        discovery_result = json.loads(discovery_result_path.read_text())
+        discovery_result = _load_discovery_result_json(discovery_result_path)
         frozen_fits = load_frozen_fits(data, discovery_result)
 
         holdout_ids = load_holdout_population(repo_root)

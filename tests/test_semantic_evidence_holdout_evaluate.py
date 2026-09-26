@@ -121,23 +121,22 @@ def _synthetic_frozen_fits():
     }
 
 
-_REAL_LOAD_HOLDOUT_AUTHORITY = hv._load_holdout_authority  # captured before any test monkeypatches the name
-
-
-def _authorized_real_authority(repo_root):
-    """A deep copy of the REAL committed holdout authority with only
-    `holdout_execution_authorized` flipped to True IN THE COPY -- used to
-    exercise preflight_holdout/run_holdout_evaluation's deeper,
+def _granted_execution_grant(*, gate_c=True):
+    """A stand-in return value for `hv._resolve_holdout_execution_grant`,
+    used to exercise preflight_holdout/run_holdout_evaluation's deeper,
     post-auth-gate logic (exception translation, the whole-file hash gate)
-    without ever writing to or altering the committed research_specs/ file
-    on disk. Every other field (dependency hashes, discovery_result_binding,
-    frozen_model_fits) is the real, unmodified committed value. Calls the
-    ORIGINAL captured `_load_holdout_authority`, never `hv._load_holdout_
-    authority` -- tests assign this function itself to that name, so
-    calling through the module would recurse forever."""
-    data = copy.deepcopy(_REAL_LOAD_HOLDOUT_AUTHORITY(repo_root))
-    data["authorization"]["frozen_flags"]["holdout_execution_authorized"] = True
-    return data
+    without ever writing to, committing, or altering the committed
+    research_specs/ predecessor file, and without needing a real,
+    independently-verified successor authority on disk. The predecessor's
+    own `[authorization.frozen_flags].holdout_execution_authorized` is
+    NEVER consulted by the real code any more (see
+    `_resolve_holdout_execution_grant`'s own docstring), so patching
+    `hv._load_holdout_authority` no longer bypasses anything -- only
+    patching the resolver itself does."""
+    return {
+        "holdout_execution_authorized": True, "gate_c_execution_authorized": gate_c,
+        "successor_present": True, "denial_reason": None,
+    }
 
 
 REAL_DISCOVERY_RESULT_PATH = Path(
@@ -226,6 +225,111 @@ class CurrentAuthorityDenialTests(unittest.TestCase):
         data = hv._load_holdout_authority(REPO_ROOT)
         self.assertFalse(data["authorization"]["frozen_flags"]["holdout_execution_authorized"])
         self.assertFalse(data["gate_c_authorization"]["execution_authorized_by_this_document"])
+
+
+class PredecessorFlagNeverAuthorizesTests(unittest.TestCase):
+    """Regression test for a real defect found and repaired in this task:
+    preflight_holdout/run_holdout_evaluation used to accept
+    `frozen["holdout_execution_authorized"] is True OR grant[...] is True`
+    -- an OR that let a LOCALLY ALTERED (never committed, never verified)
+    copy of the immutable predecessor authority silently authorize real
+    holdout access, with no successor, no commit, and no independent
+    verification of any kind. The fix removes the predecessor's own flag
+    from the decision entirely: a verified successor is now the SOLE
+    possible source of a grant. These tests simulate exactly that attack
+    -- a predecessor authority dict whose own flag reads True -- via an
+    in-memory monkeypatch of hv._load_holdout_authority only (never
+    touching the real committed research_specs/ file), while leaving
+    hv._resolve_holdout_execution_grant genuinely real (no successor
+    exists), and confirm both public functions still deny."""
+
+    def _tampered_authority(self, repo_root):
+        # Reads the real committed file directly via tomllib -- NOT via
+        # hv._load_holdout_authority, which this test itself monkeypatches
+        # to be this very function (calling through the module name here
+        # would recurse forever).
+        import tomllib as _tomllib
+        with open(Path(repo_root) / hv.HOLDOUT_AUTHORITY_TOML_PATH, "rb") as fh:
+            data = _tomllib.load(fh)
+        data["authorization"]["frozen_flags"]["holdout_execution_authorized"] = True
+        data["gate_c_authorization"]["execution_authorized_by_this_document"] = True
+        return data
+
+    def test_preflight_holdout_denies_even_when_local_predecessor_flag_reads_true(self):
+        orig = hv._load_holdout_authority
+        hv._load_holdout_authority = self._tampered_authority
+        try:
+            with self.assertRaises(hv.HoldoutEvaluationError) as ctx:
+                hv.preflight_holdout(
+                    REPO_ROOT, weight_dir="/definitely/does/not/exist",
+                    image_root=Path("/definitely/does/not/exist"),
+                    gt_root=Path("/definitely/does/not/exist"),
+                    output_root=Path("/definitely/does/not/exist/output"),
+                    discovery_result_path=Path("/definitely/does/not/exist/discovery_result.json"),
+                    mode="fresh",
+                )
+            self.assertIn("not authorized", str(ctx.exception))
+        finally:
+            hv._load_holdout_authority = orig
+
+    def test_run_holdout_evaluation_denies_even_when_local_predecessor_flag_reads_true(self):
+        orig = hv._load_holdout_authority
+        hv._load_holdout_authority = self._tampered_authority
+        try:
+            with self.assertRaises(hv.HoldoutEvaluationError) as ctx:
+                hv.run_holdout_evaluation(
+                    REPO_ROOT, weight_dir="/definitely/does/not/exist",
+                    image_root=Path("/definitely/does/not/exist"),
+                    gt_root=Path("/definitely/does/not/exist"),
+                    output_root=Path("/definitely/does/not/exist/output"),
+                    discovery_result_path=Path("/definitely/does/not/exist/discovery_result.json"),
+                    mode="fresh",
+                )
+            self.assertIn("not authorized", str(ctx.exception))
+        finally:
+            hv._load_holdout_authority = orig
+
+    def test_predecessor_flag_value_is_never_even_read_by_either_public_function(self):
+        """A stronger proof than the two tests above: the predecessor's
+        own frozen_flags.holdout_execution_authorized is not merely
+        overridden by the real successor check -- it is never looked at,
+        at all. Confirmed by making the tampered authority's own
+        frozen_flags table raise if that specific key is ever accessed,
+        so ANY future regression that reads it again fails loudly here
+        with an uncaught AssertionError instead of the expected
+        HoldoutEvaluationError."""
+        real_data = hv._load_holdout_authority(REPO_ROOT)
+
+        class PoisonedFrozenFlags(dict):
+            def __getitem__(self, key):
+                if key == "holdout_execution_authorized":
+                    raise AssertionError("holdout_execution_authorized was read -- it must never be consulted")
+                return super().__getitem__(key)
+
+        def poisoned_authority(repo_root):
+            data = copy.deepcopy(real_data)
+            data["authorization"]["frozen_flags"] = PoisonedFrozenFlags(data["authorization"]["frozen_flags"])
+            return data
+
+        orig = hv._load_holdout_authority
+        hv._load_holdout_authority = poisoned_authority
+        try:
+            for fn, kwargs in (
+                (hv.preflight_holdout, {}),
+                (hv.run_holdout_evaluation, {}),
+            ):
+                with self.assertRaises(hv.HoldoutEvaluationError) as ctx:
+                    fn(
+                        REPO_ROOT, weight_dir="/definitely/does/not/exist",
+                        image_root=Path("/definitely/does/not/exist"),
+                        gt_root=Path("/definitely/does/not/exist"),
+                        output_root=Path("/definitely/does/not/exist/output"),
+                        discovery_result_path=Path("/definitely/does/not/exist/discovery_result.json"),
+                        mode="fresh", **kwargs,
+                    )
+                self.assertIn("not authorized", str(ctx.exception))
+        finally:
+            hv._load_holdout_authority = orig
 
 
 class HoldoutPopulationTests(unittest.TestCase):
@@ -697,14 +801,15 @@ class PublicExceptionContractTests(unittest.TestCase):
     the translation is narrow enough that an unrelated programming error
     (TypeError, JSONDecodeError) still propagates untouched. The auth gate
     is bypassed only via an in-memory monkeypatch of
-    hv._load_holdout_authority (see _authorized_real_authority) -- the
-    committed authority file on disk is never touched, and no real
-    holdout image/GT/model/CUDA path is ever reached."""
+    hv._resolve_holdout_execution_grant (see _granted_execution_grant) --
+    the committed authority files on disk are never touched, no successor
+    is ever committed, and no real holdout image/GT/model/CUDA path is
+    ever reached."""
 
     def test_preflight_holdout_translates_reused_validator_failure(self):
-        orig_load_authority = hv._load_holdout_authority
+        orig_grant = hv._resolve_holdout_execution_grant
         orig_load_discovery_population = disc.load_discovery_population
-        hv._load_holdout_authority = _authorized_real_authority
+        hv._resolve_holdout_execution_grant = lambda repo_root: _granted_execution_grant()
 
         def poisoned(repo_root):
             raise disc.DiscoveryExecutionError("synthetic reused-validator failure (test-injected)")
@@ -720,13 +825,13 @@ class PublicExceptionContractTests(unittest.TestCase):
             self.assertIsInstance(ctx.exception.__cause__, disc.DiscoveryExecutionError)
             self.assertIn("synthetic reused-validator failure", str(ctx.exception))
         finally:
-            hv._load_holdout_authority = orig_load_authority
+            hv._resolve_holdout_execution_grant = orig_grant
             disc.load_discovery_population = orig_load_discovery_population
 
     def test_preflight_holdout_does_not_swallow_unrelated_programming_errors(self):
-        orig_load_authority = hv._load_holdout_authority
+        orig_grant = hv._resolve_holdout_execution_grant
         orig_load_discovery_population = disc.load_discovery_population
-        hv._load_holdout_authority = _authorized_real_authority
+        hv._resolve_holdout_execution_grant = lambda repo_root: _granted_execution_grant()
 
         def poisoned(repo_root):
             raise TypeError("unrelated programming error (test-injected)")
@@ -740,16 +845,16 @@ class PublicExceptionContractTests(unittest.TestCase):
                     discovery_result_path=Path("/nonexistent/discovery_result.json"), mode="fresh",
                 )
         finally:
-            hv._load_holdout_authority = orig_load_authority
+            hv._resolve_holdout_execution_grant = orig_grant
             disc.load_discovery_population = orig_load_discovery_population
 
     def test_run_holdout_evaluation_translates_reused_validator_failure(self):
         if not REAL_DISCOVERY_RESULT_PATH.exists():
             self.skipTest("real discovery_result.json fixture not present on this filesystem")
 
-        orig_load_authority = hv._load_holdout_authority
+        orig_grant = hv._resolve_holdout_execution_grant
         orig_load_discovery_population = disc.load_discovery_population
-        hv._load_holdout_authority = _authorized_real_authority
+        hv._resolve_holdout_execution_grant = lambda repo_root: _granted_execution_grant()
 
         def poisoned(repo_root):
             raise disc.DiscoveryExecutionError("synthetic reused-validator failure (test-injected)")
@@ -765,7 +870,7 @@ class PublicExceptionContractTests(unittest.TestCase):
             self.assertIsInstance(ctx.exception.__cause__, disc.DiscoveryExecutionError)
             self.assertIn("synthetic reused-validator failure", str(ctx.exception))
         finally:
-            hv._load_holdout_authority = orig_load_authority
+            hv._resolve_holdout_execution_grant = orig_grant
             disc.load_discovery_population = orig_load_discovery_population
 
     def test_verify_holdout_result_translates_malformed_checkpoint(self):
@@ -838,8 +943,8 @@ class WholeFileIntegrityGateTests(unittest.TestCase):
         mutated = copy.deepcopy(original)
         mutated["model_fit_summaries"][0]["coefficients"][0] += 5.0
 
-        orig_load_authority = hv._load_holdout_authority
-        hv._load_holdout_authority = _authorized_real_authority
+        orig_grant = hv._resolve_holdout_execution_grant
+        hv._resolve_holdout_execution_grant = lambda repo_root: _granted_execution_grant()
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 mutated_path = Path(tmp) / "discovery_result.json"
@@ -857,15 +962,15 @@ class WholeFileIntegrityGateTests(unittest.TestCase):
                 self.assertNotIn("missing holdout image files", msg)
                 self.assertNotIn("gt_root does not exist", msg)
         finally:
-            hv._load_holdout_authority = orig_load_authority
+            hv._resolve_holdout_execution_grant = orig_grant
 
     def test_run_holdout_evaluation_rejects_mutated_coefficient_before_frozen_fits(self):
         original = json.loads(REAL_DISCOVERY_RESULT_PATH.read_text())
         mutated = copy.deepcopy(original)
         mutated["model_fit_summaries"][0]["coefficients"][0] += 5.0
 
-        orig_load_authority = hv._load_holdout_authority
-        hv._load_holdout_authority = _authorized_real_authority
+        orig_grant = hv._resolve_holdout_execution_grant
+        hv._resolve_holdout_execution_grant = lambda repo_root: _granted_execution_grant()
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 mutated_path = Path(tmp) / "discovery_result.json"
@@ -878,7 +983,1047 @@ class WholeFileIntegrityGateTests(unittest.TestCase):
                     )
                 self.assertIn("whole-file SHA-256 mismatch", str(ctx.exception))
         finally:
-            hv._load_holdout_authority = orig_load_authority
+            hv._resolve_holdout_execution_grant = orig_grant
+
+
+class ResolveHoldoutExecutionGrantTests(unittest.TestCase):
+    """Direct, synthetic-repo tests of hv._resolve_holdout_execution_grant
+    -- the fail-closed successor resolver. Every repo here is a fresh,
+    temporary `git init` with placeholder dependency files, so a precise
+    hash/role/path/schema mutation can be injected without ever touching
+    the real committed predecessor authority or runner files. Never opens
+    real holdout content, never constructs a model, never touches CUDA."""
+
+    def _init_repo(self):
+        tmpdir = tempfile.mkdtemp()
+        root = Path(tmpdir)
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=root, check=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=root, check=True)
+        return root
+
+    def _commit_all(self, root, message):
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", message], cwd=root, check=True)
+        commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True).stdout.strip()
+        branch = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=root, capture_output=True, text=True).stdout.strip()
+        return commit, branch
+
+    def _write_placeholder_dependencies(self, root):
+        info = {}
+        for role, path in hv._SUCCESSOR_EXPECTED_DEPENDENCY_PATHS.items():
+            full = root / path
+            full.parent.mkdir(parents=True, exist_ok=True)
+            content = f"placeholder content for role={role}\n".encode()
+            full.write_bytes(content)
+            info[role] = (path, hashlib.sha256(content).hexdigest())
+        return info
+
+    def _dependency_toml(self, info, *, bad_hash_role=None, bad_path_role=None, drop_role=None,
+                          must_be_committed_false_role=None):
+        lines = []
+        for role, (path, sha) in info.items():
+            if role == drop_role:
+                continue
+            if role == bad_hash_role:
+                sha = "0" * 64
+            if role == bad_path_role:
+                path = "some/unexpected/path.txt"
+            must_flag = "false" if role == must_be_committed_false_role else "true"
+            lines.append(
+                f'[[dependency]]\nrole = "{role}"\npath = "{path}"\nsha256 = "{sha}"\n'
+                f'must_be_committed_at_required_head = {must_flag}\nreason = "x"\n'
+            )
+        return "\n".join(lines)
+
+    def _grant_toml(self, *, holdout=True, gt_access=True, gate_b=True, gate_c=True, gate_d=True,
+                     withhold_field=None, missing_field=None):
+        fields = {
+            "description": '"x"',
+            "holdout_execution_intended": str(holdout).lower(),
+            "holdout_gt_access_intended": str(gt_access).lower(),
+            "gate_b_computation_execution_intended": str(gate_b).lower(),
+            "gate_c_computation_execution_intended": str(gate_c).lower(),
+            "gate_d_computation_execution_intended": str(gate_d).lower(),
+            "combined_96_image_execution_intended": "false",
+            "combined_96_image_note": '"x"',
+            "full_5000_image_execution_intended": "false",
+            "full_5000_image_note": '"x"',
+            "population_enlargement_intended": "false",
+            "refit_intended": "false",
+            "refit_note": '"x"',
+            "training_intended": "false",
+            "scientific_kernel_modification_intended": "false",
+            "accuracy_or_deployment_claim_intended": "false",
+            "accuracy_or_deployment_claim_note": '"x"',
+        }
+        if withhold_field:
+            fields[withhold_field] = "true"
+        if missing_field:
+            del fields[missing_field]
+        body = "\n".join(f"{k} = {v}" for k, v in fields.items())
+        return f"[authorization.execution_grant_pending_wiring]\n{body}\n"
+
+    def _gate_c_toml(self, *, execution_intended=True, missing_field=None):
+        fields = {
+            "rule_reference": '"x"',
+            "computable_under_this_contract": "true",
+            "computable_basis": '"x"',
+            "min_auroc_improvement_holdout": "0.03",
+            "paired_bootstrap_95_lower_bound_required": '"> 0"',
+            "average_precision_difference_requirement": '"not negative"',
+            "min_beneficial_dominant_holdout_propagation_outcome_rows": "100",
+            "min_harmful_dominant_holdout_propagation_outcome_rows": "100",
+            "below_minimum_result": '"INCONCLUSIVE"',
+            "execution_intended_by_this_document": str(execution_intended).lower(),
+            "execution_intended_note": '"x"',
+        }
+        if missing_field:
+            del fields[missing_field]
+        body = "\n".join(f"{k} = {v}" for k, v in fields.items())
+        return f"[gate_c_authorization]\n{body}\n"
+
+    def _build(self, *, commit_successor=True, alter_after_commit=False, malformed_text=None,
+               wrong_branch=False, bad_required_head=None,
+               dep_kwargs=None, grant_kwargs=None, gate_c_kwargs=None):
+        root = self._init_repo()
+        info = self._write_placeholder_dependencies(root)
+        base_commit, branch = self._commit_all(root, "base")
+
+        if malformed_text is not None:
+            successor_text = malformed_text
+        else:
+            prereq = (
+                "[prerequisite]\n"
+                f'required_branch = "{"wrong-branch" if wrong_branch else branch}"\n'
+                f'required_head = "{bad_required_head or base_commit}"\n\n'
+            )
+            dep_text = self._dependency_toml(info, **(dep_kwargs or {}))
+            grant_text = self._grant_toml(**(grant_kwargs or {}))
+            gate_c_text = self._gate_c_toml(**(gate_c_kwargs or {}))
+            successor_text = prereq + dep_text + "\n" + grant_text + "\n" + gate_c_text
+
+        successor_path = root / hv.HOLDOUT_EXECUTION_AUTHORITY_TOML_PATH
+        successor_path.parent.mkdir(parents=True, exist_ok=True)
+        successor_path.write_text(successor_text)
+
+        if commit_successor:
+            self._commit_all(root, "successor")
+            if alter_after_commit:
+                successor_path.write_text(successor_text + "\n# locally altered after commit\n")
+
+        return root
+
+    def test_no_successor_file_denies(self):
+        root = self._init_repo()
+        self._write_placeholder_dependencies(root)
+        self._commit_all(root, "base")
+        result = hv._resolve_holdout_execution_grant(root)
+        self.assertFalse(result["holdout_execution_authorized"])
+        self.assertFalse(result["successor_present"])
+        self.assertFalse(result["gate_c_execution_authorized"])
+
+    def test_successor_present_but_uncommitted_denies(self):
+        root = self._build(commit_successor=False)
+        result = hv._resolve_holdout_execution_grant(root)
+        self.assertFalse(result["holdout_execution_authorized"])
+        self.assertTrue(result["successor_present"])
+        self.assertIn("not committed", result["denial_reason"])
+
+    def test_successor_committed_but_locally_altered_denies(self):
+        root = self._build(alter_after_commit=True)
+        result = hv._resolve_holdout_execution_grant(root)
+        self.assertFalse(result["holdout_execution_authorized"])
+        self.assertIn("differ", result["denial_reason"])
+
+    def test_malformed_toml_denies(self):
+        root = self._build(malformed_text="this is not [ valid toml =")
+        result = hv._resolve_holdout_execution_grant(root)
+        self.assertFalse(result["holdout_execution_authorized"])
+        self.assertIsNotNone(result["denial_reason"])
+
+    def test_missing_grant_field_denies(self):
+        root = self._build(grant_kwargs={"missing_field": "refit_intended"})
+        result = hv._resolve_holdout_execution_grant(root)
+        self.assertFalse(result["holdout_execution_authorized"])
+        self.assertIn("execution_grant_pending_wiring", result["denial_reason"])
+
+    def test_missing_gate_c_field_denies(self):
+        root = self._build(gate_c_kwargs={"missing_field": "computable_basis"})
+        result = hv._resolve_holdout_execution_grant(root)
+        self.assertFalse(result["holdout_execution_authorized"])
+        self.assertIn("gate_c_authorization", result["denial_reason"])
+
+    def test_dependency_hash_mismatch_denies(self):
+        root = self._build(dep_kwargs={"bad_hash_role": "holdout_runner_implementation"})
+        result = hv._resolve_holdout_execution_grant(root)
+        self.assertFalse(result["holdout_execution_authorized"])
+        self.assertIn("hash mismatch", result["denial_reason"])
+
+    def test_dependency_path_mismatch_denies(self):
+        root = self._build(dep_kwargs={"bad_path_role": "holdout_evaluation_authority"})
+        result = hv._resolve_holdout_execution_grant(root)
+        self.assertFalse(result["holdout_execution_authorized"])
+        self.assertIn("unexpected path", result["denial_reason"])
+
+    def test_missing_dependency_role_denies(self):
+        root = self._build(dep_kwargs={"drop_role": "feasibility_contract"})
+        result = hv._resolve_holdout_execution_grant(root)
+        self.assertFalse(result["holdout_execution_authorized"])
+        self.assertIn("role set mismatch", result["denial_reason"])
+
+    def test_must_be_committed_false_denies(self):
+        root = self._build(dep_kwargs={"must_be_committed_false_role": "holdout_runner_tests"})
+        result = hv._resolve_holdout_execution_grant(root)
+        self.assertFalse(result["holdout_execution_authorized"])
+
+    def test_withheld_permission_declared_true_denies_even_with_holdout_true(self):
+        for field in hv._SUCCESSOR_EXECUTION_GRANT_MUST_BE_FALSE:
+            with self.subTest(field=field):
+                root = self._build(grant_kwargs={"withhold_field": field})
+                result = hv._resolve_holdout_execution_grant(root)
+                self.assertFalse(result["holdout_execution_authorized"], f"{field} should have forced denial")
+
+    def test_wrong_branch_denies(self):
+        root = self._build(wrong_branch=True)
+        result = hv._resolve_holdout_execution_grant(root)
+        self.assertFalse(result["holdout_execution_authorized"])
+        self.assertIn("required_branch", result["denial_reason"])
+
+    def test_required_head_not_ancestor_denies(self):
+        root = self._build(bad_required_head="0" * 40)
+        result = hv._resolve_holdout_execution_grant(root)
+        self.assertFalse(result["holdout_execution_authorized"])
+        self.assertIn("ancestor", result["denial_reason"])
+
+    def test_required_head_hash_mismatch_denies_even_if_matching_current_head(self):
+        """Regression test for a real defect found and repaired in this
+        task: the resolver used to re-verify each dependency's declared
+        hash against `git show <current_head>:<path>` -- NOT against the
+        successor's own stated `required_head`, despite every dependency
+        declaring `must_be_committed_at_required_head=true`. This let a
+        successor pair a genuinely-older, ancestor-valid `required_head`
+        with a hash that only actually matches some LATER commit's
+        content. Reproduces exactly that: required_head is the FIRST
+        commit (before a dependency file's content changed); the
+        successor's declared hash for that dependency is the LATER
+        commit's content -- which DOES match current HEAD, so the
+        pre-repair code would have wrongly accepted it. Must be denied."""
+        root = self._init_repo()
+        info = self._write_placeholder_dependencies(root)
+        required_head_commit, branch = self._commit_all(root, "base (required_head)")
+
+        tampered_role = "holdout_runner_implementation"
+        tampered_path_rel = hv._SUCCESSOR_EXPECTED_DEPENDENCY_PATHS[tampered_role]
+        later_content = b"later commit content -- NOT what existed at required_head\n"
+        (root / tampered_path_rel).write_bytes(later_content)
+        self._commit_all(root, f"later change to {tampered_role}")  # current HEAD now past required_head_commit
+        later_sha = hashlib.sha256(later_content).hexdigest()
+
+        info_with_later_hash = dict(info)
+        orig_path, _orig_sha_at_required_head = info[tampered_role]
+        info_with_later_hash[tampered_role] = (orig_path, later_sha)  # lies about required_head's own content
+
+        prereq = f'[prerequisite]\nrequired_branch = "{branch}"\nrequired_head = "{required_head_commit}"\n\n'
+        successor_text = (
+            prereq + self._dependency_toml(info_with_later_hash) + "\n"
+            + self._grant_toml() + "\n" + self._gate_c_toml()
+        )
+        successor_path = root / hv.HOLDOUT_EXECUTION_AUTHORITY_TOML_PATH
+        successor_path.parent.mkdir(parents=True, exist_ok=True)
+        successor_path.write_text(successor_text)
+        self._commit_all(root, "successor (lying about required_head's own hash)")
+
+        result = hv._resolve_holdout_execution_grant(root)
+        self.assertFalse(result["holdout_execution_authorized"])
+        self.assertIn("required_head", result["denial_reason"])
+        self.assertIn(tampered_role, result["denial_reason"])
+
+    def test_valid_committed_successor_authorizes_holdout_and_gate_c(self):
+        root = self._build()
+        result = hv._resolve_holdout_execution_grant(root)
+        self.assertTrue(result["holdout_execution_authorized"])
+        self.assertTrue(result["gate_c_execution_authorized"])
+        self.assertIsNone(result["denial_reason"])
+
+    def test_gate_c_declined_independently_of_granted_holdout(self):
+        root = self._build(grant_kwargs={"gate_c": False})
+        result = hv._resolve_holdout_execution_grant(root)
+        self.assertTrue(result["holdout_execution_authorized"])
+        self.assertFalse(result["gate_c_execution_authorized"])
+
+    def test_gate_c_authorization_table_declining_also_denies_gate_c(self):
+        root = self._build(gate_c_kwargs={"execution_intended": False})
+        result = hv._resolve_holdout_execution_grant(root)
+        self.assertTrue(result["holdout_execution_authorized"])
+        self.assertFalse(result["gate_c_execution_authorized"])
+
+    def test_gate_c_never_granted_when_holdout_itself_is_denied(self):
+        root = self._build(grant_kwargs={"holdout": False})
+        result = hv._resolve_holdout_execution_grant(root)
+        self.assertFalse(result["holdout_execution_authorized"])
+        self.assertFalse(result["gate_c_execution_authorized"])
+
+
+class PublicGrantWiringTests(unittest.TestCase):
+    """Confirms the resolver's result is actually consumed by
+    preflight_holdout/run_holdout_evaluation's authorization check and by
+    _run_holdout_evaluation_core's Gate C argument -- not merely that
+    _resolve_holdout_execution_grant computes correctly in isolation
+    (that is ResolveHoldoutExecutionGrantTests's job). Monkeypatches only
+    hv._resolve_holdout_execution_grant (and, for the injection tests,
+    hv._run_holdout_evaluation_core itself, to capture its `data` argument
+    without running any real per-image work) -- the real committed
+    predecessor authority, which still denies on its own, is used
+    throughout, so these tests also double as an authorization-check
+    ordering proof: a granted result lets execution reach a later,
+    different failure (a real path/content check), never the reverse."""
+
+    def test_preflight_holdout_proceeds_past_auth_when_resolver_grants(self):
+        orig = hv._resolve_holdout_execution_grant
+        hv._resolve_holdout_execution_grant = lambda repo_root: {
+            "holdout_execution_authorized": True, "gate_c_execution_authorized": True,
+            "successor_present": True, "denial_reason": None,
+        }
+        try:
+            with self.assertRaises(hv.HoldoutEvaluationError) as ctx:
+                hv.preflight_holdout(
+                    REPO_ROOT, weight_dir="/nonexistent", image_root=Path("/nonexistent"),
+                    gt_root=Path("/nonexistent"), output_root=Path("/nonexistent"),
+                    discovery_result_path=Path("/nonexistent/discovery_result.json"), mode="fresh",
+                )
+            msg = str(ctx.exception)
+            self.assertNotIn("not authorized", msg)
+            self.assertIn("does not exist", msg)
+        finally:
+            hv._resolve_holdout_execution_grant = orig
+
+    def test_preflight_holdout_still_denies_when_resolver_denies(self):
+        orig = hv._resolve_holdout_execution_grant
+        hv._resolve_holdout_execution_grant = lambda repo_root: {
+            "holdout_execution_authorized": False, "gate_c_execution_authorized": False,
+            "successor_present": False, "denial_reason": "no successor authority file present",
+        }
+        try:
+            with self.assertRaises(hv.HoldoutEvaluationError) as ctx:
+                hv.preflight_holdout(
+                    REPO_ROOT, weight_dir="/nonexistent", image_root=Path("/nonexistent"),
+                    gt_root=Path("/nonexistent"), output_root=Path("/nonexistent"),
+                    discovery_result_path=Path("/nonexistent/discovery_result.json"), mode="fresh",
+                )
+            self.assertIn("not authorized", str(ctx.exception))
+        finally:
+            hv._resolve_holdout_execution_grant = orig
+
+    def test_run_holdout_evaluation_proceeds_past_auth_when_resolver_grants(self):
+        orig = hv._resolve_holdout_execution_grant
+        hv._resolve_holdout_execution_grant = lambda repo_root: {
+            "holdout_execution_authorized": True, "gate_c_execution_authorized": True,
+            "successor_present": True, "denial_reason": None,
+        }
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                # an EXISTING but wrong-content file: proceeds past the
+                # authorization check, then fails on the (unrelated,
+                # already-tested) whole-file hash gate -- not on the
+                # authorization message, and not on a raw FileNotFoundError.
+                bad_discovery_result = Path(tmp) / "discovery_result.json"
+                bad_discovery_result.write_text("{}")
+                with self.assertRaises(hv.HoldoutEvaluationError) as ctx:
+                    hv.run_holdout_evaluation(
+                        REPO_ROOT, weight_dir="/nonexistent", image_root=Path("/nonexistent"),
+                        gt_root=Path("/nonexistent"), output_root=Path("/nonexistent"),
+                        discovery_result_path=bad_discovery_result, mode="fresh",
+                    )
+                msg = str(ctx.exception)
+                self.assertNotIn("not authorized", msg)
+                self.assertIn("whole-file SHA-256 mismatch", msg)
+        finally:
+            hv._resolve_holdout_execution_grant = orig
+
+    def test_run_holdout_evaluation_still_denies_when_resolver_denies(self):
+        orig = hv._resolve_holdout_execution_grant
+        hv._resolve_holdout_execution_grant = lambda repo_root: {
+            "holdout_execution_authorized": False, "gate_c_execution_authorized": False,
+            "successor_present": False, "denial_reason": "no successor authority file present",
+        }
+        try:
+            with self.assertRaises(hv.HoldoutEvaluationError) as ctx:
+                hv.run_holdout_evaluation(
+                    REPO_ROOT, weight_dir="/nonexistent", image_root=Path("/nonexistent"),
+                    gt_root=Path("/nonexistent"), output_root=Path("/nonexistent"),
+                    discovery_result_path=Path("/nonexistent/discovery_result.json"), mode="fresh",
+                )
+            self.assertIn("not authorized", str(ctx.exception))
+        finally:
+            hv._resolve_holdout_execution_grant = orig
+
+    def test_run_holdout_evaluation_injects_resolved_gate_c_grant_into_core(self):
+        if not REAL_DISCOVERY_RESULT_PATH.exists():
+            self.skipTest("real discovery_result.json fixture not present on this filesystem")
+        captured = {}
+        orig_core = hv._run_holdout_evaluation_core
+
+        def fake_core(repo_root, data, frozen_fits, **kw):
+            captured["gate_c_flag"] = data["gate_c_authorization"]["execution_authorized_by_this_document"]
+            raise hv.HoldoutEvaluationError("stop here deliberately, before any real per-image work")
+
+        orig_grant = hv._resolve_holdout_execution_grant
+        hv._resolve_holdout_execution_grant = lambda repo_root: {
+            "holdout_execution_authorized": True, "gate_c_execution_authorized": True,
+            "successor_present": True, "denial_reason": None,
+        }
+        hv._run_holdout_evaluation_core = fake_core
+        try:
+            with self.assertRaises(hv.HoldoutEvaluationError):
+                hv.run_holdout_evaluation(
+                    REPO_ROOT, weight_dir="/nonexistent", image_root=Path("/nonexistent"),
+                    gt_root=Path("/nonexistent"), output_root=Path("/nonexistent"),
+                    discovery_result_path=REAL_DISCOVERY_RESULT_PATH, mode="fresh",
+                )
+            self.assertTrue(captured.get("gate_c_flag"), "resolved gate_c grant was not propagated into _run_holdout_evaluation_core's data")
+        finally:
+            hv._resolve_holdout_execution_grant = orig_grant
+            hv._run_holdout_evaluation_core = orig_core
+
+    def test_run_holdout_evaluation_does_not_inject_gate_c_when_resolver_declines_it(self):
+        if not REAL_DISCOVERY_RESULT_PATH.exists():
+            self.skipTest("real discovery_result.json fixture not present on this filesystem")
+        captured = {}
+        orig_core = hv._run_holdout_evaluation_core
+
+        def fake_core(repo_root, data, frozen_fits, **kw):
+            captured["gate_c_flag"] = data["gate_c_authorization"]["execution_authorized_by_this_document"]
+            raise hv.HoldoutEvaluationError("stop here deliberately")
+
+        orig_grant = hv._resolve_holdout_execution_grant
+        hv._resolve_holdout_execution_grant = lambda repo_root: {
+            "holdout_execution_authorized": True, "gate_c_execution_authorized": False,
+            "successor_present": True, "denial_reason": None,
+        }
+        hv._run_holdout_evaluation_core = fake_core
+        try:
+            with self.assertRaises(hv.HoldoutEvaluationError):
+                hv.run_holdout_evaluation(
+                    REPO_ROOT, weight_dir="/nonexistent", image_root=Path("/nonexistent"),
+                    gt_root=Path("/nonexistent"), output_root=Path("/nonexistent"),
+                    discovery_result_path=REAL_DISCOVERY_RESULT_PATH, mode="fresh",
+                )
+            self.assertFalse(captured.get("gate_c_flag"))
+        finally:
+            hv._resolve_holdout_execution_grant = orig_grant
+            hv._run_holdout_evaluation_core = orig_core
+
+
+class GateCIsolationSoleSourceTests(unittest.TestCase):
+    """Regression test for a real defect found in independent review and
+    repaired in this task: run_holdout_evaluation used to OR the verified
+    successor's own gate_c_execution_authorized with the PREDECESSOR's
+    working-tree gate_c_authorization.execution_authorized_by_this_document
+    -- read straight off disk with no git-commit verification, unlike the
+    successor -- so a locally altered (never committed) predecessor
+    claiming Gate C was authorized could override a genuinely verified
+    successor's explicit denial of it. The fix takes the value SOLELY
+    from the verified successor grant. These tests build a GENUINELY
+    git-committed successor (never monkeypatching the resolver or the
+    predecessor loader) so the successor's own verification is real, and
+    only bypass the unrelated discovery-result/population mechanics that
+    are separately, thoroughly tested elsewhere."""
+
+    def _build_repo(self, *, gate_c_intended, predecessor_gate_c_flag):
+        tmpdir = tempfile.mkdtemp()
+        root = Path(tmpdir)
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=root, check=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=root, check=True)
+
+        info = {}
+        for role, path in hv._SUCCESSOR_EXPECTED_DEPENDENCY_PATHS.items():
+            full = root / path
+            full.parent.mkdir(parents=True, exist_ok=True)
+            if role == "holdout_evaluation_authority":
+                content = (
+                    "[authorization.frozen_flags]\nholdout_execution_authorized = false\n\n"
+                    "[gate_c_authorization]\n"
+                    f"execution_authorized_by_this_document = {str(predecessor_gate_c_flag).lower()}\n"
+                ).encode()
+            else:
+                content = f"content for {role}\n".encode()
+            full.write_bytes(content)
+            info[role] = (path, hashlib.sha256(content).hexdigest())
+
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "base"], cwd=root, check=True)
+        base_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True).stdout.strip()
+        branch = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=root, capture_output=True, text=True).stdout.strip()
+
+        dep_lines = "\n".join(
+            f'[[dependency]]\nrole = "{role}"\npath = "{path}"\nsha256 = "{sha}"\n'
+            'must_be_committed_at_required_head = true\nreason = "x"\n'
+            for role, (path, sha) in info.items()
+        )
+        grant_fields = {
+            "description": '"x"', "holdout_execution_intended": "true", "holdout_gt_access_intended": "true",
+            "gate_b_computation_execution_intended": "true",
+            "gate_c_computation_execution_intended": str(gate_c_intended).lower(),
+            "gate_d_computation_execution_intended": "true", "combined_96_image_execution_intended": "false",
+            "combined_96_image_note": '"x"', "full_5000_image_execution_intended": "false",
+            "full_5000_image_note": '"x"', "population_enlargement_intended": "false",
+            "refit_intended": "false", "refit_note": '"x"', "training_intended": "false",
+            "scientific_kernel_modification_intended": "false", "accuracy_or_deployment_claim_intended": "false",
+            "accuracy_or_deployment_claim_note": '"x"',
+        }
+        gate_c_fields = {
+            "rule_reference": '"x"', "computable_under_this_contract": "true", "computable_basis": '"x"',
+            "min_auroc_improvement_holdout": "0.03", "paired_bootstrap_95_lower_bound_required": '"> 0"',
+            "average_precision_difference_requirement": '"not negative"',
+            "min_beneficial_dominant_holdout_propagation_outcome_rows": "100",
+            "min_harmful_dominant_holdout_propagation_outcome_rows": "100",
+            "below_minimum_result": '"INCONCLUSIVE"',
+            "execution_intended_by_this_document": str(gate_c_intended).lower(),
+            "execution_intended_note": '"x"',
+        }
+        successor_text = (
+            f'[prerequisite]\nrequired_branch = "{branch}"\nrequired_head = "{base_commit}"\n\n'
+            + dep_lines + "\n"
+            + "[authorization.execution_grant_pending_wiring]\n"
+            + "\n".join(f"{k} = {v}" for k, v in grant_fields.items()) + "\n\n"
+            + "[gate_c_authorization]\n"
+            + "\n".join(f"{k} = {v}" for k, v in gate_c_fields.items()) + "\n"
+        )
+        successor_path = root / hv.HOLDOUT_EXECUTION_AUTHORITY_TOML_PATH
+        successor_path.parent.mkdir(parents=True, exist_ok=True)
+        successor_path.write_text(successor_text)
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "successor"], cwd=root, check=True)
+        return root
+
+    def _capture_gate_c_flag_reaching_core(self, root):
+        """Runs the REAL run_holdout_evaluation -- REAL _load_holdout_
+        authority, REAL _resolve_holdout_execution_grant -- up to the
+        point _run_holdout_evaluation_core is called, capturing the Gate C
+        flag it receives. Only the downstream discovery-result/population
+        mechanics (irrelevant to this test, and separately covered by
+        WholeFileIntegrityGateTests/HoldoutPopulationTests) are bypassed."""
+        captured = {}
+        orig_hash_check = hv.verify_discovery_result_file_hash
+        orig_load_fits = hv.load_frozen_fits
+        orig_load_pop = hv.load_holdout_population
+        orig_overlap = hv._verify_no_discovery_overlap
+        orig_core = hv._run_holdout_evaluation_core
+
+        hv.verify_discovery_result_file_hash = lambda data, path: {"match": True}
+        hv.load_frozen_fits = lambda data, discovery_result: {}
+        hv.load_holdout_population = lambda repo_root: [f"{100000000000 + i}" for i in range(48)]
+        hv._verify_no_discovery_overlap = lambda repo_root, holdout_ids: None
+
+        def fake_core(repo_root, data, frozen_fits, **kw):
+            captured["gate_c_flag"] = data["gate_c_authorization"]["execution_authorized_by_this_document"]
+            raise hv.HoldoutEvaluationError("stop here deliberately, before any real per-image work")
+
+        hv._run_holdout_evaluation_core = fake_core
+        try:
+            dummy_path = root / "dummy_discovery_result.json"
+            dummy_path.write_text("{}")
+            with self.assertRaises(hv.HoldoutEvaluationError):
+                hv.run_holdout_evaluation(
+                    root, weight_dir="/nonexistent", image_root=Path("/nonexistent"),
+                    gt_root=Path("/nonexistent"), output_root=Path("/nonexistent"),
+                    discovery_result_path=dummy_path, mode="fresh",
+                )
+        finally:
+            hv.verify_discovery_result_file_hash = orig_hash_check
+            hv.load_frozen_fits = orig_load_fits
+            hv.load_holdout_population = orig_load_pop
+            hv._verify_no_discovery_overlap = orig_overlap
+            hv._run_holdout_evaluation_core = orig_core
+        return captured.get("gate_c_flag")
+
+    def test_locally_altered_predecessor_is_now_denied_by_the_live_dependency_check(self):
+        """The scenario this class was originally written to probe --
+        editing the predecessor's OWN on-disk copy after the successor was
+        committed -- is now caught EARLIER and MORE STRONGLY than by Gate
+        C isolation alone: VERIFY_AND_REPAIR_LIVE_HOLDOUT_AUTHORITY_
+        BINDINGS added a live on-disk-bytes-vs-required_head check for
+        every bound dependency (including the predecessor itself, role
+        'holdout_evaluation_authority'), so this edit now denies the
+        WHOLE grant, not just Gate C. See LiveDependencyDriftTests for
+        the dedicated, general-purpose regression coverage of that check;
+        this test keeps the historical scenario intact end to end."""
+        root = self._build_repo(gate_c_intended=False, predecessor_gate_c_flag=False)
+        grant = hv._resolve_holdout_execution_grant(root)
+        self.assertTrue(grant["holdout_execution_authorized"], grant["denial_reason"])
+        self.assertFalse(grant["gate_c_execution_authorized"])
+
+        predecessor_path = root / hv.HOLDOUT_AUTHORITY_TOML_PATH
+        predecessor_path.write_text(
+            "[authorization.frozen_flags]\nholdout_execution_authorized = false\n\n"
+            "[gate_c_authorization]\nexecution_authorized_by_this_document = true\n"
+        )
+        grant_after_tamper = hv._resolve_holdout_execution_grant(root)
+        self.assertFalse(grant_after_tamper["holdout_execution_authorized"])
+        self.assertIn("LIVE", grant_after_tamper["denial_reason"])
+
+    def test_gate_c_combination_never_reads_the_predecessors_own_field(self):
+        """Isolates the Gate C combination line itself
+        (data["gate_c_authorization"]["execution_authorized_by_this_
+        document"] = grant["gate_c_execution_authorized"] is True) from
+        the separately-verified live-dependency-drift check: monkeypatches
+        _load_holdout_authority to a predecessor whose OWN gate_c flag
+        reads True, and _resolve_holdout_execution_grant to a genuinely-
+        shaped verified-successor result that denies Gate C, confirming
+        the combination takes its value SOLELY from the resolver -- no
+        git/disk verification involved, so this is a pure code-level
+        guarantee, independent of and in addition to the live check."""
+        orig_load = hv._load_holdout_authority
+        orig_grant = hv._resolve_holdout_execution_grant
+        orig_hash_check = hv.verify_discovery_result_file_hash
+        orig_load_fits = hv.load_frozen_fits
+        orig_load_pop = hv.load_holdout_population
+        orig_overlap = hv._verify_no_discovery_overlap
+        orig_core = hv._run_holdout_evaluation_core
+
+        hv._load_holdout_authority = lambda repo_root: {
+            "gate_c_authorization": {"execution_authorized_by_this_document": True},
+        }
+        hv._resolve_holdout_execution_grant = lambda repo_root: {
+            "holdout_execution_authorized": True, "gate_c_execution_authorized": False,
+            "successor_present": True, "denial_reason": None,
+        }
+        hv.verify_discovery_result_file_hash = lambda data, path: {"match": True}
+        hv.load_frozen_fits = lambda data, discovery_result: {}
+        hv.load_holdout_population = lambda repo_root: [f"{100000000000 + i}" for i in range(48)]
+        hv._verify_no_discovery_overlap = lambda repo_root, holdout_ids: None
+
+        captured = {}
+
+        def fake_core(repo_root, data, frozen_fits, **kw):
+            captured["gate_c_flag"] = data["gate_c_authorization"]["execution_authorized_by_this_document"]
+            raise hv.HoldoutEvaluationError("stop here deliberately")
+
+        hv._run_holdout_evaluation_core = fake_core
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                dummy_path = Path(tmp) / "dummy_discovery_result.json"
+                dummy_path.write_text("{}")
+                with self.assertRaises(hv.HoldoutEvaluationError):
+                    hv.run_holdout_evaluation(
+                        REPO_ROOT, weight_dir="/nonexistent", image_root=Path("/nonexistent"),
+                        gt_root=Path("/nonexistent"), output_root=Path("/nonexistent"),
+                        discovery_result_path=dummy_path, mode="fresh",
+                    )
+            self.assertFalse(captured.get("gate_c_flag"), "predecessor's own gate_c field overrode the verified successor's Gate C denial")
+        finally:
+            hv._load_holdout_authority = orig_load
+            hv._resolve_holdout_execution_grant = orig_grant
+            hv.verify_discovery_result_file_hash = orig_hash_check
+            hv.load_frozen_fits = orig_load_fits
+            hv.load_holdout_population = orig_load_pop
+            hv._verify_no_discovery_overlap = orig_overlap
+            hv._run_holdout_evaluation_core = orig_core
+
+    def test_verified_explicit_gate_c_grant_reaches_the_core_as_true(self):
+        root = self._build_repo(gate_c_intended=True, predecessor_gate_c_flag=False)
+        grant = hv._resolve_holdout_execution_grant(root)
+        self.assertTrue(grant["holdout_execution_authorized"], grant["denial_reason"])
+        self.assertTrue(grant["gate_c_execution_authorized"])
+
+        flag = self._capture_gate_c_flag_reaching_core(root)
+        self.assertTrue(flag, "a verified successor's explicit Gate C grant did not reach the core")
+
+
+class LiveDependencyDriftTests(unittest.TestCase):
+    """Regression test for a real defect found and repaired in this task:
+    _resolve_holdout_execution_grant's dependency verification compared
+    only git BLOBS (required_head vs current HEAD) for each bound
+    dependency, never the LIVE file actually on disk -- which is what a
+    running process (including this one) actually imports/reads. Editing
+    a bound dependency file on disk after the successor was committed,
+    with Git HEAD left unchanged, went completely undetected: neither
+    commit-based check notices a working-tree-only change. The fix adds a
+    third check per dependency: live on-disk bytes must also match
+    required_head's bytes. These tests use a REAL on-disk file edit in a
+    genuinely committed temp repo, never a mocked loader."""
+
+    def _build_repo(self):
+        tmpdir = tempfile.mkdtemp()
+        root = Path(tmpdir)
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=root, check=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=root, check=True)
+
+        info = {}
+        for role, path in hv._SUCCESSOR_EXPECTED_DEPENDENCY_PATHS.items():
+            full = root / path
+            full.parent.mkdir(parents=True, exist_ok=True)
+            if role == "holdout_evaluation_authority":
+                content = (
+                    "[authorization.frozen_flags]\nholdout_execution_authorized = false\n\n"
+                    "[gate_c_authorization]\nexecution_authorized_by_this_document = false\n"
+                ).encode()
+            else:
+                content = f"content for {role}\n".encode()
+            full.write_bytes(content)
+            info[role] = (path, hashlib.sha256(content).hexdigest())
+
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "base"], cwd=root, check=True)
+        base_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True).stdout.strip()
+        branch = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=root, capture_output=True, text=True).stdout.strip()
+
+        dep_lines = "\n".join(
+            f'[[dependency]]\nrole = "{role}"\npath = "{path}"\nsha256 = "{sha}"\n'
+            'must_be_committed_at_required_head = true\nreason = "x"\n'
+            for role, (path, sha) in info.items()
+        )
+        successor_text = (
+            f'[prerequisite]\nrequired_branch = "{branch}"\nrequired_head = "{base_commit}"\n\n'
+            + dep_lines + "\n"
+            + '[authorization.execution_grant_pending_wiring]\n'
+            'description = "x"\nholdout_execution_intended = true\nholdout_gt_access_intended = true\n'
+            'gate_b_computation_execution_intended = true\ngate_c_computation_execution_intended = true\n'
+            'gate_d_computation_execution_intended = true\ncombined_96_image_execution_intended = false\n'
+            'combined_96_image_note = "x"\nfull_5000_image_execution_intended = false\n'
+            'full_5000_image_note = "x"\npopulation_enlargement_intended = false\nrefit_intended = false\n'
+            'refit_note = "x"\ntraining_intended = false\nscientific_kernel_modification_intended = false\n'
+            'accuracy_or_deployment_claim_intended = false\naccuracy_or_deployment_claim_note = "x"\n\n'
+            '[gate_c_authorization]\nrule_reference = "x"\ncomputable_under_this_contract = true\n'
+            'computable_basis = "x"\nmin_auroc_improvement_holdout = 0.03\n'
+            'paired_bootstrap_95_lower_bound_required = "> 0"\naverage_precision_difference_requirement = "not negative"\n'
+            'min_beneficial_dominant_holdout_propagation_outcome_rows = 100\n'
+            'min_harmful_dominant_holdout_propagation_outcome_rows = 100\nbelow_minimum_result = "INCONCLUSIVE"\n'
+            'execution_intended_by_this_document = true\nexecution_intended_note = "x"\n'
+        )
+        successor_path = root / hv.HOLDOUT_EXECUTION_AUTHORITY_TOML_PATH
+        successor_path.parent.mkdir(parents=True, exist_ok=True)
+        successor_path.write_text(successor_text)
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "successor"], cwd=root, check=True)
+        return root
+
+    def test_live_edit_to_a_dependency_after_commit_denies_execution(self):
+        root = self._build_repo()
+        head_before = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True).stdout.strip()
+        grant_before = hv._resolve_holdout_execution_grant(root)
+        self.assertTrue(grant_before["holdout_execution_authorized"], grant_before["denial_reason"])
+
+        # a REAL on-disk edit -- not a mocked loader -- to a bound
+        # dependency OTHER than the predecessor (already covered by
+        # GateCIsolationSoleSourceTests), after commit, HEAD unchanged.
+        drifted_role = "holdout_runner_cli"
+        drifted_path = root / hv._SUCCESSOR_EXPECTED_DEPENDENCY_PATHS[drifted_role]
+        drifted_path.write_text("live, uncommitted edit -- not what was committed or reviewed\n")
+
+        head_after = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True).stdout.strip()
+        self.assertEqual(head_before, head_after)  # confirms HEAD genuinely did not move
+
+        grant_after = hv._resolve_holdout_execution_grant(root)
+        self.assertFalse(grant_after["holdout_execution_authorized"])
+        self.assertIn(drifted_role, grant_after["denial_reason"])
+        self.assertIn("LIVE", grant_after["denial_reason"])
+
+    def test_public_run_holdout_evaluation_denies_before_reading_holdout_paths_under_live_drift(self):
+        root = self._build_repo()
+        drifted_path = root / hv._SUCCESSOR_EXPECTED_DEPENDENCY_PATHS["holdout_runner_tests"]
+        drifted_path.write_text("live, uncommitted edit\n")
+
+        with self.assertRaises(hv.HoldoutEvaluationError) as ctx:
+            hv.run_holdout_evaluation(
+                root, weight_dir="/definitely/does/not/exist",
+                image_root=Path("/definitely/does/not/exist"),
+                gt_root=Path("/definitely/does/not/exist"),
+                output_root=Path("/definitely/does/not/exist/output"),
+                discovery_result_path=Path("/definitely/does/not/exist/discovery_result.json"),
+                mode="fresh",
+            )
+        msg = str(ctx.exception)
+        self.assertIn("not authorized", msg)
+        self.assertNotIn("does not exist", msg)  # would indicate it got past the auth check
+
+    def test_public_preflight_holdout_denies_before_reading_holdout_paths_under_live_drift(self):
+        root = self._build_repo()
+        drifted_path = root / hv._SUCCESSOR_EXPECTED_DEPENDENCY_PATHS["discovery_executor_implementation"]
+        drifted_path.write_text("live, uncommitted edit\n")
+
+        # preflight_holdout also calls verify_dependency_hashes_holdout,
+        # which verifies the PREDECESSOR's own, unrelated 8-role
+        # dependency table -- irrelevant to what this test verifies, so
+        # it is bypassed the same way other tests in this suite isolate a
+        # single mechanism (e.g. PublicGrantWiringTests).
+        orig_verify_deps = hv.verify_dependency_hashes_holdout
+        hv.verify_dependency_hashes_holdout = lambda repo_root, data: {"all_match": True}
+        try:
+            with self.assertRaises(hv.HoldoutEvaluationError) as ctx:
+                hv.preflight_holdout(
+                    root, weight_dir="/definitely/does/not/exist",
+                    image_root=Path("/definitely/does/not/exist"),
+                    gt_root=Path("/definitely/does/not/exist"),
+                    output_root=Path("/definitely/does/not/exist/output"),
+                    discovery_result_path=Path("/definitely/does/not/exist/discovery_result.json"),
+                    mode="fresh",
+                )
+            msg = str(ctx.exception)
+            self.assertIn("not authorized", msg)
+            self.assertNotIn("does not exist", msg)
+        finally:
+            hv.verify_dependency_hashes_holdout = orig_verify_deps
+
+
+class RunHoldoutEvaluationErrorContractAfterGrantTests(unittest.TestCase):
+    """Regression test for a real defect found and repaired in this task:
+    run_holdout_evaluation called verify_discovery_result_file_hash
+    (which does discovery_result_path.read_bytes()) without first
+    checking the path exists -- a gap only reachable once a valid grant
+    exists, so it went unexercised until now. A genuinely missing
+    discovery_result.json leaked a raw FileNotFoundError instead of
+    HoldoutEvaluationError. Unlike PublicGrantWiringTests (which
+    monkeypatches hv._resolve_holdout_execution_grant directly), this
+    test builds a fully synthetic, GENUINELY committed, GENUINELY
+    independently-verified successor authority -- exercising
+    run_holdout_evaluation's real authorization path end to end -- so the
+    reproduction is not just "assume a grant" but "prove one, then hit
+    the bug precisely once past it, before any frozen-fit coefficient use."""
+
+    def _build_granted_repo(self, discovery_result_json_hash=None):
+        tmpdir = tempfile.mkdtemp()
+        root = Path(tmpdir)
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=root, check=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=root, check=True)
+
+        info = {}
+        for role, path in hv._SUCCESSOR_EXPECTED_DEPENDENCY_PATHS.items():
+            full = root / path
+            full.parent.mkdir(parents=True, exist_ok=True)
+            if role == "holdout_evaluation_authority":
+                # a MINIMAL but real predecessor authority -- only the
+                # keys run_holdout_evaluation actually reads from it.
+                binding = (
+                    f'\n[discovery_result_binding.artifact_hashes]\ndiscovery_result_json = "{discovery_result_json_hash}"\n'
+                    if discovery_result_json_hash else ""
+                )
+                content = (
+                    "[authorization.frozen_flags]\n"
+                    "holdout_execution_authorized = false\n\n"
+                    "[gate_c_authorization]\n"
+                    "execution_authorized_by_this_document = false\n"
+                    + binding
+                ).encode()
+            else:
+                content = f"placeholder content for role={role}\n".encode()
+            full.write_bytes(content)
+            info[role] = (path, hashlib.sha256(content).hexdigest())
+
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "base"], cwd=root, check=True)
+        base_commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True).stdout.strip()
+        branch = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=root, capture_output=True, text=True).stdout.strip()
+
+        dep_lines = "\n".join(
+            f'[[dependency]]\nrole = "{role}"\npath = "{path}"\nsha256 = "{sha}"\n'
+            'must_be_committed_at_required_head = true\nreason = "x"\n'
+            for role, (path, sha) in info.items()
+        )
+        grant_fields = {
+            "description": '"x"', "holdout_execution_intended": "true", "holdout_gt_access_intended": "true",
+            "gate_b_computation_execution_intended": "true", "gate_c_computation_execution_intended": "true",
+            "gate_d_computation_execution_intended": "true", "combined_96_image_execution_intended": "false",
+            "combined_96_image_note": '"x"', "full_5000_image_execution_intended": "false",
+            "full_5000_image_note": '"x"', "population_enlargement_intended": "false",
+            "refit_intended": "false", "refit_note": '"x"', "training_intended": "false",
+            "scientific_kernel_modification_intended": "false", "accuracy_or_deployment_claim_intended": "false",
+            "accuracy_or_deployment_claim_note": '"x"',
+        }
+        gate_c_fields = {
+            "rule_reference": '"x"', "computable_under_this_contract": "true", "computable_basis": '"x"',
+            "min_auroc_improvement_holdout": "0.03", "paired_bootstrap_95_lower_bound_required": '"> 0"',
+            "average_precision_difference_requirement": '"not negative"',
+            "min_beneficial_dominant_holdout_propagation_outcome_rows": "100",
+            "min_harmful_dominant_holdout_propagation_outcome_rows": "100",
+            "below_minimum_result": '"INCONCLUSIVE"', "execution_intended_by_this_document": "true",
+            "execution_intended_note": '"x"',
+        }
+        successor_text = (
+            f'[prerequisite]\nrequired_branch = "{branch}"\nrequired_head = "{base_commit}"\n\n'
+            + dep_lines + "\n"
+            + "[authorization.execution_grant_pending_wiring]\n"
+            + "\n".join(f"{k} = {v}" for k, v in grant_fields.items()) + "\n\n"
+            + "[gate_c_authorization]\n"
+            + "\n".join(f"{k} = {v}" for k, v in gate_c_fields.items()) + "\n"
+        )
+        successor_path = root / hv.HOLDOUT_EXECUTION_AUTHORITY_TOML_PATH
+        successor_path.parent.mkdir(parents=True, exist_ok=True)
+        successor_path.write_text(successor_text)
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "successor"], cwd=root, check=True)
+        return root
+
+    def test_run_holdout_evaluation_raises_holdout_evaluation_error_not_file_not_found_error(self):
+        root = self._build_granted_repo()
+        # confirm the grant is genuinely, independently verified -- not
+        # assumed -- before relying on it for the actual reproduction.
+        grant = hv._resolve_holdout_execution_grant(root)
+        self.assertTrue(grant["holdout_execution_authorized"], grant["denial_reason"])
+
+        missing_path = root / "definitely_missing_discovery_result.json"
+        self.assertFalse(missing_path.exists())
+        with self.assertRaises(hv.HoldoutEvaluationError) as ctx:
+            hv.run_holdout_evaluation(
+                root, weight_dir="/nonexistent", image_root=Path("/nonexistent"),
+                gt_root=Path("/nonexistent"), output_root=Path("/nonexistent"),
+                discovery_result_path=missing_path, mode="fresh",
+            )
+        msg = str(ctx.exception)
+        self.assertIn("does not exist", msg)
+        self.assertNotIn("not authorized", msg)  # proves it got PAST authorization first
+
+    def test_run_holdout_evaluation_translates_invalid_json_with_matching_hash(self):
+        """Regression test for the second finding of the independent
+        review: a discovery_result.json that EXISTS and matches its
+        authority-bound whole-file SHA-256 (so verify_discovery_result_
+        file_hash genuinely passes -- not bypassed) but is not valid JSON
+        used to leak a raw json.JSONDecodeError. Built with a GENUINELY
+        committed successor (never monkeypatched) and a hash the
+        predecessor genuinely binds to these exact invalid-JSON bytes, so
+        the hash-match itself is real, not assumed."""
+        bad_bytes = b"not valid json at all {{{"
+        bad_hash = hashlib.sha256(bad_bytes).hexdigest()
+        root = self._build_granted_repo(discovery_result_json_hash=bad_hash)
+        grant = hv._resolve_holdout_execution_grant(root)
+        self.assertTrue(grant["holdout_execution_authorized"], grant["denial_reason"])
+
+        bad_json_path = root / "bad_discovery_result.json"
+        bad_json_path.write_bytes(bad_bytes)
+        with self.assertRaises(hv.HoldoutEvaluationError) as ctx:
+            hv.run_holdout_evaluation(
+                root, weight_dir="/nonexistent", image_root=Path("/nonexistent"),
+                gt_root=Path("/nonexistent"), output_root=Path("/nonexistent"),
+                discovery_result_path=bad_json_path, mode="fresh",
+            )
+        msg = str(ctx.exception)
+        self.assertNotIn("not authorized", msg)
+        self.assertNotIn("whole-file SHA-256 mismatch", msg)  # proves the hash check genuinely PASSED first
+        self.assertIsInstance(ctx.exception.__cause__, json.JSONDecodeError)
+
+    def test_run_holdout_evaluation_translates_invalid_utf8_with_matching_hash(self):
+        """Companion to the invalid-JSON test above, for the OTHER failure
+        mode _load_discovery_result_json now guards: bytes that are not
+        even valid UTF-8 (so .decode("utf-8") itself raises, before
+        json.loads is ever reached), again with a GENUINELY matching
+        whole-file hash -- proving the failure is specifically the
+        decode step, not the hash gate."""
+        bad_bytes = b"\xff\xfe not valid utf-8 at all \x80\x81"
+        bad_hash = hashlib.sha256(bad_bytes).hexdigest()
+        root = self._build_granted_repo(discovery_result_json_hash=bad_hash)
+        grant = hv._resolve_holdout_execution_grant(root)
+        self.assertTrue(grant["holdout_execution_authorized"], grant["denial_reason"])
+
+        bad_utf8_path = root / "bad_utf8_discovery_result.json"
+        bad_utf8_path.write_bytes(bad_bytes)
+        with self.assertRaises(hv.HoldoutEvaluationError) as ctx:
+            hv.run_holdout_evaluation(
+                root, weight_dir="/nonexistent", image_root=Path("/nonexistent"),
+                gt_root=Path("/nonexistent"), output_root=Path("/nonexistent"),
+                discovery_result_path=bad_utf8_path, mode="fresh",
+            )
+        msg = str(ctx.exception)
+        self.assertNotIn("not authorized", msg)
+        self.assertNotIn("whole-file SHA-256 mismatch", msg)
+        self.assertIsInstance(ctx.exception.__cause__, UnicodeDecodeError)
+
+
+class PreflightHoldoutInvalidJsonTests(unittest.TestCase):
+    """Companion to RunHoldoutEvaluationErrorContractAfterGrantTests'
+    invalid-JSON regression test, for preflight_holdout specifically --
+    the two public functions call the SAME shared _load_discovery_result_
+    json helper, but each has its own call site and its own exception-
+    translation wrapper, so each is verified independently. Uses a
+    monkeypatched auth/population bypass (rather than a second full
+    synthetic git repo) since preflight_holdout additionally requires the
+    PREDECESSOR's own 8-role dependency table and a discovery-population
+    manifest, neither of which bears on what this test verifies; the
+    whole-file hash check itself is never bypassed -- the invalid-JSON
+    fixture's real SHA-256 is bound directly."""
+
+    def test_preflight_holdout_translates_invalid_json_with_matching_hash(self):
+        bad_bytes = b"not valid json at all {{{"
+        bad_hash = hashlib.sha256(bad_bytes).hexdigest()
+
+        orig_grant = hv._resolve_holdout_execution_grant
+        orig_load = hv._load_holdout_authority
+        orig_verify_deps = hv.verify_dependency_hashes_holdout
+        orig_load_pop = hv.load_holdout_population
+        orig_overlap = hv._verify_no_discovery_overlap
+
+        hv._resolve_holdout_execution_grant = lambda repo_root: _granted_execution_grant()
+        hv._load_holdout_authority = lambda repo_root: {
+            "discovery_result_binding": {"artifact_hashes": {"discovery_result_json": bad_hash}},
+        }
+        hv.verify_dependency_hashes_holdout = lambda repo_root, data: {"all_match": True}
+        hv.load_holdout_population = lambda repo_root: [f"{100000000000 + i}" for i in range(48)]
+        hv._verify_no_discovery_overlap = lambda repo_root, holdout_ids: None
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                bad_json_path = Path(tmp) / "bad_discovery_result.json"
+                bad_json_path.write_bytes(bad_bytes)
+                with self.assertRaises(hv.HoldoutEvaluationError) as ctx:
+                    hv.preflight_holdout(
+                        REPO_ROOT, weight_dir="/nonexistent", image_root=Path("/nonexistent"),
+                        gt_root=Path("/nonexistent"), output_root=Path("/nonexistent"),
+                        discovery_result_path=bad_json_path, mode="fresh",
+                    )
+                msg = str(ctx.exception)
+                self.assertNotIn("not authorized", msg)
+                self.assertNotIn("whole-file SHA-256 mismatch", msg)  # hash check genuinely passed
+                self.assertIsInstance(ctx.exception.__cause__, json.JSONDecodeError)
+        finally:
+            hv._resolve_holdout_execution_grant = orig_grant
+            hv._load_holdout_authority = orig_load
+            hv.verify_dependency_hashes_holdout = orig_verify_deps
+            hv.load_holdout_population = orig_load_pop
+            hv._verify_no_discovery_overlap = orig_overlap
+
+    def test_preflight_holdout_translates_invalid_utf8_with_matching_hash(self):
+        bad_bytes = b"\xff\xfe not valid utf-8 at all \x80\x81"
+        bad_hash = hashlib.sha256(bad_bytes).hexdigest()
+
+        orig_grant = hv._resolve_holdout_execution_grant
+        orig_load = hv._load_holdout_authority
+        orig_verify_deps = hv.verify_dependency_hashes_holdout
+        orig_load_pop = hv.load_holdout_population
+        orig_overlap = hv._verify_no_discovery_overlap
+
+        hv._resolve_holdout_execution_grant = lambda repo_root: _granted_execution_grant()
+        hv._load_holdout_authority = lambda repo_root: {
+            "discovery_result_binding": {"artifact_hashes": {"discovery_result_json": bad_hash}},
+        }
+        hv.verify_dependency_hashes_holdout = lambda repo_root, data: {"all_match": True}
+        hv.load_holdout_population = lambda repo_root: [f"{100000000000 + i}" for i in range(48)]
+        hv._verify_no_discovery_overlap = lambda repo_root, holdout_ids: None
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                bad_utf8_path = Path(tmp) / "bad_utf8_discovery_result.json"
+                bad_utf8_path.write_bytes(bad_bytes)
+                with self.assertRaises(hv.HoldoutEvaluationError) as ctx:
+                    hv.preflight_holdout(
+                        REPO_ROOT, weight_dir="/nonexistent", image_root=Path("/nonexistent"),
+                        gt_root=Path("/nonexistent"), output_root=Path("/nonexistent"),
+                        discovery_result_path=bad_utf8_path, mode="fresh",
+                    )
+                msg = str(ctx.exception)
+                self.assertNotIn("not authorized", msg)
+                self.assertNotIn("whole-file SHA-256 mismatch", msg)
+                self.assertIsInstance(ctx.exception.__cause__, UnicodeDecodeError)
+        finally:
+            hv._resolve_holdout_execution_grant = orig_grant
+            hv._load_holdout_authority = orig_load
+            hv.verify_dependency_hashes_holdout = orig_verify_deps
+            hv.load_holdout_population = orig_load_pop
+            hv._verify_no_discovery_overlap = orig_overlap
 
 
 class HoldoutEvaluationCoreIntegrationTests(unittest.TestCase):
