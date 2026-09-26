@@ -1,0 +1,162 @@
+# Successor authority to semantic_evidence_discovery_execution_v1.toml and
+# semantic_evidence_feasibility_v1.toml. Records the scientific contract for
+# native-window anchor-content geometry when a canonical window's native
+# extent (per axis, independently) is smaller than the fixed 448px
+# backbone-tokenization canvas. This document records a scientific
+# measurement convention only -- it implements nothing, re-verifies nothing
+# itself, and authorizes no new execution (see [authorization] below).
+
+[identity]
+created_at_utc = "2026-09-26T04:10:00Z"
+purpose = "Freeze the selected native-window anchor-content geometry contract (Phase A T0/T320 point, Phase B GT patch footprint, intervention-view core mask) as a reviewable, hash-bound successor authority, following the AUTHOR_AND_VERIFY_CLAMPED_WINDOW_GEOMETRY_SUCCESSOR_AUTHORITY task."
+schema_name = "semantic_evidence_clamped_window_geometry_authority"
+schema_version = "1.0.0"
+task = "AUTHOR_AND_VERIFY_CLAMPED_WINDOW_GEOMETRY_SUCCESSOR_AUTHORITY"
+
+##############################################################################
+# 1. PREREQUISITE
+##############################################################################
+
+[prerequisite]
+required_branch = "research/semantic-evidence-interventions"
+required_head = "196dc0986ae32064ef4b1309c9894eab29e6a629"
+required_head_subject = "fix: unified clamped-window anchor geometry for Phase A/B and intervention core"
+required_head_tree = "eea0a6d8d4af6f804648828ffe420a247a310497"
+working_tree_must_be_clean_at_freeze_time = true
+
+##############################################################################
+# 2. DEPENDENCY BINDINGS (every load-bearing committed file, by exact path
+#    and SHA-256, re-verifiable against `git show <required_head>:<path>`;
+#    never trusted from this table alone)
+##############################################################################
+
+[[dependency]]
+role = "discovery_execution_authority"
+path = "research_specs/semantic_evidence_discovery_execution_v1.toml"
+sha256 = "b3bf92649e933b4dbd010c6bace0f6724dd8cc10075b7e60491d0a9d31a00b72"
+must_be_committed_at_required_head = true
+reason = "predecessor authority this successor extends for the clamped-window (native size != 448) anchor-geometry case; this successor changes none of its population, gates, thresholds, schemas, or authorization flags"
+
+[[dependency]]
+role = "feasibility_contract"
+path = "research_specs/semantic_evidence_feasibility_v1.toml"
+sha256 = "39edcae9d0927ec50c640576eb6d558e413558d16651f0398594d898bd19826f"
+must_be_committed_at_required_head = true
+reason = "source of the original [gt_targets.primary_correctness]/[e3_geometry] this successor extends; defines the historical always-448 anchor point/patch/core intervals this contract must reduce to exactly at native size 448"
+
+[[dependency]]
+role = "discovery_executor_implementation"
+path = "src/semantic_evidence_discovery_execute.py"
+sha256 = "da31c16aef8c61890ddecb5bd8918861a557fda335ff9550f8fe181e7523af19"
+must_be_committed_at_required_head = true
+reason = "binds the exact, committed implementation of the geometry primitives this authority records: _round_half_away_from_zero, _input_tokenization_inverse_point, _input_tokenization_inverse_boundary, t0_t320_anchor_pixel_bounds, footprint_pixel_bounds, intervention_core_native_bounds"
+
+[[dependency]]
+role = "discovery_executor_tests"
+path = "tests/test_semantic_evidence_discovery_execute.py"
+sha256 = "999298591406eb1120a2425be7114ddb069a498f976775c07efd081ba908f3c7"
+must_be_committed_at_required_head = true
+reason = "regression coverage this authority's record depends on: hard-coded point/patch/core oracles for native 448, both real 407x448 canonical windows of 000000567197.jpg, 300x200, and explicit half-integer ties (151 tests, all passing at required_head)"
+
+##############################################################################
+# 3. ANCHOR-CONTENT GEOMETRY CONTRACT (the selected scientific measurement)
+##############################################################################
+
+[anchor_content_geometry]
+schema_version = "1.0.0"
+scope = "Phase A T0/T320 predicted-class point lookup, Phase B GT majority-vote 14x14 patch footprint, and the protected 42x42 intervention-view core mask -- whenever a canonical window's native extent, per axis independently, differs from the fixed grid_side*patch_size backbone-tokenization canvas (448 = 32*14)."
+applies_when = "native_size != canvas_size, evaluated independently per axis (height and width may be clamped independently, e.g. a window may be native-height-clamped while its width remains exactly 448)"
+governs_anchor_content_only = true
+does_not_govern_output_placement = "align_corners=True grid-to-native prediction-rendering upsampling (semantic_evidence_t320.internal_upsample; DINOText.generate_masks, dinotext.py:340-346) is a separate, unrelated transform, unchanged by this authority"
+
+[anchor_content_geometry.point_rule]
+name = "input_tokenization_inverse_pixel_index"
+applies_to = "Phase A T0/T320 predicted-class lookup only"
+historical_definition = "i*patch_h + patch_h//2 (the historical, always-448 patch-center pixel index)"
+formula = "native_index = round_half_away_from_zero((center_448 + 0.5) * native_size / canvas_size - 0.5), per axis, clipped to [0, native_size - 1]"
+identity_at_native_448 = "exact by construction (scale factor 1): reduces to center_448 unchanged, no special-casing"
+
+[anchor_content_geometry.boundary_rule]
+name = "input_tokenization_inverse_boundary_linear_scaling"
+applies_to = "Phase B GT majority-vote 14x14 patch footprint, and the protected 42x42 intervention-view core (mapped by a discovery-local wrapper; the protected core_pixel_bounds function itself is never edited or reimplemented)"
+historical_definition = "[i*patch_h, (i+1)*patch_h) for the patch; the protected core_pixel_bounds's own 42-pixel, 3-patch interval for the core"
+formula = "native_boundary = round_half_away_from_zero(edge_448 * native_size / canvas_size), per axis, clipped to [0, native_size]"
+identity_at_native_448 = "exact by construction (scale factor 1): reduces to edge_448 unchanged, no special-casing"
+fails_closed_on_empty_region = true
+
+[anchor_content_geometry.rounding]
+tie_rule = "round_half_away_from_zero"
+tie_rule_definition = "0.5 always rounds away from zero (floor(x+0.5) for x>=0, ceil(x-0.5) for x<0); never Python's built-in round() (round-half-to-even / banker's rounding), which is a different, unstated convention"
+is_explicit_contract_choice = true
+not_automatically_forced_by_bilinear_interpolation = true
+
+[anchor_content_geometry.measurement_claim]
+claim = "This rule computes a rounded geometric measurement (a pixel index or a half-open pixel interval), derived from and empirically verified against model.image_transforms' real T.Resize((448,448)) forward operation (this repo's own production venv: torch 2.12.0 / torchvision 0.27.0)."
+disclaimed_claim = "This rule does NOT claim to reproduce the complete nonzero bilinear-kernel support of that resize (a 2-tap bilinear kernel's true support extends up to roughly one native pixel further on each side than this rounded boundary). It is a chosen geometric measurement contract, not a claim of exact kernel-support equivalence."
+
+[anchor_content_geometry.window_extent_source]
+rule = "native_h/native_w are computed from each canonical window's own (top, left, bottom, right) box (bottom-top, right-left), never from the full image height/width"
+
+##############################################################################
+# 4. EXPLICITLY UNCHANGED BY THIS AUTHORITY
+##############################################################################
+
+[unchanged_by_this_authority]
+align_corners_true_output_placement = true
+discovery_and_holdout_population_identity = true
+gt_phase_isolation_boundary = true
+e3_adapter = true
+t320_graph_recurrence_upsample_stitch_finalize = true
+four_statistical_fits = true
+gate_a_and_gate_e_thresholds = true
+checkpoint_schema_and_resume_semantics = true
+atomic_installation_semantics = true
+canonical_window_tiling_delegation_to_smoke_runner = true
+
+##############################################################################
+# 5. AUTHORIZATION (inherits, and grants nothing new)
+##############################################################################
+
+[authorization.inherited_from_predecessors]
+holdout_execution_authorized = false
+full_96_image_execution_authorized = false
+full_5000_image_execution_authorized = false
+gate_b_computable = false
+gate_c_computable = false
+gate_d_computable = false
+this_authority_grants_no_new_execution_authorization = true
+this_authority_grants_no_new_gate_computability = true
+
+[authorization.current_task]
+authority_creation_authorized = true
+implementation_in_this_task = false
+dataset_access_in_this_task = false
+gt_access_in_this_task = false
+model_construction_in_this_task = false
+checkpoint_loading_in_this_task = false
+cuda_initialization_in_this_task = false
+gpu_submission_in_this_task = false
+discovery_execution_in_this_task = false
+
+##############################################################################
+# 6. VERIFICATION RECORD (prose provenance only -- not itself re-executed
+#    by this document; see the accompanying task report for full detail)
+##############################################################################
+
+[verification_record]
+independent_reverification_task = "INDEPENDENT_REVERIFY_UNIFIED_CLAMPED_WINDOW_GEOMETRY"
+independent_reverification_verdict = "IMPLEMENTATION_PASS_AUTHORITY_PENDING"
+discovery_executor_test_count_at_verification = 151
+discovery_executor_test_result_at_verification = "all passed; zero failures, errors, or expected/unexpected-failure markers"
+existing_generic_validator_reused = false
+existing_generic_validator_note = "src/semantic_evidence_discovery_execution_identity.py's verify_dependency_hashes/verify_all are hard-coded to semantic_evidence_discovery_execution_v1.toml's own fixed dependency-role set and full closed-schema shape (_EXPECTED_DEPENDENCY_ROLES, _TOML_SCHEMA); they are not generic across authority documents and were not run against this file. Hashes above were verified manually via `git show <required_head>:<path> | sha256sum` against every declared dependency."
+
+##############################################################################
+# 7. CLOSURE
+##############################################################################
+
+[closure]
+complete = true
+final = true
+self_referential_hash_created = false
+note = "This authority records the scientific contract only. It does not implement, re-verify, or authorize execution -- see section 5. A committed-head production-readiness check against the real discovery paths remains required before any resubmission."
