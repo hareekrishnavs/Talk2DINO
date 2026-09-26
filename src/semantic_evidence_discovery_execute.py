@@ -392,32 +392,31 @@ _PROPAGATION_CATEGORIES = (
 
 
 def compute_canonical_windows(real_h: int, real_w: int, crop_hw: tuple, stride_hw: tuple) -> list:
-    """Reproduces the frozen canonical-window tiling exactly as
-    semantic_evidence_t320_real_smoke.py's own compute_canonical_windows:
-    ordinal, top, left, bottom, right tuples in full-canvas pixel
-    coordinates, covering [0, real_h) x [0, real_w) with the frozen crop and
-    stride, clamped so no window extends past the canvas edge."""
-    crop_h, crop_w = crop_hw
-    stride_h, stride_w = stride_hw
-    _require(crop_h <= real_h and crop_w <= real_w, "canvas smaller than one canonical window crop")
-
-    def starts(extent: int, crop: int, stride: int) -> list:
-        if extent <= crop:
-            return [0]
-        s = list(range(0, extent - crop + 1, stride))
-        if s[-1] != extent - crop:
-            s.append(extent - crop)
-        return s
-
-    top_starts = starts(real_h, crop_h, stride_h)
-    left_starts = starts(real_w, crop_w, stride_w)
-    windows = []
-    ordinal = 0
-    for top in top_starts:
-        for left in left_starts:
-            windows.append((ordinal, top, left, top + crop_h, left + crop_w))
-            ordinal += 1
-    return windows
+    """Delegates entirely to the committed, real-image-proven
+    `semantic_evidence_t320_real_smoke.compute_canonical_windows` (already a
+    hash-bound `[dependency].smoke_runner` of this authority) instead of
+    reimplementing canonical-window tiling locally. The prior local
+    reimplementation incorrectly required the canvas to be at least
+    crop-sized in both dimensions (`crop_h <= real_h and crop_w <= real_w`);
+    real COCO-Stuff images are not guaranteed to satisfy that -- e.g. this
+    population's own `000000567197.jpg` is 500x407, narrower than the
+    448px crop in height -- and the real, already-proven algorithm never
+    required it: it clamps each window to the actual image bounds instead
+    of rejecting the image (`semantic_evidence_t320_real_smoke.py:342-365`,
+    matching `dinotext_seg.py:78-94`). Job 22640114 already exercised this
+    exact clamping behavior successfully on this exact image. Delegating
+    here (rather than re-deriving the same arithmetic a second time) is
+    what eliminates the reimplementation-drift risk that caused this
+    defect in the first place. Any `SmokeRunnerError` the delegation raises
+    is translated into `DiscoveryExecutionError` to preserve this module's
+    own exception-hygiene convention; the smoke function performs only pure
+    arithmetic (no I/O, no torch), so no fatal exception can originate
+    inside it."""
+    import semantic_evidence_t320_real_smoke as smoke_runner
+    try:
+        return smoke_runner.compute_canonical_windows(real_h, real_w, crop_hw, stride_hw)
+    except smoke_runner.SmokeRunnerError as exc:
+        raise DiscoveryExecutionError(str(exc)) from exc
 
 
 def _build_full_grid(s0, grid_h: int, grid_w: int):
@@ -474,6 +473,7 @@ def process_window_gt_free(model, text_embedding, image_tensor, window: tuple, r
 
     ordinal, top, left, bottom, right = window
     crop = image_tensor[:, :, top:bottom, left:right]
+    window_box = (top, left, bottom, right)
 
     original_snapshot, ordinary_mask = forward_fn(
         model, crop, text_embedding, window_id=f"{image_id}:{ordinal}:ORIGINAL", window_ordinal=ordinal,
@@ -509,7 +509,7 @@ def process_window_gt_free(model, text_embedding, image_tensor, window: tuple, r
 
     for anchor in anchors:
         query = ifeat.construct_queries(anchor)
-        anchor_bounds = ifeat.core_pixel_bounds(anchor.row, anchor.col)
+        anchor_bounds = intervention_core_native_bounds(window_box, anchor.row, anchor.col, ifeat.GRID_SIDE, patch_hw)
         control_center = ifeat.select_control_center(image_id, ordinal, anchor.row, anchor.col, eligible_patches)
         if control_center is None:
             excluded_no_valid_control.append(anchor.patch_index)
@@ -517,7 +517,7 @@ def process_window_gt_free(model, text_embedding, image_tensor, window: tuple, r
             counters["structurally_invalid_anchor_count"] += 1
             continue
         counters["accepted_anchor_count"] += 1
-        control_bounds = ifeat.core_pixel_bounds(control_center.row, control_center.col)
+        control_bounds = intervention_core_native_bounds(window_box, control_center.row, control_center.col, ifeat.GRID_SIDE, patch_hw)
 
         view_snapshots = {"ORIGINAL": original_snapshot}
         for view in ("CONTEXT_BLURRED", "REGION_BLURRED", "AREA_MATCHED_CONTROL"):
@@ -688,17 +688,212 @@ def compute_propagation_category(t0_predicted_class: int, t320_predicted_class: 
     return "unchanged_incorrect"
 
 
-def footprint_pixel_bounds(window_top: int, window_left: int, anchor_row: int, anchor_col: int, patch_hw: tuple) -> tuple:
-    """Maps a single anchor patch's footprint through the canonical window
-    geometry to final image pixel coordinates. Canonical windows are
-    already expressed in full-canvas (== final-image, this pipeline never
-    rescales the canvas) pixel coordinates, so this is a direct patch-grid
-    offset from the window's own top-left corner -- see
-    [gt_targets.primary_correctness].footprint_mapping."""
+def _round_half_away_from_zero(x: float) -> int:
+    """Explicit tie rule: 0.5 always rounds away from zero. Never Python's
+    built-in `round()` (banker's rounding, round-half-to-even), which is a
+    different, unstated convention -- this pipeline pins one explicitly.
+    All values this module ever calls it with are >= 0 (native pixel/patch
+    coordinates), but both signs are handled for completeness."""
+    if x >= 0:
+        return math.floor(x + 0.5)
+    return math.ceil(x - 0.5)
+
+
+def _input_tokenization_inverse_point(canvas_index: int, native_size: int, canvas_size: int) -> int:
+    """Selected scientific contract (native-window anchor-content geometry,
+    successor to the historical always-448 convention): maps a PIXEL INDEX
+    (a discrete, indexed position -- e.g. the historical patch-center pixel
+    `i*14+7`) in the fixed 448-wide backbone-tokenization canvas back to a
+    native window pixel index, by inverting the exact, real resize
+    `model.image_transforms` applies before tokenization
+    (`src/open_vocabulary_segmentation/models/dinotext/dinotext.py:73-77`,
+    `T.Resize((resize_dim, resize_dim))`, no interpolation/antialias
+    kwargs, on an already-tensor input -- mirrored at
+    `semantic_evidence_e3_adapter.py:244-246`). Empirically confirmed
+    (this repo's own production venv, torch 2.12.0 / torchvision 0.27.0)
+    numerically identical (max abs diff ~2e-6) to `torch.nn.functional.
+    interpolate(mode="bilinear", align_corners=False)` for a tensor input.
+
+    This is a PIXEL-INDEX (point) mapping, using the standard half-pixel
+    formula `x_native = (x_canvas + 0.5) * (native/canvas) - 0.5`, distinct
+    from `_input_tokenization_inverse_boundary` below (a half-open
+    INTERVAL EDGE mapping, which uses pure linear boundary-space scaling
+    with no +/-0.5 offset -- the two are not interchangeable; a boundary is
+    not a pixel index). This distinction, and the choice of
+    round-half-away-from-zero for discretization, are explicit contract
+    choices, not automatic consequences of bilinear interpolation.
+
+    Deliberately NOT self-consistent with `semantic_evidence_t320.
+    internal_upsample`'s own align_corners=True grid->native OUTPUT
+    placement (dinotext.py:340-346): that is a different, later transform
+    governing prediction *rendering*, not anchor *content* -- conflating
+    the two was considered and rejected because it does not extend the
+    historical `i*14+7` patch-center meaning continuously as native size
+    passes through 448 (see this pipeline's geometry-contract records).
+
+    At native_size == canvas_size this reduces EXACTLY to `canvas_index`
+    (scale factor 1), matching the historical, pre-clamping-repair value
+    bit-for-bit with no special-casing."""
+    if native_size == canvas_size:
+        return canvas_index
+    x = (canvas_index + 0.5) * native_size / canvas_size - 0.5
+    point = _round_half_away_from_zero(x)
+    return max(0, min(native_size - 1, point))
+
+
+def _input_tokenization_inverse_boundary(canvas_edge: int, native_size: int, canvas_size: int) -> int:
+    """Selected scientific contract: maps a half-open INTERVAL EDGE (e.g.
+    one boundary of the historical patch interval `[i*14,(i+1)*14)`, or of
+    the frozen intervention core interval) in the fixed 448-wide backbone-
+    tokenization canvas back to a native window boundary, via PURE LINEAR
+    boundary-space scaling: `x_native = canvas_edge * (native/canvas)`.
+
+    A boundary is not a pixel index (it is the line between pixel k-1 and
+    pixel k), so it does not take the +0.5/-0.5 pixel-center offset that
+    `_input_tokenization_inverse_point` uses -- boundary-space is already
+    linear and origin-preserving between the two images. Empirically
+    verified (this repo's own production venv) against the REAL `T.Resize`
+    forward operation: for synthetic step-function boundaries at native
+    positions 100/205/300/393 (native_size=407), the observed 0.5-crossing
+    of the real resized output agreed with this pure linear-scaling
+    prediction to within <0.4 pixels in every case -- distinctly better
+    agreement than the pixel-index formula would give for a boundary
+    (confirmed by direct comparison during this pipeline's geometry-
+    contract review).
+
+    This computes a ROUNDED GEOMETRIC BOUNDARY POSITION, not a claim of
+    the exact nonzero bilinear-kernel support (which, for a 2-tap bilinear
+    kernel, extends up to ~1 native pixel further on each side than this
+    rounded boundary) -- align_corners=True output upsampling remains a
+    separate, unrelated transform and is not what this function computes.
+
+    At native_size == canvas_size this reduces EXACTLY to `canvas_edge`
+    (scale factor 1), matching the historical, pre-clamping-repair
+    interval bit-for-bit with no special-casing."""
+    if native_size == canvas_size:
+        return canvas_edge
+    x = canvas_edge * native_size / canvas_size
+    edge = _round_half_away_from_zero(x)
+    return max(0, min(native_size, edge))
+
+
+def t0_t320_anchor_pixel_bounds(window_box: tuple, anchor_row: int, anchor_col: int, grid_side: int,
+                                 patch_hw: tuple) -> tuple:
+    """Phase A: the single native pixel (returned as a 1x1 `crop_raster`-
+    compatible bounds tuple) representing anchor grid cell (anchor_row,
+    anchor_col)'s historical patch-center pixel (`i*patch_h + patch_h//2`),
+    mapped through the selected input-tokenization-inverse point contract
+    (see `_input_tokenization_inverse_point`). Uses the WINDOW's own native
+    height/width (computed from `window_box`), never the full image size.
+    Fails closed if the mapped point ever falls outside the window's own
+    native extent (structurally impossible for the frozen eligible anchor
+    range on any real discovery-population image, but guarded rather than
+    assumed)."""
+    window_top, window_left, window_bottom, window_right = window_box
+    native_h = window_bottom - window_top
+    native_w = window_right - window_left
     patch_h, patch_w = patch_hw
-    top = window_top + anchor_row * patch_h
-    left = window_left + anchor_col * patch_w
-    return top, left, top + patch_h, left + patch_w
+    canvas_h = grid_side * patch_h
+    canvas_w = grid_side * patch_w
+
+    center_row_448 = anchor_row * patch_h + patch_h // 2
+    center_col_448 = anchor_col * patch_w + patch_w // 2
+    local_row = _input_tokenization_inverse_point(center_row_448, native_h, canvas_h)
+    local_col = _input_tokenization_inverse_point(center_col_448, native_w, canvas_w)
+    _require(
+        0 <= local_row < native_h and 0 <= local_col < native_w,
+        f"t0_t320_anchor_pixel_bounds: mapped point ({local_row},{local_col}) falls outside "
+        f"the window's own native extent ({native_h},{native_w}) for anchor ({anchor_row},{anchor_col})",
+    )
+    top = window_top + local_row
+    left = window_left + local_col
+    return top, left, top + 1, left + 1
+
+
+def footprint_pixel_bounds(window_box: tuple, anchor_row: int, anchor_col: int, patch_hw: tuple, grid_side: int) -> tuple:
+    """Phase B (GT-only): maps a single anchor patch's majority-vote
+    footprint REGION through the canonical window geometry to native image
+    pixel coordinates -- see [gt_targets.primary_correctness].
+    footprint_mapping. Uses the WINDOW's own native height/width (computed
+    from `window_box`), never the full image size.
+
+    Exact, unchanged behavior when the window's native size equals the
+    fixed `grid_side*patch_h` x `grid_side*patch_w` backbone-tokenization
+    canvas (the historical, always-448, unclamped case): the ViT patch
+    embedding tokenizes that canvas via an EXACT, non-overlapping
+    `[row*patch_h, (row+1)*patch_h)` block partition (ordinary
+    Conv2d/unfold patchify -- not an interpolation of any kind), so native
+    pixels equal canvas pixels 1:1 and the footprint is exactly that block.
+
+    For a genuinely clamped window (native size != the fixed canvas, in
+    either axis independently): each of the interval's two edges is mapped
+    via the selected input-tokenization-inverse boundary contract (see
+    `_input_tokenization_inverse_boundary`), per axis. Fails closed
+    (raises DiscoveryExecutionError) if the mapped region ever collapses
+    to zero width/height (does not occur for any real discovery-population
+    image at the frozen eligible anchor range, but guarded rather than
+    assumed)."""
+    window_top, window_left, window_bottom, window_right = window_box
+    native_h = window_bottom - window_top
+    native_w = window_right - window_left
+    patch_h, patch_w = patch_hw
+    canvas_h = grid_side * patch_h
+    canvas_w = grid_side * patch_w
+
+    top448, bottom448 = anchor_row * patch_h, (anchor_row + 1) * patch_h
+    left448, right448 = anchor_col * patch_w, (anchor_col + 1) * patch_w
+
+    top = _input_tokenization_inverse_boundary(top448, native_h, canvas_h)
+    bottom = _input_tokenization_inverse_boundary(bottom448, native_h, canvas_h)
+    left = _input_tokenization_inverse_boundary(left448, native_w, canvas_w)
+    right = _input_tokenization_inverse_boundary(right448, native_w, canvas_w)
+    _require(
+        bottom > top and right > left,
+        f"footprint_pixel_bounds: mapped footprint collapsed to an empty region for anchor "
+        f"({anchor_row},{anchor_col}) on a window with native size ({native_h}, {native_w})",
+    )
+    return window_top + top, window_left + left, window_top + bottom, window_left + right
+
+
+def intervention_core_native_bounds(window_box: tuple, anchor_row: int, anchor_col: int, grid_side: int,
+                                      patch_hw: tuple) -> tuple:
+    """Discovery-local wrapper (NOT in the protected feature module): maps
+    the protected, frozen `semantic_evidence_intervention_features.
+    core_pixel_bounds`'s 448-canvas 3x3-patch core interval to the
+    WINDOW's own native pixel coordinates, via the same selected
+    input-tokenization-inverse boundary contract `footprint_pixel_bounds`
+    uses (`_input_tokenization_inverse_boundary`), so ordinary tensor
+    slicing against the native, pre-resize `crop` tensor in
+    `process_window_gt_free` cannot silently truncate the intended core
+    for a clamped window. `core_pixel_bounds` itself is never edited or
+    reimplemented here -- only its already-computed 448-canvas interval is
+    remapped. Uses the WINDOW's own native height/width (from
+    `window_box`), never the full image size. Returns LOCAL (window-
+    relative) bounds, matching what `core_pixel_bounds` itself returns
+    (both are consumed directly against the window-local `crop` tensor,
+    never with an absolute window offset added -- see
+    `ifeat.build_intervention_view`'s call sites)."""
+    import semantic_evidence_intervention_features as ifeat
+
+    window_top, window_left, window_bottom, window_right = window_box
+    native_h = window_bottom - window_top
+    native_w = window_right - window_left
+    patch_h, patch_w = patch_hw
+    canvas_h = grid_side * patch_h
+    canvas_w = grid_side * patch_w
+
+    top448, left448, bottom448, right448 = ifeat.core_pixel_bounds(anchor_row, anchor_col)
+
+    top = _input_tokenization_inverse_boundary(top448, native_h, canvas_h)
+    bottom = _input_tokenization_inverse_boundary(bottom448, native_h, canvas_h)
+    left = _input_tokenization_inverse_boundary(left448, native_w, canvas_w)
+    right = _input_tokenization_inverse_boundary(right448, native_w, canvas_w)
+    _require(
+        bottom > top and right > left,
+        f"intervention_core_native_bounds: mapped core collapsed to an empty region for anchor "
+        f"({anchor_row},{anchor_col}) on a window with native size ({native_h}, {native_w})",
+    )
+    return top, left, bottom, right
 
 
 def crop_raster(raster: list, bounds: tuple) -> list:
@@ -1400,7 +1595,6 @@ def _run_phase_a(image_id: str, image_loader, forward_fn, model, text_embedding,
 
         ordinal = w["window_ordinal"]
         window_boxes[str(ordinal)] = list(w["window_box"])
-        window_top, window_left, _, _ = w["window_box"]
 
         for row_key, detail in w["query_row_details"].items():
             raw_scores_by_key[row_key] = detail["raw_scores"]
@@ -1412,7 +1606,7 @@ def _run_phase_a(image_id: str, image_loader, forward_fn, model, text_embedding,
             }
 
         for prop_key, detail in w["propagation_row_details"].items():
-            bounds = footprint_pixel_bounds(window_top, window_left, detail["anchor_row"], detail["anchor_col"], patch_hw)
+            bounds = t0_t320_anchor_pixel_bounds(w["window_box"], detail["anchor_row"], detail["anchor_col"], ifeat.GRID_SIDE, patch_hw)
             t0_footprint = crop_raster(t0_rows_full, bounds)
             t320_footprint = crop_raster(t320_rows_full, bounds)
             # Model predictions are always defined everywhere (unlike GT,
@@ -1512,8 +1706,7 @@ def _run_phase_b(gt_free_artifact: dict, gt_loader, image_id: str, event_log: Ph
 
     for row_key, detail in query_correctness_features.items():
         ordinal_str, anchor_id, query_rank = row_key.split(":")
-        window_top, window_left, _, _ = window_boxes[ordinal_str]
-        bounds = footprint_pixel_bounds(window_top, window_left, detail["anchor_row"], detail["anchor_col"], patch_hw)
+        bounds = footprint_pixel_bounds(window_boxes[ordinal_str], detail["anchor_row"], detail["anchor_col"], patch_hw, ifeat.GRID_SIDE)
         footprint = crop_raster(gt_raster, bounds)
         majority_label, majority_class = compute_gt_majority(footprint)
         if majority_label == AMBIGUOUS_GT:
@@ -1525,8 +1718,7 @@ def _run_phase_b(gt_free_artifact: dict, gt_loader, image_id: str, event_log: Ph
         if prop_key in ambiguous_anchor_ids:
             continue
         ordinal_str, anchor_id = prop_key.split(":")
-        window_top, window_left, _, _ = window_boxes[ordinal_str]
-        bounds = footprint_pixel_bounds(window_top, window_left, detail["anchor_row"], detail["anchor_col"], patch_hw)
+        bounds = footprint_pixel_bounds(window_boxes[ordinal_str], detail["anchor_row"], detail["anchor_col"], patch_hw, ifeat.GRID_SIDE)
         footprint = crop_raster(gt_raster, bounds)
         majority_label, majority_class = compute_gt_majority(footprint)
         if majority_label == AMBIGUOUS_GT:

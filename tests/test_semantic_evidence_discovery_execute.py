@@ -211,6 +211,148 @@ class RealImageLoaderTests(unittest.TestCase):
         self.assertTrue(issubclass(MemoryError, Exception))
 
 
+class CanonicalWindowClampingTests(unittest.TestCase):
+    """Regression tests for the window-clamping repair: job 22692249 failed
+    on the real image 000000567197.jpg (500x500 -> actually 500 wide,
+    407 tall), because the discovery runner's own prior reimplementation of
+    compute_canonical_windows incorrectly required the canvas to be at
+    least 448x448. The real, committed, real-image-proven
+    semantic_evidence_t320_real_smoke.compute_canonical_windows clamps
+    windows to the actual image bounds instead -- this authority already
+    depends on that exact file by hash ([dependency].smoke_runner), and
+    the repaired discovery runner now delegates to it directly rather than
+    re-deriving the same arithmetic a second time. Every case here uses
+    real, non-448 dimensions specifically because a fixed-448x448 fake
+    image loader is exactly what let the original defect go undetected
+    through every previous round of testing and independent verification
+    in this project."""
+
+    CROP_HW = (448, 448)
+    STRIDE_HW = (224, 224)
+
+    def _check_one(self, h, w):
+        import semantic_evidence_t320_real_smoke as smoke_runner
+        mine = ex.compute_canonical_windows(h, w, self.CROP_HW, self.STRIDE_HW)
+        real = smoke_runner.compute_canonical_windows(h, w, self.CROP_HW, self.STRIDE_HW)
+        self.assertEqual(mine, real, f"must match the smoke runner's ordered windows exactly for (h={h}, w={w})")
+        self.assertGreaterEqual(len(mine), 1)
+        covered = [[False] * w for _ in range(h)]
+        for (ordinal, top, left, bottom, right) in mine:
+            self.assertTrue(0 <= top < bottom <= h, f"window {ordinal} top/bottom out of bounds")
+            self.assertTrue(0 <= left < right <= w, f"window {ordinal} left/right out of bounds")
+            self.assertGreater(bottom, top)
+            self.assertGreater(right, left)
+            for r in range(top, bottom):
+                for c in range(left, right):
+                    covered[r][c] = True
+        self.assertTrue(all(all(row) for row in covered), f"every pixel must be covered for (h={h}, w={w})")
+        return mine
+
+    def test_real_failing_image_000000567197_dimensions(self):
+        # The exact image and exact orientation that crashed job 22692249:
+        # PIL reports (width, height) = (500, 407) for this file.
+        windows = self._check_one(407, 500)
+        # Height 407 < the 448 crop: the committed smoke behavior clamps
+        # the window height to 407, it never raises.
+        self.assertTrue(all(bottom - top == 407 for (_, top, _, bottom, _) in windows))
+
+    def test_smaller_than_crop_in_both_dimensions(self):
+        self._check_one(300, 200)
+
+    def test_multi_window_image(self):
+        windows = self._check_one(448, 672)
+        self.assertGreater(len(windows), 1)
+
+    def test_multi_window_both_dimensions(self):
+        windows = self._check_one(900, 900)
+        self.assertGreater(len(windows), 1)
+
+    def test_exact_crop_size_still_single_window(self):
+        windows = self._check_one(448, 448)
+        self.assertEqual(len(windows), 1)
+
+    def test_pre_repair_defect_would_have_rejected_the_real_image(self):
+        # Demonstrates precisely what job 22692249 hit: the OLD local
+        # formula's guard condition, evaluated directly (without invoking
+        # any implementation), was false for the real image's dimensions --
+        # proving this specific defect is what caused the crash, and that
+        # the repaired implementation no longer has this guard at all.
+        crop_h, crop_w = self.CROP_HW
+        real_h, real_w = 407, 500
+        old_guard_would_pass = (crop_h <= real_h and crop_w <= real_w)
+        self.assertFalse(old_guard_would_pass, "the old guard condition was false for this image -- confirms the crash's root cause")
+        # and confirm the repaired function does NOT raise for this input
+        ex.compute_canonical_windows(real_h, real_w, self.CROP_HW, self.STRIDE_HW)
+
+    @staticmethod
+    def _fake_forward_fn_fixed_grid(crop, *, window_id, window_ordinal, top, left, bottom, right,
+                                     canvas_h, canvas_w, patch_h, patch_w):
+        # The real semantic_evidence_e3_adapter.extract_e3_window_snapshot
+        # resizes every window's crop to a FIXED 448x448 backbone-input
+        # canvas via model.image_transforms's T.Resize((448, 448)),
+        # "applied unconditionally regardless of the source window's own
+        # extent" (its own docstring/comment, src/semantic_evidence_
+        # e3_adapter.py:236-243) -- so grid_h/grid_w are always 32x32
+        # (448/14) no matter how small a clamped window's true (infer_h,
+        # infer_w) is. infer_h/infer_w record the window's own (possibly
+        # clamped, non-448) extent; backbone_input_height/width and
+        # grid_h/grid_w always reflect the fixed 448x448 resize target.
+        import hashlib
+        win_h, win_w = bottom - top, right - left
+        grid_h = grid_w = GRID
+        seed = int(hashlib.sha256(crop.contiguous().numpy().tobytes()).hexdigest()[:8], 16) & 0xFFFFFFFF
+        g = torch.Generator().manual_seed(seed)
+        s0 = torch.rand(grid_h * grid_w, CLASS_COUNT, generator=g) * 2 - 1
+        dino_features = torch.nn.functional.normalize(torch.rand(grid_h * grid_w, FEAT_DIM, generator=g), dim=1)
+        snapshot = e3a.WindowSnapshot(
+            window_id=window_id, window_ordinal=window_ordinal, canvas_h=canvas_h, canvas_w=canvas_w,
+            top=top, left=left, bottom=bottom, right=right, infer_h=win_h, infer_w=win_w,
+            backbone_input_height=grid_h * patch_h, backbone_input_width=grid_w * patch_w,
+            grid_h=grid_h, grid_w=grid_w, patch_h=patch_h, patch_w=patch_w,
+            dino_features=dino_features, s0=s0, class_count=CLASS_COUNT, feature_dim=FEAT_DIM,
+            dtype=s0.dtype, device=s0.device,
+        )
+        return snapshot, torch.sigmoid(s0)
+
+    def test_through_execution_path_window_generation_and_t0t320_no_longer_crash(self):
+        # A fixed-448x448 fake image loader is exactly what concealed this
+        # bug through every previous test and independent verification
+        # round. This exercises the real failing dimensions end-to-end
+        # through window generation and T0/T320 canvas-level target
+        # generation (semantic_evidence_t320.generate_t0_t320_targets),
+        # calling process_window_gt_free directly rather than through
+        # _run_phase_a so this test does not depend on anchor selection --
+        # see FootprintPixelBoundsClampedWindowTests below for the
+        # anchor/footprint-mapping repair and its own end-to-end test.
+        import semantic_evidence_t320 as t320
+        real_h, real_w = 407, 500
+
+        def image_loader(iid):
+            g = torch.Generator().manual_seed(1)
+            return torch.rand(1, 3, real_h, real_w, generator=g) * 255.0, real_h, real_w
+
+        def forward_fn(model, crop, text_embedding, **kw):
+            return self._fake_forward_fn_fixed_grid(crop, **kw)
+
+        image_tensor, h, w = image_loader("000000567197")
+        # Must not raise -- this is exactly the call that crashed job
+        # 22692249 with "canvas smaller than one canonical window crop".
+        windows = ex.compute_canonical_windows(h, w, self.CROP_HW, self.STRIDE_HW)
+        self.assertGreater(len(windows), 0)
+
+        model, text_embedding = _fake_model_and_text_provider()
+        original_snapshots, boxes = [], []
+        for window in windows:
+            result = ex.process_window_gt_free(model, text_embedding, image_tensor, window, h, w,
+                                                 "000000567197", (14, 14), forward_fn)
+            original_snapshots.append(result["original_snapshot"])
+            boxes.append(result["window_box"])
+
+        targets = t320.generate_t0_t320_targets(original_snapshots, boxes, canvas_h=h, canvas_w=w, ori_h=h, ori_w=w)
+        self.assertEqual(tuple(targets["t0"].shape[1:]), (h, w))
+        self.assertEqual(tuple(targets["t320"].shape[1:]), (h, w))
+
+
 class LoadDiscoveryPopulationTests(unittest.TestCase):
     def test_loads_exactly_48_ids_matching_digest(self):
         ids = _real_discovery_ids()
@@ -733,10 +875,370 @@ class GtMajorityTests(unittest.TestCase):
         self.assertEqual(ex.compute_propagation_category(t0_predicted_class=1, t320_predicted_class=1, gt_majority_class=5), "unchanged_incorrect")
 
 
+class RoundHalfAwayFromZeroTests(unittest.TestCase):
+    """The explicit, pinned tie rule -- deliberately NOT Python's built-in
+    round() (round-half-to-even/banker's rounding)."""
+
+    def test_diverges_from_python_builtin_round_at_a_real_tie(self):
+        self.assertEqual(ex._round_half_away_from_zero(2.5), 3)
+        self.assertEqual(round(2.5), 2)  # documents exactly why round() is not used
+        self.assertEqual(ex._round_half_away_from_zero(4.5), 5)
+        self.assertEqual(round(4.5), 4)
+
+    def test_negative_ties_and_ordinary_values(self):
+        self.assertEqual(ex._round_half_away_from_zero(-2.5), -3)
+        self.assertEqual(ex._round_half_away_from_zero(3.4), 3)
+        self.assertEqual(ex._round_half_away_from_zero(3.6), 4)
+
+
+class InputTokenizationInverseTests(unittest.TestCase):
+    """Hard-coded, independently-recomputed oracles for the selected
+    scientific contract's two primitives: _input_tokenization_inverse_point
+    (Phase A, a PIXEL-INDEX mapping using the half-pixel formula) and
+    _input_tokenization_inverse_boundary (Phase B / intervention core, a
+    half-open INTERVAL EDGE mapping using pure linear boundary-space
+    scaling -- no +/-0.5 offset). Every value below was computed
+    independently of the implementation and cross-checked against the
+    real T.Resize forward operation before this repair was written."""
+
+    def test_point_exact_identity_at_native_448(self):
+        for center in (7, 217, 427, 441):
+            self.assertEqual(ex._input_tokenization_inverse_point(center, 448, 448), center)
+
+    def test_boundary_exact_identity_at_native_448(self):
+        for edge in (0, 210, 224, 420, 434, 448):
+            self.assertEqual(ex._input_tokenization_inverse_boundary(edge, 448, 448), edge)
+
+    def test_point_oracle_407(self):
+        # anchor 15 center=217, anchor 30 center=427
+        self.assertEqual(ex._input_tokenization_inverse_point(217, 407, 448), 197)
+        self.assertEqual(ex._input_tokenization_inverse_point(427, 407, 448), 388)
+
+    def test_point_oracle_rectangular_300x200(self):
+        # anchor 15 center=217 (row axis native 300, col axis native 200)
+        self.assertEqual(ex._input_tokenization_inverse_point(217, 300, 448), 145)
+        self.assertEqual(ex._input_tokenization_inverse_point(217, 200, 448), 97)
+        # anchor 30 center=427
+        self.assertEqual(ex._input_tokenization_inverse_point(427, 300, 448), 286)
+        self.assertEqual(ex._input_tokenization_inverse_point(427, 200, 448), 190)
+
+    def test_boundary_oracle_407_patch_anchor_15(self):
+        # patch interval [210,224); this exercises an EXACT half-integer
+        # tie: 224*407/448 == 203.5 exactly.
+        self.assertEqual(ex._input_tokenization_inverse_boundary(210, 407, 448), 191)
+        self.assertEqual(ex._input_tokenization_inverse_boundary(224, 407, 448), 204)
+
+    def test_boundary_oracle_407_patch_anchor_30(self):
+        self.assertEqual(ex._input_tokenization_inverse_boundary(420, 407, 448), 382)
+        self.assertEqual(ex._input_tokenization_inverse_boundary(434, 407, 448), 394)
+
+    def test_boundary_oracle_rectangular_300x200_patch(self):
+        # anchor 15: patch [210,224)
+        self.assertEqual(ex._input_tokenization_inverse_boundary(210, 300, 448), 141)
+        self.assertEqual(ex._input_tokenization_inverse_boundary(224, 300, 448), 150)
+        self.assertEqual(ex._input_tokenization_inverse_boundary(210, 200, 448), 94)
+        self.assertEqual(ex._input_tokenization_inverse_boundary(224, 200, 448), 100)
+        # anchor 30: patch [420,434)
+        self.assertEqual(ex._input_tokenization_inverse_boundary(420, 300, 448), 281)
+        self.assertEqual(ex._input_tokenization_inverse_boundary(434, 300, 448), 291)
+        self.assertEqual(ex._input_tokenization_inverse_boundary(420, 200, 448), 188)
+        self.assertEqual(ex._input_tokenization_inverse_boundary(434, 200, 448), 194)
+
+    def test_boundary_oracle_rectangular_300x200_core(self):
+        # anchor 15 core [196,238); anchor 30 core [406,448)
+        self.assertEqual(ex._input_tokenization_inverse_boundary(196, 300, 448), 131)
+        self.assertEqual(ex._input_tokenization_inverse_boundary(238, 300, 448), 159)
+        self.assertEqual(ex._input_tokenization_inverse_boundary(196, 200, 448), 88)
+        self.assertEqual(ex._input_tokenization_inverse_boundary(238, 200, 448), 106)
+        self.assertEqual(ex._input_tokenization_inverse_boundary(406, 300, 448), 272)
+        self.assertEqual(ex._input_tokenization_inverse_boundary(448, 300, 448), 300)
+        self.assertEqual(ex._input_tokenization_inverse_boundary(406, 200, 448), 181)
+        self.assertEqual(ex._input_tokenization_inverse_boundary(448, 200, 448), 200)
+
+    def test_agrees_with_the_real_forward_resize_operation(self):
+        # Direct empirical cross-check against the REAL model.image_
+        # transforms operation (T.Resize((448,448)) on a tensor input, no
+        # interpolation/antialias kwargs): a synthetic step function's
+        # observed 0.5-crossing after the real resize must agree with pure
+        # linear boundary-space scaling to well under 1 pixel. CPU only,
+        # no model, no checkpoint, no GT, no real image.
+        import torchvision.transforms as T
+
+        native = 407
+        canvas = 448
+        for k in (100, 205, 300, 393):
+            step = torch.zeros(1, 1, native, native)
+            step[:, :, k:, :] = 1.0
+            resized = T.Resize((canvas, canvas))(step)
+            col = resized[0, 0, :, 0]
+            observed = int((col >= 0.5).nonzero()[0].item())
+            predicted = k * canvas / native
+            self.assertLess(abs(observed - predicted), 1.0, f"boundary k={k} mismatch")
+
+
 class FootprintMappingTests(unittest.TestCase):
-    def test_maps_through_window_and_patch_offset(self):
-        bounds = ex.footprint_pixel_bounds(window_top=100, window_left=50, anchor_row=2, anchor_col=3, patch_hw=(14, 14))
+    """footprint_pixel_bounds is GT-ONLY (majority-vote 14x14 patch
+    footprint region). Selected contract: input-tokenization-inverse
+    boundary mapping, per axis, with exact identity at native==448."""
+
+    def test_maps_through_window_and_patch_offset_when_unclamped(self):
+        window_box = (100, 50, 100 + 448, 50 + 448)
+        bounds = ex.footprint_pixel_bounds(window_box, anchor_row=2, anchor_col=3, patch_hw=(14, 14), grid_side=32)
         self.assertEqual(bounds, (100 + 28, 50 + 42, 100 + 28 + 14, 50 + 42 + 14))
+
+    def test_fails_closed_rather_than_returning_an_empty_footprint(self):
+        # Pathological, not-realizable-by-any-real-discovery-image window
+        # (native size far smaller than one patch pitch): fails closed
+        # with a clear DiscoveryExecutionError rather than an empty region.
+        window_box = (0, 0, 2, 2)
+        with self.assertRaises(ex.DiscoveryExecutionError):
+            ex.footprint_pixel_bounds(window_box, anchor_row=1, anchor_col=1, patch_hw=(14, 14), grid_side=32)
+
+    def test_real_407x448_window_zero_offset(self):
+        window_box = (0, 0, 407, 448)
+        b15 = ex.footprint_pixel_bounds(window_box, 15, 15, (14, 14), 32)
+        self.assertEqual(b15, (191, 210, 204, 224))
+        self.assertEqual((b15[2] - b15[0]) * (b15[3] - b15[1]), 182)
+        b30 = ex.footprint_pixel_bounds(window_box, 30, 30, (14, 14), 32)
+        self.assertEqual(b30, (382, 420, 394, 434))
+        self.assertEqual((b30[2] - b30[0]) * (b30[3] - b30[1]), 168)
+
+    def test_real_407x448_window_left_offset_52(self):
+        # The actual second canonical window of 000000567197.jpg.
+        window_box = (0, 52, 407, 500)
+        b15 = ex.footprint_pixel_bounds(window_box, 15, 15, (14, 14), 32)
+        self.assertEqual(b15, (191, 262, 204, 276))
+        b30 = ex.footprint_pixel_bounds(window_box, 30, 30, (14, 14), 32)
+        self.assertEqual(b30, (382, 472, 394, 486))
+
+    def test_300x200_corrected_areas(self):
+        window_box = (0, 0, 300, 200)
+        b15 = ex.footprint_pixel_bounds(window_box, 15, 15, (14, 14), 32)
+        self.assertEqual(b15, (141, 94, 150, 100))
+        self.assertEqual((b15[2] - b15[0]) * (b15[3] - b15[1]), 54)
+        b30 = ex.footprint_pixel_bounds(window_box, 30, 30, (14, 14), 32)
+        self.assertEqual(b30, (281, 188, 291, 194))
+        self.assertEqual((b30[2] - b30[0]) * (b30[3] - b30[1]), 60)
+
+    def test_no_longer_raises_for_the_real_clamped_image(self):
+        # Prior repair round left this fail-closed pending an authority
+        # decision; that decision has now been made and implemented.
+        window_box = (0, 0, 407, 448)
+        ex.footprint_pixel_bounds(window_box, anchor_row=15, anchor_col=15, patch_hw=(14, 14), grid_side=32)  # must not raise
+
+
+class T0T320AnchorPixelBoundsTests(unittest.TestCase):
+    """t0_t320_anchor_pixel_bounds implements the SELECTED contract: the
+    historical patch-center pixel index (i*patch_h+patch_h//2), mapped
+    through the input-tokenization inverse point rule -- NOT the
+    align_corners=True output-placement inverse an earlier repair round
+    used here (that conflated anchor-content geometry with a different,
+    later, output-rendering transform, and did not extend the historical
+    i*14+7 meaning continuously as native size passes through 448)."""
+
+    ELIGIBLE = range(1, 31)  # [scientific_inheritance.e3_geometry].eligible_grid_range
+
+    def test_exact_identity_at_native_448(self):
+        window_box = (0, 0, 448, 448)
+        for a in (1, 15, 30):
+            bounds = ex.t0_t320_anchor_pixel_bounds(window_box, a, a, grid_side=32, patch_hw=(14, 14))
+            expected = a * 14 + 7
+            self.assertEqual(bounds, (expected, expected, expected + 1, expected + 1))
+
+    def test_real_407x448_window_zero_offset(self):
+        window_box = (0, 0, 407, 448)
+        self.assertEqual(ex.t0_t320_anchor_pixel_bounds(window_box, 15, 15, 32, (14, 14)), (197, 217, 198, 218))
+        self.assertEqual(ex.t0_t320_anchor_pixel_bounds(window_box, 30, 30, 32, (14, 14)), (388, 427, 389, 428))
+
+    def test_real_407x448_window_left_offset_52(self):
+        window_box = (0, 52, 407, 500)
+        self.assertEqual(ex.t0_t320_anchor_pixel_bounds(window_box, 15, 15, 32, (14, 14)), (197, 269, 198, 270))
+        self.assertEqual(ex.t0_t320_anchor_pixel_bounds(window_box, 30, 30, 32, (14, 14)), (388, 479, 389, 480))
+
+    def test_300x200_oracle(self):
+        window_box = (0, 0, 300, 200)
+        self.assertEqual(ex.t0_t320_anchor_pixel_bounds(window_box, 15, 15, 32, (14, 14)), (145, 97, 146, 98))
+        self.assertEqual(ex.t0_t320_anchor_pixel_bounds(window_box, 30, 30, 32, (14, 14)), (286, 190, 287, 191))
+
+    def test_every_eligible_anchor_stays_in_bounds_across_real_population_dimensions(self):
+        real_dims = [
+            (407, 500), (338, 450), (425, 640), (640, 411), (640, 426),
+            (333, 500), (640, 427), (398, 500), (399, 600), (427, 640),
+            (314, 640), (333, 500), (426, 640), (640, 360), (375, 500),
+            (425, 640), (500, 375), (336, 500), (426, 640), (500, 334),
+            (427, 640), (375, 500), (427, 640), (427, 640), (640, 428),
+            (422, 640), (426, 640), (425, 640), (500, 375),
+        ]
+        for native_h, native_w in real_dims:
+            window_box = (0, 0, native_h, native_w)
+            for anchor_row in (1, 15, 30):
+                for anchor_col in (1, 15, 30):
+                    top, left, bottom, right = ex.t0_t320_anchor_pixel_bounds(window_box, anchor_row, anchor_col, 32, (14, 14))
+                    self.assertTrue(0 <= top < bottom <= native_h, f"row out of range for dims ({native_h},{native_w})")
+                    self.assertTrue(0 <= left < right <= native_w, f"col out of range for dims ({native_h},{native_w})")
+
+    def test_multi_window_image_with_clamped_edge_window(self):
+        windows = ex.compute_canonical_windows(448, 600, (448, 448), (224, 224))
+        for (ordinal, top, left, bottom, right) in windows:
+            box = (top, left, bottom, right)
+            for anchor_row in (1, 30):
+                for anchor_col in (1, 30):
+                    t, l, b, r = ex.t0_t320_anchor_pixel_bounds(box, anchor_row, anchor_col, 32, (14, 14))
+                    self.assertTrue(top <= t < b <= bottom)
+                    self.assertTrue(left <= l < r <= right)
+
+    def test_reads_the_correct_predicted_class_from_a_real_t0_raster(self):
+        # Not just bounds: builds a REAL T0 raster (via semantic_evidence_
+        # t320.generate_t0_t320_targets, the actual production function)
+        # from a controlled, deterministic grid where the top half of
+        # eligible rows favors class 0 and the bottom half favors class 1,
+        # then confirms the point this function selects reads back the
+        # class its own row actually belongs to -- for BOTH a 448 and a
+        # real 407x448 clamped window.
+        import semantic_evidence_e3_adapter as e3a
+        import semantic_evidence_t320 as t320
+
+        for native_h, native_w in ((448, 448), (407, 448)):
+            grid = 32
+            s0 = torch.full((grid * grid, 2), -5.0)
+            for r in range(grid):
+                for c in range(grid):
+                    idx = r * grid + c
+                    s0[idx, 0 if r < 16 else 1] = 5.0  # rows 0-15 favor class 0, 16-31 favor class 1
+            snapshot = e3a.WindowSnapshot(
+                window_id="synthetic:0:ORIGINAL", window_ordinal=0, canvas_h=native_h, canvas_w=native_w,
+                top=0, left=0, bottom=native_h, right=native_w, infer_h=native_h, infer_w=native_w,
+                backbone_input_height=grid * 14, backbone_input_width=grid * 14,
+                grid_h=grid, grid_w=grid, patch_h=14, patch_w=14,
+                dino_features=torch.nn.functional.normalize(torch.rand(grid * grid, FEAT_DIM), dim=1),
+                s0=s0, class_count=2, feature_dim=FEAT_DIM, dtype=s0.dtype, device=s0.device,
+            )
+            targets = t320.generate_t0_t320_targets(
+                [snapshot], [(0, 0, native_h, native_w)], canvas_h=native_h, canvas_w=native_w,
+                ori_h=native_h, ori_w=native_w,
+            )
+            t0_rows = targets["t0"][0].tolist()
+
+            window_box = (0, 0, native_h, native_w)
+            for anchor_row, expected_class in ((5, 0), (25, 1)):
+                bounds = ex.t0_t320_anchor_pixel_bounds(window_box, anchor_row, 15, grid_side=32, patch_hw=(14, 14))
+                footprint = ex.crop_raster(t0_rows, bounds)
+                predicted = ex._center_pixel_class(footprint)
+                self.assertEqual(predicted, expected_class,
+                                  f"native=({native_h},{native_w}) anchor_row={anchor_row}: expected class {expected_class}, got {predicted}")
+
+
+class InterventionCoreNativeBoundsTests(unittest.TestCase):
+    """intervention_core_native_bounds maps the protected core_pixel_
+    bounds' 448-canvas interval to the window's OWN native pixels, before
+    it is used to mask the native, pre-resize crop tensor -- fixing the
+    silent-truncation risk found during geometry-contract review (ordinary
+    tensor/boolean-mask slicing clips out-of-range indices rather than
+    raising, so an unmapped 448-canvas core applied to a smaller native
+    crop would silently manipulate the wrong, truncated region)."""
+
+    def test_exact_identity_at_native_448(self):
+        window_box = (0, 0, 448, 448)
+        bounds = ex.intervention_core_native_bounds(window_box, 15, 15, grid_side=32, patch_hw=(14, 14))
+        self.assertEqual(bounds, (196, 196, 238, 238))
+
+    def test_real_407x448_window_anchor_row_30(self):
+        # The specific case that would silently truncate under plain
+        # tensor slicing: core_pixel_bounds(30,30) = (406,406,448,448) in
+        # 448-canvas space; a native crop of height 407 would silently
+        # clip `mask[..., 406:448, ...]` to a single row under ordinary
+        # slicing if this were applied unmapped.
+        window_box = (0, 0, 407, 448)
+        bounds = ex.intervention_core_native_bounds(window_box, 30, 30, grid_side=32, patch_hw=(14, 14))
+        self.assertEqual(bounds, (369, 406, 407, 448))
+        area = (bounds[2] - bounds[0]) * (bounds[3] - bounds[1])
+        self.assertEqual(area, 1596)
+        self.assertGreater(bounds[2] - bounds[0], 30, "core height must not have silently truncated to ~1px")
+
+    def test_300x200_corrected_areas(self):
+        window_box = (0, 0, 300, 200)
+        c15 = ex.intervention_core_native_bounds(window_box, 15, 15, grid_side=32, patch_hw=(14, 14))
+        self.assertEqual(c15, (131, 88, 159, 106))
+        self.assertEqual((c15[2] - c15[0]) * (c15[3] - c15[1]), 504)
+        c30 = ex.intervention_core_native_bounds(window_box, 30, 30, grid_side=32, patch_hw=(14, 14))
+        self.assertEqual(c30, (272, 181, 300, 200))
+        self.assertEqual((c30[2] - c30[0]) * (c30[3] - c30[1]), 532)
+
+    def test_actual_mask_pixel_count_matches_the_mapped_core_not_a_silent_truncation(self):
+        # Builds a REAL native crop tensor (407 tall, matching the real
+        # failing image) and a REAL intervention view via the protected
+        # ifeat.build_intervention_view, at anchor row=30 (the exact row
+        # whose 448-canvas core would overrun a 407-tall crop under plain
+        # slicing), and inspects the ACTUAL number of pixels the view
+        # changed relative to the original -- proving the mask covers the
+        # full, correctly-mapped 38x42 core (1596px per channel-row), not
+        # a truncated ~1px sliver.
+        import semantic_evidence_intervention_features as ifeat
+
+        native_h, native_w = 407, 448
+        crop = torch.rand(1, 3, native_h, native_w) * 255.0
+        window_box = (0, 0, native_h, native_w)
+        anchor_bounds = ex.intervention_core_native_bounds(window_box, 30, 30, grid_side=32, patch_hw=(14, 14))
+
+        view_crop = ifeat.build_intervention_view("REGION_BLURRED", crop, anchor_bounds)
+        changed = (view_crop != crop).any(dim=1).sum().item()  # count of changed spatial positions
+        top, left, bottom, right = anchor_bounds
+        expected_area = (bottom - top) * (right - left)
+        self.assertEqual(changed, expected_area,
+                          "REGION_BLURRED must change exactly the mapped core's pixel area -- "
+                          "any smaller count means the mask silently truncated")
+        self.assertGreater(bottom - top, 30, "core height must reflect the real 38px-tall mapped core, not ~1px")
+
+
+class ClampedWindowFullPipelineTests(unittest.TestCase):
+    """Runs the full discovery execution path (Phase A then Phase B) at
+    the real failing dimensions, through a non-448 fake image loader --
+    exactly the class of test a fixed-448x448 fake loader would conceal.
+    With the unified contract implemented, BOTH phases now succeed for a
+    clamped window (the prior round's Phase B fail-closed guard is gone,
+    replaced by a real, tested mapping); an unclamped 448x448 image
+    remains completely unaffected."""
+
+    def _non_448_image_loader(self, real_h, real_w, seed=1):
+        def loader(iid):
+            g = torch.Generator().manual_seed(seed)
+            return torch.rand(1, 3, real_h, real_w, generator=g) * 255.0, real_h, real_w
+        return loader
+
+    def _gt_loader(self, real_h, real_w, seed=2):
+        def loader(iid):
+            g = torch.Generator().manual_seed(seed)
+            klass = int(torch.randint(0, CLASS_COUNT, (1,), generator=g).item())
+            return [[klass] * real_w for _ in range(real_h)]
+        return loader
+
+    def test_phase_a_and_b_both_succeed_for_the_real_failing_image(self):
+        real_h, real_w = 407, 448  # the real 000000567197.jpg canonical window size
+        event_log = ex.PhaseEventLog()
+        model, text_embedding = _fake_model_and_text_provider()
+        gt_free = ex._run_phase_a(
+            "000000567197", self._non_448_image_loader(real_h, real_w), _fake_forward_fn, model, text_embedding,
+            (448, 448), (224, 224), (14, 14), event_log,
+        )
+        ex.validate_gt_free_artifact(gt_free)
+        self.assertGreater(len(gt_free["control_features"]["query_correctness"]), 0)
+        for detail in gt_free["control_features"]["propagation_outcome"].values():
+            self.assertIsInstance(detail["t0_predicted_class"], int)
+            self.assertIsInstance(detail["t320_predicted_class"], int)
+            self.assertTrue(0 <= detail["t0_predicted_class"] < CLASS_COUNT)
+            self.assertTrue(0 <= detail["t320_predicted_class"] < CLASS_COUNT)
+
+        gt_label = ex._run_phase_b(gt_free, self._gt_loader(real_h, real_w), "000000567197", event_log)
+        ex.validate_gt_label_artifact(gt_label)
+        self.assertGreater(len(gt_label["query_correctness_labels"]) + len(gt_label["ambiguous_gt_anchor_ids"]), 0)
+
+    def test_phase_a_and_b_both_succeed_unchanged_for_an_unclamped_image(self):
+        # Regression guard: a plain 448x448 image (the historical case)
+        # must be completely unaffected by this repair.
+        gt_free, gt_label = _sample_gt_pair()
+        ex.validate_gt_free_artifact(gt_free)
+        ex.validate_gt_label_artifact(gt_label)
+        self.assertGreater(len(gt_label["query_correctness_labels"]) + len(gt_label["ambiguous_gt_anchor_ids"]), 0)
 
 
 def _sample_gt_pair(image_id="000000567197"):
