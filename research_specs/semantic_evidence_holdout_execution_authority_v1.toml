@@ -1,0 +1,343 @@
+# CANDIDATE execution-authorization successor to
+# semantic_evidence_holdout_evaluation_v1.toml, scoped exclusively to the
+# locked 48-image holdout's Gates B/C/D. Predecessor: semantic_evidence_
+# holdout_evaluation_v1.toml (unchanged, unedited by this document -- its
+# own [authorization.frozen_flags] all remain false).
+#
+# REBOUND to the now-committed, independently-reviewed (PASS) wiring
+# commit 51d2f3e314d0469e9c2f4720dcd93015b8ebcc87. THIS DOCUMENT STILL
+# GRANTS NOTHING TODAY -- but for a DIFFERENT reason than before the
+# rebind. The committed runner's HOLDOUT_EXECUTION_AUTHORITY_TOML_PATH
+# constant now equals this document's own path (the "wiring gap" the
+# original draft described no longer exists), so a committed document at
+# this exact path WOULD now be consulted. This specific document, however,
+# remains deliberately unstaged and uncommitted (see [current_runtime_
+# effect] for the empirical proof), so `_resolve_holdout_execution_grant`
+# denies at its very first git-based check before ever reading anything
+# below this line. Read [identity].status before treating anything below
+# as effective.
+
+[identity]
+created_at_utc = "2026-09-26T18:52:48Z"
+purpose = "Prepare a reviewable, hash-bound CANDIDATE execution-authorization successor to research_specs/semantic_evidence_holdout_evaluation_v1.toml, scoped exclusively to the locked 48-image holdout's Gates B/C/D, per PREPARE_HOLDOUT_EXECUTION_AUTHORITY. This document grants nothing by itself -- see [current_runtime_effect] for why, and [authorization.execution_grant_pending_wiring] for exactly what it would grant once this document itself is committed and independently reviewed in its own right."
+schema_name = "semantic_evidence_holdout_execution_authority_candidate"
+schema_version = "0.2.0-candidate"
+task = "PREPARE_HOLDOUT_EXECUTION_AUTHORITY"
+status = "DRAFT_CANDIDATE_REBOUND_TO_COMMITTED_WIRING_NOT_YET_COMMITTED_ITSELF"
+rebound_at_utc = "2026-09-26T22:59:35Z"
+rebind_task = "COMMIT_HOLDOUT_WIRING_AND_REBIND_SUCCESSOR_DRAFT"
+rebind_note = "The wiring this document originally described as not-yet-implemented ([wiring_requirement] in the pre-rebind draft) has since been implemented, independently reviewed (FINAL_INDEPENDENT_REVERIFY_HOLDOUT_SUCCESSOR_WIRING, PASS, 105 tests + 16 independent adversarial reproductions), and committed as 51d2f3e314d0469e9c2f4720dcd93015b8ebcc87. This rebind updates required_head, all dependency hashes (independently re-derived from that commit's actual committed bytes, not carried forward), and every passage that described the wiring as nonexistent -- see [wiring_status] (replacing the pre-rebind [wiring_requirement]) and [current_runtime_effect]. No schema field the committed resolver actually checks (_SUCCESSOR_EXECUTION_GRANT_REQUIRED_FIELDS, _SUCCESSOR_GATE_C_AUTHORIZATION_REQUIRED_FIELDS, _SUCCESSOR_EXPECTED_DEPENDENCY_PATHS, _HOLDOUT_DEPENDENCY_RECORD_KEYS) was added, removed, or renamed."
+
+##############################################################################
+# 1. PREREQUISITE
+##############################################################################
+
+[prerequisite]
+required_branch = "research/semantic-evidence-interventions"
+required_head = "51d2f3e314d0469e9c2f4720dcd93015b8ebcc87"
+required_head_subject = "fix: bind holdout execution authorization to a verified successor authority"
+required_head_tree = "de5f4c2aa4a79b81341cbfe561da242374dc0527"
+required_head_parent = "623ad8230493a65ba630c79170235e4aaad94827"
+working_tree_must_be_clean_at_freeze_time = true
+
+##############################################################################
+# 2. DEPENDENCY BINDINGS (re-verifiable against
+#    `git show <required_head>:<path> | sha256sum`; every hash below was
+#    independently re-derived from the required_head commit above during
+#    this rebind, not carried forward from the pre-rebind draft)
+##############################################################################
+
+[[dependency]]
+role = "holdout_evaluation_authority"
+path = "research_specs/semantic_evidence_holdout_evaluation_v1.toml"
+sha256 = "cf300aee195c98fc61bd50da0719095fc0bbb1677fd110334ae959dfc6560128"
+must_be_committed_at_required_head = true
+reason = "immediate predecessor authority this document succeeds; its own [authorization.frozen_flags] remain false and unedited by this document -- this document supersedes nothing in it, it only proposes a conditional, separately-wired grant layered on top. Hash unchanged by the rebind -- this file was not touched by the wiring commit."
+
+[[dependency]]
+role = "feasibility_contract"
+path = "research_specs/semantic_evidence_feasibility_v1.toml"
+sha256 = "39edcae9d0927ec50c640576eb6d558e413558d16651f0398594d898bd19826f"
+must_be_committed_at_required_head = true
+reason = "source of [gates.B/C/D], [statistics.bootstrap], and [statistics.minimum_data_requirements] this document restates by reference only, unmodified -- identical hash to the predecessor authority's own binding of this same file. Hash unchanged by the rebind."
+
+[[dependency]]
+role = "holdout_runner_implementation"
+path = "src/semantic_evidence_holdout_evaluate.py"
+sha256 = "d86d7d866d49634425fae9ce3d157967a606d1931f64b7ba0c5dae09cea7b1f6"
+must_be_committed_at_required_head = true
+reason = "the independently-reviewed (PASS) runner this document's conditional grant applies to. CHANGED by the rebind: this hash now reflects the committed wiring commit 51d2f3e3... (was 918d5ec4... at the pre-rebind required_head 623ad82...), independently re-derived via `git show 51d2f3e3...:src/semantic_evidence_holdout_evaluate.py | sha256sum`, not carried forward."
+
+[[dependency]]
+role = "holdout_runner_cli"
+path = "diagnostics/run_semantic_evidence_holdout_evaluation.py"
+sha256 = "9cc58c7816d798332efa55608c4424ce19859e3ee7c6c43c21882923fb53b78b"
+must_be_committed_at_required_head = true
+reason = "the only CLI authorized to invoke the runner's public preflight/execute/verify-result entry points. Hash unchanged by the rebind -- this file was not touched by the wiring commit."
+
+[[dependency]]
+role = "holdout_runner_launcher"
+path = "semantic_evidence_holdout_evaluation_h100.sbatch"
+sha256 = "993b8232a3a290a1fbde409df8c05b49153005ccf8f53d4d284b0c8b3645e6fc"
+must_be_committed_at_required_head = true
+reason = "non-self-submitting H100 launcher; explicit operator sbatch submission remains a separate, later precondition regardless of this document -- see [authorization.future_execution_conditions_carried_forward]. Hash unchanged by the rebind."
+
+[[dependency]]
+role = "holdout_runner_tests"
+path = "tests/test_semantic_evidence_holdout_evaluate.py"
+sha256 = "538df83e568e01861993caae4c4603ee54a777123dba65563e89ffeddad2208c"
+must_be_committed_at_required_head = true
+reason = "synthetic-data-only test suite (105 tests as of the wiring commit) independently confirmed passing against this exact committed implementation, plus 16 additional independent adversarial reproductions in FINAL_INDEPENDENT_REVERIFY_HOLDOUT_SUCCESSOR_WIRING. CHANGED by the rebind: this hash now reflects 51d2f3e3... (was 1c1cb12b... at the pre-rebind required_head, covering only 67 tests), independently re-derived, not carried forward."
+
+[[dependency]]
+role = "holdout_runner_documentation"
+path = "docs/semantic_evidence_holdout_evaluation_run.md"
+sha256 = "ddd946d7c43f4bfae333eb5e2a2052805ac83cdd061b6e01ba2a989acf644d96"
+must_be_committed_at_required_head = true
+reason = "implementation notes describing the reuse boundary, the Gate C definition-vs-execution distinction, and the known Gate D subgroup-derivation limitation this document restates in [gate_d_authorization]. Hash unchanged by the rebind -- this file was not touched by the wiring commit (and is not part of the wiring diff)."
+
+[[dependency]]
+role = "discovery_executor_implementation"
+path = "src/semantic_evidence_discovery_execute.py"
+sha256 = "da31c16aef8c61890ddecb5bd8918861a557fda335ff9550f8fe181e7523af19"
+must_be_committed_at_required_head = true
+reason = "unchanged since the predecessor authority's own binding of this same file at the identical hash; the holdout runner imports its tiling/checkpoint/atomic-install/validator functions directly, never copies them. Hash unchanged by the rebind."
+
+##############################################################################
+# 3. COMPLETED DISCOVERY RESULT (restated, unchanged, from the predecessor
+#    authority; independently re-verified against the real file's current
+#    bytes during this rebind -- see [verification_record])
+##############################################################################
+
+[discovery_result_binding]
+output_root = "/scratch/haree/semantic_evidence_interventions/semantic_evidence_discovery_48_20260926T041409Z"
+discovery_image_count = 48
+discovery_digest = "b63139733c97508ee5b6272069cf466257e829c59f5d73694fd2599d56d2f1a6"
+
+[discovery_result_binding.artifact_hashes]
+discovery_result_json = "9c33afe87cd845691351d7c04e0000d7fb99fd143b4ad5bd4c41b45f3c5d298d"
+
+##############################################################################
+# 4. FROZEN MODEL FITS (restated, unchanged; never refit for holdout
+#    evaluation -- refit_inside_replicates stays false)
+##############################################################################
+
+[frozen_model_fits]
+refit_authorized = false
+source = "discovery_result_binding.discovery_result_json's own model_fit_summaries array (4 entries); unchanged since discovery"
+
+[[frozen_model_fits.fit]]
+task_id = "query_correctness"
+model_id = "model_a"
+fit_digest = "12fb095703a77c6c787b0ae70aba75f54e9431411b35d4b1b45cbdc59eeabe5f"
+
+[[frozen_model_fits.fit]]
+task_id = "query_correctness"
+model_id = "model_b"
+fit_digest = "4c53ac4e6b159fbd95e9b2de8304c7d2938487e233f690911101374380f6820c"
+
+[[frozen_model_fits.fit]]
+task_id = "propagation_outcome"
+model_id = "model_a"
+fit_digest = "df9c7e4c45b859a68d8c218805487b586217dbe944a33543f9a8065a5e55004e"
+
+[[frozen_model_fits.fit]]
+task_id = "propagation_outcome"
+model_id = "model_b"
+fit_digest = "a2e77f62276d5b6bc62624aa3c4006eff4c3fd8f9068c55fd5e182e167f80c4c"
+
+##############################################################################
+# 5. LOCKED HOLDOUT IDENTITY (metadata only; independently recomputed
+#    during this rebind via hv.load_holdout_population/disc.load_discovery_
+#    population against the real committed population manifest -- no
+#    image file or GT annotation file opened)
+##############################################################################
+
+[locked_holdout_identity]
+holdout_image_count = 48
+holdout_digest = "c3931d1e12b62af10839d693cac29bac25b166e448265c54b066cff5b8110592"
+discovery_digest_cross_check = "b63139733c97508ee5b6272069cf466257e829c59f5d73694fd2599d56d2f1a6"
+overlap_with_discovery_count = 0
+verification_method = "hv.load_holdout_population(REPO_ROOT) and disc.load_discovery_population(REPO_ROOT) re-run against the real committed population manifest during both the original preparation and this rebind; both counts, both digests, and the zero-overlap check reproduced identically both times, independent of the predecessor authority's own stated values."
+
+##############################################################################
+# 6. GATE B (query_correctness information) -- rule unmodified, restated
+#    by reference; population limits and INCONCLUSIVE disposition preserved
+##############################################################################
+
+[gate_b_authorization]
+rule_reference = "[gates.B] in semantic_evidence_feasibility_v1.toml, unmodified"
+min_auroc_improvement_holdout = 0.03
+paired_bootstrap_95_lower_bound_required = "> 0"
+average_precision_difference_requirement = "not negative"
+min_eligible_rows_holdout = 500
+both_classes_required = true
+below_minimum_result = "INCONCLUSIVE"
+execution_intended_by_this_document = true
+execution_intended_note = "Not yet effective -- this document itself remains uncommitted; see [current_runtime_effect]."
+
+##############################################################################
+# 7. GATE C (propagation_outcome information) -- scientific-definition
+#    resolution inherited unchanged from the predecessor authority; this
+#    section adds only an execution INTENT layered on top, never touching
+#    the predecessor's own execution_authorized_by_this_document=false
+##############################################################################
+
+[gate_c_authorization]
+rule_reference = "[gates.C] in semantic_evidence_feasibility_v1.toml, unmodified"
+computable_under_this_contract = true
+computable_basis = "unchanged from the predecessor authority's own [gate_c_authorization] -- the T320/propagation_outcome scientific-definition binding is not restated a second time here; it is inherited via this document's own hash-pin of the predecessor authority (see [[dependency]] role = 'holdout_evaluation_authority')"
+min_auroc_improvement_holdout = 0.03
+paired_bootstrap_95_lower_bound_required = "> 0"
+average_precision_difference_requirement = "not negative"
+min_beneficial_dominant_holdout_propagation_outcome_rows = 100
+min_harmful_dominant_holdout_propagation_outcome_rows = 100
+below_minimum_result = "INCONCLUSIVE"
+execution_intended_by_this_document = true
+execution_intended_note = "Distinct from research_specs/semantic_evidence_holdout_evaluation_v1.toml's own [gate_c_authorization].execution_authorized_by_this_document, which remains false and is never edited by this document. The committed resolver takes Gate C's grant SOLELY from this field (via this document's own gate_c_computation_execution_intended, once committed) -- never OR'd with the predecessor's field; confirmed by GateCIsolationSoleSourceTests in the committed wiring. Not yet effective -- this document itself remains uncommitted; see [current_runtime_effect]."
+
+##############################################################################
+# 8. GATE D (subgroup sanity) -- rule unmodified; known subgroup-derivation
+#    limitation restated honestly, not concealed
+##############################################################################
+
+[gate_d_authorization]
+rule_reference = "[gates.D] in semantic_evidence_feasibility_v1.toml, unmodified"
+subgroups = ["predicted_boundary_vs_interior", "thing_vs_stuff_gt_category", "low_vs_high_unary_margin"]
+min_subgroup_size_for_check = 100
+max_negative_auroc_difference = -0.01
+small_subgroup_handling = "unchanged: a subgroup with fewer than 100 eligible records is outside this rule's scope -- not evaluated, not separately marked pass/fail/inconclusive"
+known_implementation_limitation = "Per docs/semantic_evidence_holdout_evaluation_run.md's own 'Known limitation' section, _run_holdout_evaluation_core does not yet derive real subgroup membership from persisted rows -- it currently passes an empty subgroup list, which correctly yields NO_QUALIFYING_SUBGROUPS, never an implied PASS. This document does not authorize or claim that subgroup derivation is implemented; it only authorizes running the already-implemented compute_gate_d function, which will honestly report NO_QUALIFYING_SUBGROUPS until that separately-scoped task lands. Unchanged by the wiring commit -- the wiring diff touched only authorization/exception-handling, never gate computation."
+execution_intended_by_this_document = true
+execution_intended_note = "Not yet effective -- this document itself remains uncommitted; see [current_runtime_effect]."
+
+##############################################################################
+# 9. BOOTSTRAP PROCEDURE -- preserved by reference, unmodified
+##############################################################################
+
+[bootstrap_procedure]
+rule_reference = "[statistics.bootstrap] in semantic_evidence_feasibility_v1.toml, unmodified"
+resample_unit = "locked_holdout image (not individual row); resampling an image carries every eligible row belonging to that image, for BOTH tasks, together"
+replicates = 10000
+seed = 0
+interval_type = "percentile"
+confidence_level = 0.95
+paired = true
+refit_inside_replicates = false
+min_valid_replicate_fraction = 0.90
+
+##############################################################################
+# 10. MINIMUM DATA REQUIREMENTS -- preserved verbatim; not lowered
+##############################################################################
+
+[minimum_data_requirements]
+rule_reference = "[statistics.minimum_data_requirements] in semantic_evidence_feasibility_v1.toml, unmodified"
+min_eligible_query_correctness_rows_holdout = 500
+both_query_correctness_classes_required_both_partitions = true
+min_beneficial_dominant_holdout_propagation_outcome_rows = 100
+min_harmful_dominant_holdout_propagation_outcome_rows = 100
+below_minimum_result = "INCONCLUSIVE"
+population_enlargement_after_shortfall_authorized = false
+
+##############################################################################
+# 11. AUTHORIZATION -- exactly what this document intends to grant, and
+#     exactly what it withholds
+##############################################################################
+
+[authorization.inherited_from_predecessors]
+combined_96_image_execution_authorized = false
+full_5000_image_execution_authorized = false
+training_authorized = false
+this_document_grants_no_execution_authorization_beyond_the_locked_48_image_holdout = true
+
+[authorization.current_task]
+authority_preparation_authorized = true
+holdout_preflight_in_this_task = false
+holdout_image_access_in_this_task = false
+holdout_gt_access_in_this_task = false
+holdout_feature_computation_in_this_task = false
+model_refitting_in_this_task = false
+model_construction_in_this_task = false
+cuda_initialization_in_this_task = false
+gpu_submission_in_this_task = false
+job_submission_in_this_task = false
+
+[authorization.execution_grant_pending_wiring]
+description = "Exactly what this document intends to grant, once -- and only once -- this document itself is committed and independently reviewed in its own right. As of this rebind, none of these fields have any runtime effect -- see [current_runtime_effect]."
+holdout_execution_intended = true
+holdout_gt_access_intended = true
+gate_b_computation_execution_intended = true
+gate_c_computation_execution_intended = true
+gate_d_computation_execution_intended = true
+combined_96_image_execution_intended = false
+combined_96_image_note = "Explicitly withheld -- this document's scope is the locked 48-image holdout only, per [locked_holdout_identity]."
+full_5000_image_execution_intended = false
+full_5000_image_note = "Explicitly withheld -- no path in this document or the runner it binds touches the 5000-image validation set."
+population_enlargement_intended = false
+refit_intended = false
+refit_note = "Explicitly withheld -- [frozen_model_fits].refit_authorized stays false; the four coefficients are applied exactly as frozen, never re-estimated."
+training_intended = false
+scientific_kernel_modification_intended = false
+accuracy_or_deployment_claim_intended = false
+accuracy_or_deployment_claim_note = "This document intends to authorize running the already-frozen Gates B/C/D computation and reporting whatever disposition (PASS/FAIL/INCONCLUSIVE/NO_QUALIFYING_SUBGROUPS) results. It does not itself authorize or constitute any accuracy, performance, or deployment claim beyond exactly what [gates.outcome] in semantic_evidence_feasibility_v1.toml already defines."
+
+[authorization.future_execution_conditions_carried_forward]
+requires_this_document_independently_verified_pass = "PENDING -- not yet performed"
+requires_this_document_committed = false
+requires_wiring_change_implemented = true
+requires_wiring_change_committed = true
+requires_wiring_change_independently_verified_pass = "DONE -- FINAL_INDEPENDENT_REVERIFY_HOLDOUT_SUCCESSOR_WIRING, PASS, prior to the wiring commit 51d2f3e314d0469e9c2f4720dcd93015b8ebcc87"
+requires_committed_head_holdout_readiness_pass = "PENDING -- not yet performed"
+requires_operator_explicit_job_submission = "PENDING -- not yet performed"
+
+##############################################################################
+# 12. CURRENT RUNTIME EFFECT (read this before anything above)
+##############################################################################
+
+[current_runtime_effect]
+runner_reads_this_exact_path = true
+evidence = "src/semantic_evidence_holdout_evaluate.py's HOLDOUT_EXECUTION_AUTHORITY_TOML_PATH constant, as committed at 51d2f3e314d0469e9c2f4720dcd93015b8ebcc87, equals \"research_specs/semantic_evidence_holdout_execution_authority_v1.toml\" -- this document's own path. Unlike the pre-rebind draft, the runner no longer ignores this path: `_resolve_holdout_execution_grant` will read and evaluate a document committed at this exact path."
+this_document_is_still_uncommitted = true
+demonstration = "This exact file was placed, unstaged, at its own (now-consulted) candidate path in the same working tree as the committed wiring. hv._resolve_holdout_execution_grant(REPO_ROOT) was called and returned holdout_execution_authorized=False, denial_reason='successor authority is not committed at current HEAD' -- the FIRST git-based check in the resolver, before any dependency hash, schema, or grant field in this document is ever read. hv.preflight_holdout and hv.run_holdout_evaluation were then called and both still raised HoldoutEvaluationError with the same authorization-denial message -- see the accompanying task report for the exact reproduction command and output."
+predecessor_flags_unedited = "research_specs/semantic_evidence_holdout_evaluation_v1.toml at sha256 cf300aee195c98fc61bd50da0719095fc0bbb1677fd110334ae959dfc6560128 (unchanged) still declares [authorization.frozen_flags].holdout_execution_authorized = false and [gate_c_authorization].execution_authorized_by_this_document = false; this document does not and cannot edit that file, and the committed resolver never reads that field for its decision regardless (see the wiring commit's own docstrings)."
+conclusion = "As of this rebind, holdout preflight and execution remain exactly as unauthorized as before this file was rebound -- not because the runner ignores this file's PATH (it no longer does), but because this SPECIFIC document has not itself been committed. This is a reviewable CANDIDATE only -- see [identity].status."
+
+##############################################################################
+# 13. WIRING STATUS (replaces the pre-rebind [wiring_requirement]: the
+#     blocker it described has been implemented, tested, independently
+#     reviewed, and committed)
+##############################################################################
+
+[wiring_status]
+implemented = true
+committed = true
+commit = "51d2f3e314d0469e9c2f4720dcd93015b8ebcc87"
+resolver_function = "_resolve_holdout_execution_grant(repo_root) in src/semantic_evidence_holdout_evaluate.py, called from both preflight_holdout and run_holdout_evaluation as their first action"
+summary = "The resolver independently re-verifies, for a document at HOLDOUT_EXECUTION_AUTHORITY_TOML_PATH: existence; committed-at-current-HEAD; live-disk-bytes-vs-committed-blob for the successor itself; required_branch/required_head ancestry; for each of the 8 fixed dependency roles (this document's own [[dependency]] table above) -- exact path, must_be_committed_at_required_head=true, hash at required_head, zero drift between required_head and current HEAD, and the LIVE on-disk bytes also matching required_head (closing a gap where an uncommitted edit to a bound dependency, including the runner's own source file, would otherwise go undetected); closed schema on [authorization.execution_grant_pending_wiring] and [gate_c_authorization]; every withheld-permission field forced exactly false. Gate C's own grant is taken solely from this document's gate_c_computation_execution_intended and [gate_c_authorization].execution_intended_by_this_document -- never implied by the general holdout grant, and never read from the predecessor authority's own field."
+independent_review = "FINAL_INDEPENDENT_REVERIFY_HOLDOUT_SUCCESSOR_WIRING: PASS, 105 tests, 16 additional from-scratch independent adversarial reproductions, performed on the unstaged diff BEFORE this commit was made."
+still_required_before_this_document_could_authorize_anything = [
+    "independent review of THIS document (the rebound candidate itself)",
+    "this document committed",
+    "a dedicated committed-head holdout-readiness check",
+    "explicit operator sbatch submission",
+]
+
+##############################################################################
+# 14. VERIFICATION RECORD
+##############################################################################
+
+[verification_record]
+existing_generic_validator_reused = false
+existing_generic_validator_note = "src/semantic_evidence_holdout_evaluate.py's own verify_dependency_hashes_holdout is hard-coded to the PREDECESSOR authority's fixed 8-role dependency set (_HOLDOUT_EXPECTED_DEPENDENCY_ROLES) and does not recognize this document's own, different dependency roles; running it against this file would incorrectly reject it as a role-set mismatch, not validate it. No other validator in this repository is generic across authority-document schemas, so none was run against this file. All hashes, ancestry, digests, and non-widening authorization below were verified independently and manually, both during original preparation and again during this rebind: tomllib-compatible manual parse, `git show <required_head>:<path> | sha256sum` per dependency (re-run fresh against the new required_head, not carried forward), `git merge-base --is-ancestor` for ancestry, direct sha256 of the real discovery_result.json fixture, and a live re-run of hv.load_holdout_population/disc.load_discovery_population against the real committed population manifest."
+rebind_re_derivation = "All 8 dependency hashes were independently recomputed via `git show 51d2f3e314d0469e9c2f4720dcd93015b8ebcc87:<path> | sha256sum` during this rebind. 6 of 8 (holdout_evaluation_authority, feasibility_contract, holdout_runner_cli, holdout_runner_launcher, holdout_runner_documentation, discovery_executor_implementation) were confirmed BYTE-IDENTICAL to their pre-rebind values -- these files were not touched by the wiring commit. 2 of 8 (holdout_runner_implementation, holdout_runner_tests) changed, matching the wiring commit's own two changed files exactly."
+t320_geometry_population_manifest_bindings = "Inherited unchanged via the holdout_evaluation_authority dependency's own hash (cf300aee195c98fc61bd50da0719095fc0bbb1677fd110334ae959dfc6560128); not independently re-verified a second time in this document, since any tampering with the predecessor's own t320/geometry/population-manifest bindings would change that hash and be caught by this document's own dependency check."
+
+##############################################################################
+# 15. CLOSURE
+##############################################################################
+
+[closure]
+complete = false
+final = false
+self_referential_hash_created = false
+note = "This is a DRAFT CANDIDATE, rebound to the now-committed wiring but still deliberately left unstaged and uncommitted itself, per COMMIT_HOLDOUT_WIRING_AND_REBIND_SUCCESSOR_DRAFT. It has zero runtime effect on the committed holdout runner today -- see [current_runtime_effect]. Before this document (or any revision of it) could ever actually authorize anything, in order: (1) independent review of this document itself -- NOT YET PERFORMED, the next task; (2) the wiring change -- DONE, see [wiring_status]; (3) this document itself committed -- NOT YET DONE; (4) a dedicated committed-head holdout-readiness check -- NOT YET PERFORMED; (5) explicit operator sbatch submission -- NOT YET PERFORMED. This task performed only the rebind (hash/metadata re-derivation and wording correction); it did not perform steps 1, 3, 4, or 5."
